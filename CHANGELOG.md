@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-03
+
 ### Fixed
 
 - The 0.1.0 tarball on npm was published by hand from a commit that predates the notice that claudep is independent and not affiliated with Anthropic. This release is the same code with the notice in the README, in `claudep help` and in the package description.
@@ -29,5 +31,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
-[Unreleased]: https://github.com/bordoni/claudep/compare/0.1.0...HEAD
+[Unreleased]: https://github.com/bordoni/claudep/compare/0.1.1...HEAD
+[0.1.1]: https://github.com/bordoni/claudep/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/bordoni/claudep/releases/tag/0.1.0

@@ -1,6 +1,6 @@
 {
   "name": "@bordoni/claudep",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Unofficial, not affiliated with Anthropic. Run Claude Code under separate accounts on one machine (work + personal) with isolated logins and shared config.",
   "type": "module",
   "license": "MIT",
