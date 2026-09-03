@@ -1,0 +1,14 @@
+{
+  "name": "claudep",
+  "version": "0.1.0",
+  "description": "Run Claude Code under separate accounts on one machine (work + personal) with isolated logins and shared config.",
+  "type": "module",
+  "bin": {
+    "claudep": "./claudep.ts"
+  },
+  "repository": "github:bordoni/claudep",
+  "license": "MIT",
+  "engines": {
+    "bun": ">=1.1"
+  }
+}
