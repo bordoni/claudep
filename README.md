@@ -62,6 +62,10 @@ The shared list is an explicit allowlist, so account-specific files can never le
 - Set `CLAUDE_PROFILES_DIR` to move the profiles root. Keep it out of iCloud or Dropbox; `.claude.json` is rewritten constantly and sync tools create conflict copies.
 - Never put `CLAUDE_CONFIG_DIR` in a `settings.json` `env` block. Claude Code detects that mismatch and disables features.
 
+## Contributing
+
+Working on the script? Start with [`AGENTS.md`](./AGENTS.md); the detail lives in [`.ref/`](./.ref/).
+
 ## License
 
 MIT

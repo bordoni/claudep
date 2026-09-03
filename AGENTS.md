@@ -1,0 +1,60 @@
+# claudep — working agreement
+
+This is the source of truth for anyone (human or agent) changing this repository. `CLAUDE.md` points here, and the detailed material lives in [`.ref/`](./.ref/). Read this file end to end; fetch `.ref/` files on demand using the index below.
+
+## What this is
+
+A single-file bun CLI, [`claudep.ts`](./claudep.ts), that runs Claude Code under separate accounts on one machine. It creates named profiles under `~/.claudep/<name>`, points Claude Code at them via `CLAUDE_CONFIG_DIR`, symlinks shared config back into `~/.claude`, and leaves credentials and account state per profile.
+
+- Zero runtime dependencies. Strict TypeScript, executed directly by bun (`#!/usr/bin/env bun`). No build step.
+- macOS-first: the Keychain check is darwin-only and degrades to "skipped" elsewhere; everything else is portable.
+- Installed either by symlinking `claudep.ts` onto PATH (how the author runs it: `~/.dotfiles/bin/claudep`) or with `bun install -g github:bordoni/claudep` (the `bin` entry in `package.json`).
+- `~/.claude` is never modified. It is the implicit `default` profile.
+
+## Reference index
+
+| File | Read it when |
+|---|---|
+| [`.ref/claude-code-internals.md`](./.ref/claude-code-internals.md) | You are debugging login isolation, a new Claude Code version moved something, or you need to re-verify a claim against the binary. |
+| [`.ref/shared-vs-private.md`](./.ref/shared-vs-private.md) | You are changing `SHARED_FILES`, `SHARED_DIRS`, `KNOWN_PRIVATE` or `SEED_KEYS`, or `claudep doctor` reports an unclassified file. |
+| [`.ref/testing.md`](./.ref/testing.md) | You changed `claudep.ts`. Contains the typecheck recipe and the smoke cycle; there is no test suite. |
+| [`.ref/design-decisions.md`](./.ref/design-decisions.md) | You are tempted to restructure profiles, rename paths, or add a feature that was already considered. |
+
+## Commands
+
+```bash
+bun claudep.ts help                 # run from the checkout without installing
+claudep list                        # every profile and who it is logged in as
+claudep doctor                      # symlink, keychain and classification check for all profiles
+claudep init smoke --no-login       # throwaway profile for testing; remove with: claudep rm smoke --yes --keep-login
+```
+
+Typecheck before committing (full recipe in `.ref/testing.md`):
+
+```bash
+mkdir -p /tmp/claudep-tc && cd /tmp/claudep-tc && bun add -d bun-types typescript >/dev/null \
+  && cp ~/workspace/claudep/claudep.ts . \
+  && printf '{"compilerOptions":{"strict":true,"noUncheckedIndexedAccess":true,"target":"esnext","module":"esnext","moduleResolution":"bundler","skipLibCheck":true,"noEmit":true,"types":["bun-types"]},"files":["claudep.ts"]}' > tsconfig.json \
+  && bunx tsc -p tsconfig.json && echo OK
+```
+
+## Rules
+
+1. Keep it one file. New behaviour goes into `claudep.ts`; documentation goes into `.ref/`.
+2. Every shared item is an explicit allowlist entry with a reason recorded in `.ref/shared-vs-private.md`. Unknown files stay private by default.
+3. A profile name must match `NAME_RE` and must not be in `RESERVED`; both live near the top of `claudep.ts`.
+4. The string handed to `CLAUDE_CONFIG_DIR` must be canonical (absolute, no trailing slash, NFC) because Claude Code hashes it for the Keychain service name. Always go through `profileDir()` / `canon()`.
+5. Any change to what `init` links or seeds must be reflected in `doctor`, which is the user's only way to see drift.
+6. Update `README.md` (user-facing) and the `help()` text together when a command or flag changes.
+
+## Never
+
+1. **Never add a dependency.** Zero `node_modules` is the whole install story. Prefer `Bun.*` APIs; use `node:*` only where bun has no equivalent (symlinks, lstat).
+2. **Never write Python** or shell-heavy helpers. Scripts and tooling are bun + TypeScript, matching the author's global rules.
+3. **Never print, log, or store credential material.** Keychain checks use `security find-generic-password` for its exit code only, with stdout and stderr discarded.
+4. **Never overwrite a real file or directory inside a profile.** `link()` refuses and reports; keep that behaviour.
+5. **Never touch `~/.claude` from `rm`** or any other command. `rm` unlinks symlinks inside the profile dir and refuses paths outside the profiles root.
+6. **Never turn the shared allowlist into a denylist.** Org-pushed files such as `remote-settings.json` must not be able to leak across accounts because a future Claude Code version added something.
+7. **Never write alias shims into this repo.** They go next to the `claudep` found on PATH (`aliasDir()`), because `Bun.main` resolves symlinks and would otherwise point into the checkout.
+8. **Never commit anything from `~/.claudep`** or reference a specific person's profile in code.
+9. **Never suggest putting `CLAUDE_CONFIG_DIR` in a settings `env` block.** Claude Code detects the mismatch and disables features.
