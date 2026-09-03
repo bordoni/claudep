@@ -21,9 +21,11 @@ import {
   lstatSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   readlinkSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -54,6 +56,11 @@ export type Layout = {
   home: string;
   /** CLAUDE_CONFIG_DIR as set in the caller's shell, if any. */
   callerConfigDir: string | undefined;
+  /** True when the caller's CLAUDE_CONFIG_DIR points inside the profiles root,
+   *  i.e. a claudep profile is active in this shell (pinned by hand or by the hook). */
+  managed: boolean;
+  /** The active profile name when `managed` and the dir is a valid profile. */
+  activeProfile: string | undefined;
   /** The base config dir every profile links back into. */
   base: string;
   /** Global state file for the base. Without CLAUDE_CONFIG_DIR it lives at
@@ -65,14 +72,89 @@ export type Layout = {
 export function layout(env: Env = process.env): Layout {
   const home = homeDir(env);
   const callerConfigDir = env.CLAUDE_CONFIG_DIR;
-  const base = canon(callerConfigDir ?? join(home, ".claude"), home);
+  const profilesRoot = canon(env.CLAUDE_PROFILES_DIR ?? join(home, ".claudep"), home);
+  const callerCanon = callerConfigDir !== undefined ? canon(callerConfigDir, home) : undefined;
+  const managed = callerCanon !== undefined && callerCanon.startsWith(`${profilesRoot}/`);
+  const tail = managed && callerCanon !== undefined ? callerCanon.slice(profilesRoot.length + 1) : undefined;
+  const activeProfile = tail !== undefined && NAME_RE.test(tail) ? tail : undefined;
+  // A custom CLAUDE_CONFIG_DIR outside the profiles root is the user's real base.
+  // One inside it is a claudep profile and must never be treated as the base.
+  const customBase = callerCanon !== undefined && !managed;
+  const base = customBase && callerCanon !== undefined ? callerCanon : canon(join(home, ".claude"), home);
   return {
     home,
     callerConfigDir,
+    managed,
+    activeProfile,
     base,
-    baseGlobalJson: callerConfigDir ? join(base, ".claude.json") : join(home, ".claude.json"),
-    profilesRoot: canon(env.CLAUDE_PROFILES_DIR ?? join(home, ".claudep"), home),
+    baseGlobalJson: customBase ? join(base, ".claude.json") : join(home, ".claude.json"),
+    profilesRoot,
   };
+}
+
+/** The directory-pin file. A repo (or any directory tree) that contains one
+ *  names the profile every hooked shell should use inside that tree. */
+export const PIN_FILE = ".claudep";
+
+export type Pin = { name: string; file: string; dir: string };
+
+/** First non-empty, non-comment line of a pin file, trimmed. Empty means "no pin". */
+export function readPinName(file: string): string {
+  for (const raw of readFileSync(file, "utf8").split("\n")) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    return line;
+  }
+  return "";
+}
+
+/** Nearest PIN_FILE walking upward from startDir. Only regular files count
+ *  (~/.claudep is a directory and is skipped). The nearest file wins even when
+ *  it is empty, which is how a subtree cancels a parent pin. The shell hook
+ *  from `shell-init` mirrors this exactly. */
+export function resolvePin(startDir: string): Pin | undefined {
+  let dir = resolve(startDir);
+  for (;;) {
+    const file = join(dir, PIN_FILE);
+    let isFile = false;
+    try {
+      isFile = statSync(file).isFile();
+    } catch {
+      isFile = false;
+    }
+    if (isFile) return { name: readPinName(file), file, dir };
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+export type Current = {
+  kind: "base" | "profile" | "custom";
+  name: string | undefined;
+  dir: string;
+  setBy: "none" | "hook" | "manual";
+};
+
+/** What this shell is running Claude Code as, and how it got that way. */
+export function currentProfile(L: Layout, env: Env = process.env): Current {
+  const cfg = env.CLAUDE_CONFIG_DIR;
+  if (!cfg) return { kind: "base", name: undefined, dir: L.base, setBy: "none" };
+  const dir = canon(cfg, L.home);
+  const auto = env.CLAUDEP_AUTO;
+  const setBy = auto !== undefined && canon(auto, L.home) === dir ? "hook" : "manual";
+  if (L.activeProfile !== undefined) return { kind: "profile", name: L.activeProfile, dir, setBy };
+  return { kind: "custom", name: undefined, dir, setBy };
+}
+
+/** Version from the package.json next to this file. */
+export function version(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(join(import.meta.dir, "package.json"), "utf8")) as { version?: unknown };
+    return typeof pkg.version === "string" ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 /** Top-level base items symlinked into every profile (only if they exist). */
@@ -149,6 +231,11 @@ export const RESERVED = new Set([
   "remove",
   "alias",
   "help",
+  "current",
+  "local",
+  "resolve",
+  "shell-init",
+  "version",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -293,9 +380,25 @@ export function envFor(dir: string | undefined, env: Env = process.env): Env {
   return out;
 }
 
-async function execClaude(dir: string | undefined, args: string[]): Promise<never> {
+/** Environment for running claude against the base. If a claudep profile is
+ *  active in this shell (hook or manual pin), strip it so "default" really is
+ *  the base and not whatever the current directory pinned. */
+export function baseEnv(L: Layout, env: Env = process.env): Env {
+  const out: Env = { ...env };
+  if (L.managed) {
+    delete out.CLAUDE_CONFIG_DIR;
+    delete out.CLAUDEP_AUTO;
+  }
+  return out;
+}
+
+function claudeEnv(L: Layout, dir: string | undefined): Env {
+  return dir === undefined ? baseEnv(L) : envFor(dir);
+}
+
+async function execClaude(L: Layout, dir: string | undefined, args: string[]): Promise<never> {
   const proc = Bun.spawn([claudeBin(), ...args], {
-    env: envFor(dir),
+    env: claudeEnv(L, dir),
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
@@ -309,9 +412,13 @@ async function execClaude(dir: string | undefined, args: string[]): Promise<neve
   process.exit(proc.exitCode ?? 1);
 }
 
-async function captureClaude(dir: string | undefined, args: string[]): Promise<{ code: number; out: string }> {
+async function captureClaude(
+  L: Layout,
+  dir: string | undefined,
+  args: string[],
+): Promise<{ code: number; out: string }> {
   const proc = Bun.spawn([claudeBin(), ...args], {
-    env: envFor(dir),
+    env: claudeEnv(L, dir),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -347,8 +454,8 @@ export function parseAuthStatus(text: string): AuthStatus {
   }
 }
 
-async function authStatus(dir: string | undefined): Promise<AuthStatus> {
-  const { out } = await captureClaude(dir, ["auth", "status", "--json"]);
+async function authStatus(L: Layout, dir: string | undefined): Promise<AuthStatus> {
+  const { out } = await captureClaude(L, dir, ["auth", "status", "--json"]);
   return parseAuthStatus(out);
 }
 
@@ -454,7 +561,7 @@ async function cmdInit(L: Layout, args: string[]): Promise<void> {
   const email = f.strs.get("--email");
   if (email !== undefined) loginArgs.push("--email", email);
   console.log(`\n${c.bold("Logging in")} to profile ${name} …`);
-  await execClaude(dir, loginArgs);
+  await execClaude(L, dir, loginArgs);
 }
 
 function scriptDir(): string {
@@ -511,10 +618,10 @@ async function cmdRun(L: Layout, args: string[]): Promise<never> {
   if (!name) die("usage: claudep run <name> [claude args…]");
   const rest = args.slice(1);
   if (rest[0] === "--") rest.shift();
-  if (name === "default" || name === "base") return execClaude(undefined, rest);
+  if (name === "default" || name === "base") return execClaude(L, undefined, rest);
   const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
-  return execClaude(dir, rest);
+  return execClaude(L, dir, rest);
 }
 
 export type Row = { name: string; dir: string; status: AuthStatus };
@@ -523,7 +630,7 @@ async function collectRows(L: Layout, names: string[]): Promise<Row[]> {
   return Promise.all(
     names.map(async (name) => {
       const dir = name === "default" ? L.base : profileDir(L, name);
-      return { name, dir, status: await authStatus(name === "default" ? undefined : dir) };
+      return { name, dir, status: await authStatus(L, name === "default" ? undefined : dir) };
     }),
   );
 }
@@ -555,6 +662,8 @@ async function cmdList(L: Layout): Promise<void> {
   const names = ["default", ...listProfileNames(L)];
   printTable(await collectRows(L, names), L.home);
   if (names.length === 1) console.log(c.dim("\nNo profiles yet. Create one: claudep init <name>"));
+  const cur = currentProfile(L);
+  if (cur.kind !== "base") console.log(c.dim(`\nactive in this shell: ${describeCurrent(cur)}`));
 }
 
 async function cmdStatus(L: Layout, args: string[]): Promise<void> {
@@ -570,20 +679,158 @@ async function cmdStatus(L: Layout, args: string[]): Promise<void> {
 
 function cmdEnv(L: Layout, args: string[]): void {
   const name = args[0];
-  if (!name) die('usage: eval "$(claudep env <name>)"');
+  if (!name) die('usage: eval "$(claudep env <name>)"   or   eval "$(claudep env --unset)"');
+  if (name === "--unset") {
+    console.log("unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO");
+    return;
+  }
   const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist`);
+  // Clearing CLAUDEP_AUTO turns this into a manual pin the shell hook will not touch.
   console.log(`export CLAUDE_CONFIG_DIR='${dir.replace(/'/g, `'\\''`)}'`);
+  console.log("unset CLAUDEP_AUTO");
+}
+
+function describeCurrent(cur: Current): string {
+  const label = cur.kind === "profile" ? (cur.name ?? "?") : cur.kind === "custom" ? "custom" : "default";
+  const how = cur.setBy === "hook" ? "shell hook" : cur.setBy === "manual" ? "manual pin" : "nothing pinned";
+  return `${label} (${how})`;
+}
+
+function shortHome(p: string, home: string): string {
+  return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+}
+
+function cmdCurrent(L: Layout, args: string[]): void {
+  const f = parseFlags(args, ["--json"], []);
+  const cur = currentProfile(L);
+  const pin = resolvePin(process.cwd());
+  if (f.bools.has("--json")) {
+    console.log(JSON.stringify({ ...cur, pin: pin ?? null }, null, 2));
+    return;
+  }
+  const label = cur.kind === "profile" ? (cur.name ?? "?") : cur.kind === "custom" ? "custom" : "default";
+  console.log(`${c.bold(label)}  ${c.dim(shortHome(cur.dir, L.home))}`);
+  if (cur.setBy === "hook")
+    console.log(`set by: shell hook${pin ? ` (${PIN_FILE} in ${shortHome(pin.dir, L.home)})` : ""}`);
+  else if (cur.setBy === "manual") console.log("set by: manual pin (claudep env or export CLAUDE_CONFIG_DIR)");
+  else console.log("set by: nothing pinned; this is ~/.claude");
+  if (cur.kind === "custom") console.log(c.dim("CLAUDE_CONFIG_DIR points outside the claudep profiles root"));
+  if (pin && pin.name !== "" && pin.name !== cur.name) {
+    console.log(
+      c.yellow(
+        `pinned here: ${pin.name} (${shortHome(pin.file, L.home)}), but this shell is on ${label}. Load the hook: eval "$(claudep shell-init zsh)"`,
+      ),
+    );
+  }
+}
+
+function cmdResolve(L: Layout, args: string[]): void {
+  const f = parseFlags(args, ["--json"], []);
+  const start = f.rest[0] ?? process.cwd();
+  const pin = resolvePin(start);
+  if (!pin || pin.name === "") process.exit(1);
+  if (!NAME_RE.test(pin.name)) die(`${pin.file} names an invalid profile "${pin.name}"`);
+  if (f.bools.has("--json"))
+    console.log(JSON.stringify({ ...pin, dir: pin.dir, profileDir: join(L.profilesRoot, pin.name) }, null, 2));
+  else console.log(pin.name);
+}
+
+function cmdLocal(L: Layout, args: string[]): void {
+  const f = parseFlags(args, ["--remove", "--force"], []);
+  const file = join(process.cwd(), PIN_FILE);
+  if (f.bools.has("--remove")) {
+    if (!existsSync(file)) die(`no ${PIN_FILE} in ${process.cwd()}`);
+    rmSync(file);
+    ok(`removed ${file}`);
+    return;
+  }
+  const name = f.rest[0];
+  if (!name) {
+    const pin = resolvePin(process.cwd());
+    if (!pin || pin.name === "") {
+      console.log(`no ${PIN_FILE} pin from ${shortHome(process.cwd(), L.home)} upward`);
+      process.exit(1);
+    }
+    console.log(`${pin.name}  ${c.dim(shortHome(pin.file, L.home))}`);
+    return;
+  }
+  if (!NAME_RE.test(name)) die(`invalid profile name "${name}"`);
+  if (!f.bools.has("--force") && !profileExists(L, name))
+    die(`profile "${name}" does not exist. Run: claudep init ${name}   (or pass --force to pin it anyway)`);
+  writeFileSync(file, `${name}\n`);
+  ok(`${shortHome(file, L.home)} pins this directory tree to ${c.bold(name)}`);
+  if (!process.env.CLAUDEP_AUTO && !process.env.CLAUDE_CONFIG_DIR)
+    console.log(c.dim(`Shells load pins through the hook: eval "$(claudep shell-init zsh)"`));
+}
+
+/** The shell hook. Pure parameter expansion and builtins: it runs on every
+ *  directory change (zsh chpwd) or prompt (bash PROMPT_COMMAND), so no
+ *  subprocess is allowed here. Logic mirrors resolvePin(). */
+export function shellInit(shell: "zsh" | "bash", profilesRoot: string): string {
+  const q = profilesRoot.replace(/'/g, `'\\''`);
+  const core = `# claudep shell hook. Load it from your rc file:  eval "$(claudep shell-init ${shell})"
+_claudep_root='${q}'
+_claudep_auto() {
+  [ "$PWD" = "\${_claudep_last_pwd:-}" ] && return 0
+  _claudep_last_pwd="$PWD"
+  # Only manage a CLAUDE_CONFIG_DIR this hook set itself. A manual pin wins.
+  if [ -n "\${CLAUDE_CONFIG_DIR:-}" ] && [ "$CLAUDE_CONFIG_DIR" != "\${CLAUDEP_AUTO:-}" ]; then return 0; fi
+  _claudep_dir="$PWD"
+  _claudep_name=""
+  _claudep_found=""
+  while :; do
+    if [ -f "\${_claudep_dir%/}/${PIN_FILE}" ]; then
+      _claudep_found="\${_claudep_dir:-/}"
+      while read -r _claudep_line || [ -n "$_claudep_line" ]; do
+        case "$_claudep_line" in "" | "#"*) continue ;; esac
+        _claudep_name="$_claudep_line"
+        break
+      done < "\${_claudep_dir%/}/${PIN_FILE}"
+      break
+    fi
+    if [ -z "$_claudep_dir" ] || [ "$_claudep_dir" = "/" ]; then break; fi
+    _claudep_dir="\${_claudep_dir%/*}"
+  done
+  if [ -z "$_claudep_name" ]; then
+    # No pin here: hand the shell back to the base account.
+    [ -n "\${CLAUDEP_AUTO:-}" ] && unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO
+    return 0
+  fi
+  if [ ! -d "$_claudep_root/$_claudep_name" ]; then
+    [ -n "\${CLAUDEP_AUTO:-}" ] && unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO
+    printf 'claudep: %s/${PIN_FILE} names profile "%s", which does not exist. Run: claudep init %s\\n' "$_claudep_found" "$_claudep_name" "$_claudep_name" >&2
+    return 0
+  fi
+  export CLAUDE_CONFIG_DIR="$_claudep_root/$_claudep_name" CLAUDEP_AUTO="$_claudep_root/$_claudep_name"
+}
+`;
+  const tail =
+    shell === "zsh"
+      ? `autoload -Uz add-zsh-hook
+add-zsh-hook chpwd _claudep_auto
+_claudep_auto
+`
+      : `case ";\${PROMPT_COMMAND:-};" in *";_claudep_auto;"*) ;; *) PROMPT_COMMAND="_claudep_auto\${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;; esac
+_claudep_auto
+`;
+  return core + tail;
+}
+
+function cmdShellInit(L: Layout, args: string[]): void {
+  const shell = args[0] ?? "zsh";
+  if (shell !== "zsh" && shell !== "bash") die(`unsupported shell "${shell}". Use zsh or bash`);
+  process.stdout.write(shellInit(shell, L.profilesRoot));
 }
 
 async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
   const names = args[0] ? [args[0]] : listProfileNames(L);
   const bin = Bun.which("claude");
   if (bin) {
-    const { out } = await captureClaude(undefined, ["--version"]);
+    const { out } = await captureClaude(L, undefined, ["--version"]);
     ok(`claude: ${bin} (${out.trim() || "version unknown"})`);
   } else bad("claude binary not found on PATH");
-  ok(`base: ${L.base}${L.callerConfigDir ? c.yellow("  (from CLAUDE_CONFIG_DIR in your shell)") : ""}`);
+  ok(`base: ${L.base}${L.callerConfigDir && !L.managed ? c.yellow("  (from CLAUDE_CONFIG_DIR in your shell)") : ""}`);
   ok(`profiles root: ${L.profilesRoot}`);
 
   const shared = sharedItems(L.base);
@@ -636,7 +883,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
     if (has === undefined) console.log(`${c.dim("·")} keychain check skipped (not macOS)`);
     else if (has) ok(`keychain item "${svc}" present`);
     else warn(`no keychain item "${svc}". Not logged in yet (claudep ${name} auth login)`);
-    const s = await authStatus(dir);
+    const s = await authStatus(L, dir);
     if (s.loggedIn) ok(`logged in as ${s.email ?? "?"} (${s.orgName ?? "?"}, ${s.subscriptionType ?? "?"})`);
     else warn("not logged in");
   }
@@ -691,17 +938,25 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
 
 function help(L: Layout): void {
   const root = L.profilesRoot.startsWith(L.home) ? `~${L.profilesRoot.slice(L.home.length)}` : L.profilesRoot;
-  console.log(`${c.bold("claudep")}: run Claude Code under separate accounts on one machine
+  console.log(`${c.bold("claudep")} ${c.dim(version())}: run Claude Code under separate accounts on one machine
 
 ${c.bold("USAGE")}
   claudep <name> [claude args…]        run claude with profile <name>  (alias for "run")
   claudep init <name> [options]        create/update a profile and log in
   claudep list                         show every profile and who it is logged in as
   claudep status <name> [--json]       login state for one profile ("default" = ~/.claude)
-  claudep env <name>                   print "export CLAUDE_CONFIG_DIR=…" for eval
+  claudep current [--json]             which profile this shell is on, and why
+  claudep env <name> | --unset         print "export CLAUDE_CONFIG_DIR=…" (or the unset) for eval
   claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
   claudep doctor [name]                verify symlinks, keychain entry, unclassified files
   claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
+  claudep --version                    print the version
+
+${c.bold("DIRECTORY PINS")}
+  claudep local <name> [--force]       write ./${PIN_FILE} so this tree uses <name>; --remove deletes it
+  claudep local                        show the pin that applies to the current directory
+  claudep resolve [dir] [--json]       print the profile pinned for a directory (exit 1 when none)
+  claudep shell-init [zsh|bash]        print the hook that applies pins on cd; eval it in your rc file
 
 ${c.bold("INIT OPTIONS")}
   --sso               force the SSO login flow (Enterprise orgs)
@@ -718,6 +973,8 @@ ${c.bold("EXAMPLES")}
   claude                                        # Claude Code as whatever ~/.claude is logged in as
   claudep enterprise -p "summarize this repo"
   eval "$(claudep env enterprise)"              # pin the whole shell to a profile
+  claudep local enterprise                      # pin this repo; commit the ${PIN_FILE} file for the team
+  eval "$(claudep shell-init zsh)"              # in .zshrc: shells follow ${PIN_FILE} pins on cd
 
 ${c.bold("HOW IT WORKS")}
   ~/.claude stays exactly as it is and remains the "default" profile. Each named profile is a
@@ -730,8 +987,15 @@ ${c.bold("HOW IT WORKS")}
   "Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[0:8]>", so every profile has its own
   login and refresh token and they cannot clobber each other.
 
+${c.bold("PIN RULES")}
+  The nearest ${PIN_FILE} file upward from the current directory wins; an empty one cancels a
+  parent pin. The hook only changes a CLAUDE_CONFIG_DIR it set itself (tracked in CLAUDEP_AUTO),
+  so a manual pin from "claudep env" stays put. Leaving every pinned tree returns the shell to
+  ~/.claude.
+
 ${c.bold("ENVIRONMENT")}
   CLAUDE_PROFILES_DIR   where profiles live (default ~/.claudep; keep it out of iCloud/Dropbox)
+  CLAUDEP_AUTO          set by the hook next to CLAUDE_CONFIG_DIR; marks the pin as hook-managed
 `);
 }
 
@@ -760,6 +1024,19 @@ export async function main(argv: string[]): Promise<void> {
       return cmdStatus(L, args);
     case "env":
       return cmdEnv(L, args);
+    case "current":
+      return cmdCurrent(L, args);
+    case "local":
+      return cmdLocal(L, args);
+    case "resolve":
+      return cmdResolve(L, args);
+    case "shell-init":
+      return cmdShellInit(L, args);
+    case "version":
+    case "--version":
+    case "-v":
+      console.log(version());
+      return;
     case "alias":
       return cmdAlias(L, args);
     case "doctor":

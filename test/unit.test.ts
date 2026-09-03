@@ -1,16 +1,25 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
+  baseEnv,
   canon,
+  currentProfile,
   envFor,
   formatTable,
   keychainService,
   layout,
   NAME_RE,
+  PIN_FILE,
   parseAuthStatus,
   parseFlags,
   RESERVED,
+  resolvePin,
+  shellInit,
+  version,
 } from "../claudep.ts";
+import { fakeHome } from "./lib/home.ts";
 
 describe("canon", () => {
   test("expands ~/ against the given home", () => {
@@ -50,6 +59,8 @@ describe("layout", () => {
     expect(L).toEqual({
       home: "/home/me",
       callerConfigDir: undefined,
+      managed: false,
+      activeProfile: undefined,
       base: "/home/me/.claude",
       baseGlobalJson: "/home/me/.claude.json",
       profilesRoot: "/home/me/.claudep",
@@ -61,6 +72,20 @@ describe("layout", () => {
     expect(L.callerConfigDir).toBe("/cfg/");
     expect(L.base).toBe("/cfg");
     expect(L.baseGlobalJson).toBe("/cfg/.claude.json");
+  });
+
+  test("treats a CLAUDE_CONFIG_DIR inside the profiles root as an active profile, not a base", () => {
+    const L = layout({ HOME: "/home/me", CLAUDE_CONFIG_DIR: "/home/me/.claudep/work/" });
+    expect(L.managed).toBe(true);
+    expect(L.activeProfile).toBe("work");
+    expect(L.base).toBe("/home/me/.claude");
+    expect(L.baseGlobalJson).toBe("/home/me/.claude.json");
+  });
+
+  test("a nested or invalid dir under the root is managed but names no profile", () => {
+    const L = layout({ HOME: "/home/me", CLAUDE_CONFIG_DIR: "/home/me/.claudep/work/sub" });
+    expect(L.managed).toBe(true);
+    expect(L.activeProfile).toBeUndefined();
   });
 
   test("honours CLAUDE_PROFILES_DIR with ~ expansion", () => {
@@ -214,5 +239,109 @@ describe("formatTable", () => {
     const [, line] = formatTable([{ name: "x", dir: "/opt/cfg", status: { loggedIn: false } }], "/home/me");
     expect(line).toContain("/opt/cfg");
     expect(line).not.toContain("~");
+  });
+});
+
+describe("baseEnv", () => {
+  test("strips a hook or manual claudep pin so the base really is the base", () => {
+    const env = { CLAUDE_CONFIG_DIR: "/home/me/.claudep/work", CLAUDEP_AUTO: "/home/me/.claudep/work", PATH: "/bin" };
+    const L = layout({ HOME: "/home/me", ...env });
+    expect(baseEnv(L, env)).toEqual({ PATH: "/bin" });
+  });
+
+  test("keeps a custom CLAUDE_CONFIG_DIR that lives outside the profiles root", () => {
+    const env = { CLAUDE_CONFIG_DIR: "/opt/cfg" };
+    expect(baseEnv(layout({ HOME: "/home/me", ...env }), env)).toEqual(env);
+  });
+});
+
+describe("currentProfile", () => {
+  test("base when nothing is set", () => {
+    const L = layout({ HOME: "/home/me" });
+    expect(currentProfile(L, {})).toEqual({ kind: "base", name: undefined, dir: "/home/me/.claude", setBy: "none" });
+  });
+
+  test("profile set by the hook when CLAUDEP_AUTO matches", () => {
+    const env = { CLAUDE_CONFIG_DIR: "/home/me/.claudep/work", CLAUDEP_AUTO: "/home/me/.claudep/work/" };
+    const cur = currentProfile(layout({ HOME: "/home/me", ...env }), env);
+    expect(cur).toEqual({ kind: "profile", name: "work", dir: "/home/me/.claudep/work", setBy: "hook" });
+  });
+
+  test("manual pin when CLAUDEP_AUTO is absent or points elsewhere", () => {
+    const a = { CLAUDE_CONFIG_DIR: "/home/me/.claudep/work" };
+    expect(currentProfile(layout({ HOME: "/home/me", ...a }), a).setBy).toBe("manual");
+    const b = { CLAUDE_CONFIG_DIR: "/home/me/.claudep/work", CLAUDEP_AUTO: "/home/me/.claudep/other" };
+    expect(currentProfile(layout({ HOME: "/home/me", ...b }), b).setBy).toBe("manual");
+  });
+
+  test("custom for a dir outside the profiles root", () => {
+    const env = { CLAUDE_CONFIG_DIR: "/opt/cfg" };
+    expect(currentProfile(layout({ HOME: "/home/me", ...env }), env)).toEqual({
+      kind: "custom",
+      name: undefined,
+      dir: "/opt/cfg",
+      setBy: "manual",
+    });
+  });
+});
+
+describe("resolvePin", () => {
+  test("nearest file wins and reports where it was found", () => {
+    using h = fakeHome();
+    const tree = join(h.home, "repo", "a", "b");
+    mkdirSync(tree, { recursive: true });
+    writeFileSync(join(h.home, "repo", PIN_FILE), "outer\n");
+    writeFileSync(join(h.home, "repo", "a", PIN_FILE), "# comment\n\n  inner  \n");
+    expect(resolvePin(tree)).toEqual({
+      name: "inner",
+      file: join(h.home, "repo", "a", PIN_FILE),
+      dir: join(h.home, "repo", "a"),
+    });
+    expect(resolvePin(join(h.home, "repo"))?.name).toBe("outer");
+  });
+
+  test("an empty pin cancels a parent pin", () => {
+    using h = fakeHome();
+    const tree = join(h.home, "repo", "sub");
+    mkdirSync(tree, { recursive: true });
+    writeFileSync(join(h.home, "repo", PIN_FILE), "outer\n");
+    writeFileSync(join(tree, PIN_FILE), "# nothing here\n");
+    expect(resolvePin(tree)?.name).toBe("");
+  });
+
+  test("skips a directory named like the pin file, such as ~/.claudep itself", () => {
+    using h = fakeHome();
+    mkdirSync(join(h.home, PIN_FILE, "work"), { recursive: true });
+    const tree = join(h.home, "somewhere");
+    mkdirSync(tree);
+    expect(resolvePin(tree)).toBeUndefined();
+  });
+
+  test("returns undefined at the filesystem root", () => {
+    expect(resolvePin(`/claudep-does-not-exist-${Date.now()}`)).toBeUndefined();
+  });
+});
+
+describe("version", () => {
+  test("reads package.json", async () => {
+    const pkg = (await Bun.file(join(import.meta.dir, "..", "package.json")).json()) as { version: string };
+    expect(version()).toBe(pkg.version);
+  });
+});
+
+describe("shellInit", () => {
+  test.each(["zsh", "bash"] as const)("%s hook has no subprocess and embeds the profiles root", (shell) => {
+    const out = shellInit(shell, "/home/me/.claudep");
+    expect(out).toContain("_claudep_root='/home/me/.claudep'");
+    const body = out
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("#"))
+      .join("\n");
+    expect(body).not.toMatch(/\$\(|`/);
+    expect(out).toContain(shell === "zsh" ? "add-zsh-hook chpwd _claudep_auto" : "PROMPT_COMMAND");
+  });
+
+  test("single-quotes a root with an apostrophe safely", () => {
+    expect(shellInit("bash", "/home/o'brien/.claudep")).toContain(`_claudep_root='/home/o'\\''brien/.claudep'`);
   });
 });

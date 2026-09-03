@@ -55,3 +55,15 @@ Dev-only dependencies (`typescript`, `@types/bun`, `@biomejs/biome`) are allowed
 ## 2026-09-02: `layout()` instead of import-time constants
 
 `HOME`, `BASE`, `PROFILES_ROOT` used to be computed when the module loaded, which made them impossible to redirect in tests. `layout(env)` computes them on call and every helper takes what it needs as a parameter. `main()` calls it once.
+
+## 2026-09-03: What was pulled from quinnjr/claude-code-profiles, and what was not
+
+That project is a 1,586-line POSIX shell library (plus PowerShell and cmd ports, no tests) that sets `CLAUDE_CONFIG_DIR` to an empty directory per profile. Three things came over:
+
+- `claudep current`: reverse-maps `CLAUDE_CONFIG_DIR` to a profile and says how it was set. Their bare `claude-profile` status did this.
+- Directory pins: a `.claudep` file plus a `shell-init` hook, their `.claude-profile` and `local`/`auto` commands. Their exported-marker idea (`CLAUDE_PROFILE_AUTO_SET`) became `CLAUDEP_AUTO`: the hook manages only a variable it set itself, so a manual pin always wins. Their pure-parameter-expansion walk was kept for the same reason they gave, a fork per prompt would be felt. Naming rule: everything here says `claudep`, never `.claude-profile`.
+- `claudep --version`.
+
+Two choices made while porting. Leaving every pinned tree returns the shell to `~/.claude` rather than keeping the last profile, because a silent stale profile is worse than a visible default. And a `CLAUDE_CONFIG_DIR` inside the profiles root is now recognised as an active profile rather than a custom base, so `claudep init` and the `default` row in `list` keep pointing at `~/.claude` from inside a pinned repo.
+
+Left behind, with the reason: empty profiles where nothing is shared (the reason claudep exists); shadowing bare `claude` with a function (overlay decision above); a `create --init` skeleton that writes `ANTHROPIC_API_KEY` into `settings.json` (against the Never list); a self-updater that runs `curl` inside the launch path (`bun install -g` already updates); three hand-ported implementations (against "keep it one file"); per-profile skill selection from a pool (right idea, conflicts with `skills/` being one shared symlink, revisit if context bloat becomes a real complaint).

@@ -36,11 +36,39 @@ claudep list                         every profile and who it is logged in as
 claudep status <name> [--json]       login state for one profile ("default" = ~/.claude)
 claudep env <name>                   print "export CLAUDE_CONFIG_DIR=…" for eval
 claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
+claudep current [--json]             which profile this shell is on, and why
 claudep doctor [name]                verify symlinks, keychain entry, unclassified files
 claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
+claudep local <name> | --remove      pin the current directory tree to a profile (see below)
+claudep resolve [dir]                print the profile pinned for a directory
+claudep shell-init [zsh|bash]        print the hook that applies pins on cd
+claudep --version
 ```
 
 `init` options: `--sso`, `--email <addr>`, `--console`, `--copy-mcp`, `--alias <command>`, `--no-login`, `--force`. Run `claudep help` for the full text.
+
+## Pin a profile to a directory
+
+A file named `.claudep` at the top of a repo names the profile every hooked shell should use inside that tree, the way `.nvmrc` names a Node version. Commit it and the whole team inherits the pin.
+
+```sh
+cd ~/work/acme
+claudep local enterprise          # writes ./.claudep containing "enterprise"
+```
+
+Shells apply pins through a hook. Add one line to `~/.zshrc` (or `~/.bashrc` with `bash`):
+
+```sh
+eval "$(claudep shell-init zsh)"
+```
+
+From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile and `cd` out of it returns the shell to `~/.claude`. The hook is pure shell with no subprocess, so it costs nothing at the prompt. The rules:
+
+- The nearest `.claudep` file upward from the current directory wins. An empty one cancels a parent pin.
+- The hook only changes a `CLAUDE_CONFIG_DIR` it set itself. It tracks that in `CLAUDEP_AUTO`, so a manual pin from `eval "$(claudep env work)"` or a plain `export` stays put until you `eval "$(claudep env --unset)"`.
+- A pin that names a profile you have not created prints one warning per directory change and sets nothing.
+
+`claudep current` tells you which profile the shell is on and how it got there (hook, manual pin, or nothing). `claudep list` adds the same line at the bottom.
 
 ## How it works
 

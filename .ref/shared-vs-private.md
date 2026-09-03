@@ -46,6 +46,10 @@ When `doctor` reports an unclassified base item, ask in order:
 
 iCloud conflict copies such as `settings 2.json` are noise from the author's synced `~/.claude`; do not add them to any list.
 
+## The pin file is not a profile item
+
+`.claudep` files live in repositories and directory trees, never inside a profile or the base. They are read by the shell hook and by `claudep resolve`. Nothing in `SHARED_FILES` or `KNOWN_PRIVATE` refers to them, and `~/.claudep` the directory is skipped by the upward walk because only regular files count.
+
 ## Location of profiles
 
 `~/.claudep` (override with `CLAUDE_PROFILES_DIR`) is in the real home directory on purpose. `.claude.json` is rewritten constantly; inside iCloud or Dropbox that produces conflict copies.

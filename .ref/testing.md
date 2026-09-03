@@ -27,6 +27,7 @@ Test files:
 - `test/fs.test.ts`: `sharedItems`, `link`, `seedGlobalJson` against a fake home, in process.
 - `test/keychain.test.ts`: `keychainHas` with an injected spawner, plus one real `security` call gated on macOS.
 - `test/cli.test.ts`: every command as a subprocess. This is where behaviour lives; add a case here when you change a command.
+- `test/shell.test.ts`: runs the hook printed by `shell-init` in a real `bash`, and in `zsh` when `Bun.which("zsh")` finds one (macOS runners have it, Ubuntu runners do not). Checks entering and leaving pinned trees, the manual-pin rule, the empty-pin cancel, the missing-profile warning, and that the hook and `claudep resolve` agree.
 
 `claudep.ts` exports its helpers and guards the entrypoint with `import.meta.main`, so importing it in a test runs nothing.
 

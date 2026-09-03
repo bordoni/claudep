@@ -180,7 +180,7 @@ describe("env", () => {
     await runCli(["init", "smoke", "--no-login"], { home: h.home });
     const r = await runCli(["env", "smoke"], { home: h.home });
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toBe(`export CLAUDE_CONFIG_DIR='${join(h.profilesRoot, "smoke")}'\n`);
+    expect(r.stdout).toBe(`export CLAUDE_CONFIG_DIR='${join(h.profilesRoot, "smoke")}'\nunset CLAUDEP_AUTO\n`);
   });
 });
 
@@ -367,5 +367,161 @@ describe("rm", () => {
     using h = fakeHome();
     const r = await runCli(["rm", "ghost", "--yes"], { home: h.home });
     expect(r.exitCode).toBe(1);
+  });
+});
+
+describe("version", () => {
+  test("--version, -v and version print the package version", async () => {
+    using h = fakeHome();
+    const pkg = (await Bun.file(join(REPO, "package.json")).json()) as { version: string };
+    for (const flag of ["--version", "-v", "version"]) {
+      const r = await runCli([flag], { home: h.home });
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe(pkg.version);
+    }
+  });
+});
+
+describe("env --unset", () => {
+  test("prints the unset for both variables", async () => {
+    using h = fakeHome();
+    const r = await runCli(["env", "--unset"], { home: h.home });
+    expect(r.stdout).toBe("unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO\n");
+  });
+});
+
+describe("current", () => {
+  test("base when nothing is pinned", async () => {
+    using h = fakeHome();
+    const r = await runCli(["current"], { home: h.home });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("default  ~/.claude");
+    expect(r.stdout).toContain("nothing pinned");
+  });
+
+  test("profile set by the hook", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    const r = await runCli(["current"], { home: h.home, env: { CLAUDE_CONFIG_DIR: dir, CLAUDEP_AUTO: dir } });
+    expect(r.stdout).toContain("smoke  ~/.claudep/smoke");
+    expect(r.stdout).toContain("set by: shell hook");
+  });
+
+  test("manual pin, and a differing pin in the current directory is called out", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const repo = join(h.home, "repo");
+    mkdirSync(repo);
+    writeFileSync(join(repo, ".claudep"), "work\n");
+    const r = await runCli(["current"], {
+      home: h.home,
+      cwd: repo,
+      env: { CLAUDE_CONFIG_DIR: join(h.profilesRoot, "smoke") },
+    });
+    expect(r.stdout).toContain("set by: manual pin");
+    expect(r.stdout).toContain("pinned here: work");
+    expect(r.stdout).toContain("but this shell is on smoke");
+  });
+
+  test("custom dir outside the root", async () => {
+    using h = fakeHome();
+    const r = await runCli(["current", "--json"], { home: h.home, env: { CLAUDE_CONFIG_DIR: "/opt/cfg" } });
+    expect(JSON.parse(r.stdout)).toEqual({
+      kind: "custom",
+      name: undefined,
+      dir: "/opt/cfg",
+      setBy: "manual",
+      pin: null,
+    });
+  });
+
+  test("list names the active profile and keeps the default row on the real base", async () => {
+    using h = fakeHome({ loggedIn: true });
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    const r = await runCli(["list"], { home: h.home, env: { CLAUDE_CONFIG_DIR: dir, CLAUDEP_AUTO: dir } });
+    expect(r.stdout).toContain("active in this shell: smoke (shell hook)");
+    expect(r.stdout).toMatch(/^default\s+yes\s+base@example\.com/m);
+  });
+
+  test("run default strips an active pin so claude sees the base", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    const log = join(h.home, "claude.log");
+    await runCli(["default", "x"], {
+      home: h.home,
+      env: { CLAUDE_CONFIG_DIR: dir, CLAUDEP_AUTO: dir, FAKE_CLAUDE_LOG: log },
+    });
+    expect(JSON.parse(readFileSync(log, "utf8")).configDir).toBeNull();
+  });
+});
+
+describe("local and resolve", () => {
+  test("local writes the pin, resolve reads it from a nested dir, --remove deletes it", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const repo = join(h.home, "repo");
+    const nested = join(repo, "src", "deep");
+    mkdirSync(nested, { recursive: true });
+
+    const w = await runCli(["local", "smoke"], { home: h.home, cwd: repo });
+    expect(w.exitCode).toBe(0);
+    expect(readFileSync(join(repo, ".claudep"), "utf8")).toBe("smoke\n");
+    expect(w.stdout).toContain("pins this directory tree to smoke");
+
+    const r = await runCli(["resolve"], { home: h.home, cwd: nested });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("smoke\n");
+    const j = await runCli(["resolve", nested, "--json"], { home: h.home, cwd: h.home });
+    expect(JSON.parse(j.stdout)).toEqual({
+      name: "smoke",
+      file: join(repo, ".claudep"),
+      dir: repo,
+      profileDir: join(h.profilesRoot, "smoke"),
+    });
+
+    const show = await runCli(["local"], { home: h.home, cwd: nested });
+    expect(show.stdout).toContain("smoke");
+    expect(show.stdout).toContain("~/repo/.claudep");
+
+    const rm = await runCli(["local", "--remove"], { home: h.home, cwd: repo });
+    expect(rm.exitCode).toBe(0);
+    expect(existsSync(join(repo, ".claudep"))).toBe(false);
+    const none = await runCli(["resolve"], { home: h.home, cwd: nested });
+    expect(none.exitCode).toBe(1);
+    expect(none.stdout).toBe("");
+  });
+
+  test("local refuses an unknown profile unless --force", async () => {
+    using h = fakeHome();
+    const repo = join(h.home, "repo");
+    mkdirSync(repo);
+    const a = await runCli(["local", "ghost"], { home: h.home, cwd: repo });
+    expect(a.exitCode).toBe(1);
+    expect(a.stderr).toContain("does not exist");
+    expect(existsSync(join(repo, ".claudep"))).toBe(false);
+    const b = await runCli(["local", "ghost", "--force"], { home: h.home, cwd: repo });
+    expect(b.exitCode).toBe(0);
+    expect(readFileSync(join(repo, ".claudep"), "utf8")).toBe("ghost\n");
+  });
+
+  test("resolve rejects a pin file with an invalid name", async () => {
+    using h = fakeHome();
+    const repo = join(h.home, "repo");
+    mkdirSync(repo);
+    writeFileSync(join(repo, ".claudep"), "Not Valid\n");
+    const r = await runCli(["resolve"], { home: h.home, cwd: repo });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("invalid profile");
+  });
+
+  test("shell-init rejects unknown shells", async () => {
+    using h = fakeHome();
+    const r = await runCli(["shell-init", "fish"], { home: h.home });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("unsupported shell");
   });
 });
