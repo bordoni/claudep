@@ -17,11 +17,11 @@ claude           # Claude Code as whatever ~/.claude is logged in as
 Requires [bun](https://bun.sh) and an existing Claude Code install (`claude` on your PATH).
 
 ```sh
-bun add -g claudep        # or: npm install -g claudep  (bun is still what runs it)
-bunx claudep --help       # try it without installing
+bun add -g @bordoni/claudep        # or: npm install -g @bordoni/claudep  (bun is still what runs it)
+bunx @bordoni/claudep --help       # try it without installing
 ```
 
-The package is also mirrored to GitHub Packages as `@bordoni/claudep`, which needs a token with `read:packages` even for public installs; `.ref/releasing.md` has the `.npmrc` lines.
+The package name is `@bordoni/claudep` and the command it installs is `claudep`. The same package is mirrored to GitHub Packages, which needs a token with `read:packages` even for public installs; `.ref/releasing.md` has the `.npmrc` lines.
 
 Or clone and symlink it anywhere on your PATH:
 

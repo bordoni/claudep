@@ -64,8 +64,8 @@ jobs:
       - name: publish unless this version is already on npm
         run: |
           V="${VERSION#v}"
-          if npm view "claudep@$V" version >/dev/null 2>&1; then
-            echo "claudep@$V is already on npm; skipping"
+          if npm view "@bordoni/claudep@$V" version >/dev/null 2>&1; then
+            echo "@bordoni/claudep@$V is already on npm; skipping"
           else
             npm publish --access public
           fi
@@ -82,17 +82,12 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version-file: package.json
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '24'
           registry-url: 'https://npm.pkg.github.com'
           scope: '@bordoni'
           package-manager-cache: false
-      - name: scope the package name for GitHub Packages
-        run: bun -e 'const p = await Bun.file("package.json").json(); p.name = "@bordoni/claudep"; await Bun.write("package.json", JSON.stringify(p, null, 2) + "\n")'
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

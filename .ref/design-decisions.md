@@ -74,8 +74,8 @@ Hand-written Keep a Changelog promoted by `scripts/changelog.ts`, a `bun run rel
 
 `npm publish` runs through the npm CLI on Node 24 in the workflow because `bun publish` has no trusted-publishing support (oven-sh/bun#22423 open, the PR closed unmerged). Trusted publishing was the deciding factor: classic tokens are gone, granular tokens expire in ninety days, and OIDC needs neither.
 
-GitHub Packages is a best-effort mirror under `@bordoni/claudep`, published with `GITHUB_TOKEN` and `continue-on-error`. It only accepts scoped names and needs a token even to install a public package, so it cannot be the main channel.
+The package is named `@bordoni/claudep` on both registries. GitHub Packages only accepts scoped names, and one name in both places avoids a second identity to explain; the bin is still `claudep`. GitHub Packages is a best-effort mirror published with `GITHUB_TOKEN` and `continue-on-error`, because it needs a token even to install a public package and so cannot be the main channel.
 
-Not built: a Node launcher shim in `bin/` for machines without bun. `bunx claudep` and `bun add -g claudep` cover the intended audience; revisit if `npm install -g` users report `env: bun: No such file or directory`.
+Not built: a Node launcher shim in `bin/` for machines without bun. `bunx @bordoni/claudep` and `bun add -g @bordoni/claudep` cover the intended audience; revisit if `npm install -g` users report `env: bun: No such file or directory`.
 
 Actions in `release.yml` are pinned to commit SHAs because that workflow holds `id-token: write` and `packages: write`. `ci.yml` keeps tag pins.

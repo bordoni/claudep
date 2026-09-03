@@ -1,6 +1,6 @@
 # Releasing claudep
 
-Releases go to npm as `claudep`, to GitHub Packages as `@bordoni/claudep`, and to a GitHub Release whose notes are the changelog section. One command cuts a release; a tag push publishes it.
+Releases go to npm and to GitHub Packages, both as `@bordoni/claudep`, and to a GitHub Release whose notes are the changelog section. The installed command is `claudep`. One command cuts a release; a tag push publishes it.
 
 ## The routine
 
@@ -15,8 +15,8 @@ Releases go to npm as `claudep`, to GitHub Packages as `@bordoni/claudep`, and t
 | Job | Needs | What it does |
 |---|---|---|
 | `verify` | | `bun run check`, `bun run pack:check`, tag equals `package.json` version, changelog section exists for that version. |
-| `npm` | verify | `id-token: write`, npm CLI 11.5.1 or newer from Node 24. Skips when `npm view claudep@<version>` already answers, otherwise `npm publish --access public`. No token; provenance is attached automatically by trusted publishing. |
-| `github-packages` | verify | Rewrites the name to `@bordoni/claudep`, publishes to `npm.pkg.github.com` with `GITHUB_TOKEN`. `continue-on-error`, so it can never fail a release that reached npm. |
+| `npm` | verify | `id-token: write`, npm CLI 11.5.1 or newer from Node 24. Skips when `npm view @bordoni/claudep@<version>` already answers, otherwise `npm publish --access public`. No token; provenance is attached automatically by trusted publishing. |
+| `github-packages` | verify | Publishes the same package to `npm.pkg.github.com` with `GITHUB_TOKEN`. `continue-on-error`, so it can never fail a release that reached npm. |
 | `github-release` | npm | `gh release create v<version>` with `--notes-file` from `bun scripts/changelog.ts extract`. |
 
 The npm skip rule is what makes retagging or re-running safe, and it is how 0.1.0 works at all (see below).
@@ -28,10 +28,10 @@ npm trusted publishing cannot create a package that does not exist yet (npm/cli#
 ```bash
 bun run release 0.1.0            # package.json and CHANGELOG.md already say 0.1.0: this only tags
 npm publish --access public      # from the repo root; enter your 2FA code when asked
-npm view claudep version         # 0.1.0
+npm view @bordoni/claudep version   # 0.1.0
 ```
 
-Then, on npmjs.com, open the package, Settings, **Trusted Publisher**, and add GitHub Actions with owner `bordoni`, repository `claudep`, workflow filename `release.yml`, no environment. Each package holds one trusted publisher; the fields must match the workflow run exactly or the publish fails with a misleading `E404`.
+Then, on npmjs.com, open the package (https://www.npmjs.com/package/@bordoni/claudep/access), **Trusted Publisher**, and add GitHub Actions with owner `bordoni`, repository `claudep`, workflow filename `release.yml`, no environment. Each package holds one trusted publisher; the fields must match the workflow run exactly or the publish fails with a misleading `E404`.
 
 Then push the tag: `git push origin v0.1.0`. The workflow verifies, sees 0.1.0 on npm and skips that job, publishes the GitHub Packages mirror and creates the GitHub Release.
 
@@ -53,7 +53,7 @@ with a token that has `read:packages`. npm is the main channel; this is a mirror
 - A job failed after `verify`: fix nothing in git, re-run the failed jobs from the Actions page. `npm` is idempotent through the skip rule; `github-release` refuses to create a release that exists.
 - The tag is wrong and nothing was published yet: `git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`, then `git revert` the release commit if it was pushed. Never move a tag that npm has already published.
 - The version is on npm but the GitHub Release is missing: re-run `github-release`.
-- To check where things stand: `npm view claudep versions`, `gh release list`, `git tag`.
+- To check where things stand: `npm view @bordoni/claudep versions`, `gh release list`, `git tag`.
 
 ## Why it is shaped this way
 
