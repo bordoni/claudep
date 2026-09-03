@@ -12,6 +12,10 @@ eclaude          # Claude Code as the enterprise account
 claude           # Claude Code as whatever ~/.claude is logged in as
 ```
 
+## Not affiliated with Anthropic
+
+claudep is an independent, unofficial tool written by me, Gustavo Bordoni. I have no affiliation with Anthropic. Anthropic has not endorsed, sponsored, reviewed or supported this project in any way. "Claude" and "Claude Code" are Anthropic's names and trademarks and appear here only to describe what the tool works with. Use it at your own risk and under the terms of your own Claude account.
+
 ## Install
 
 Requires [bun](https://bun.sh) and an existing Claude Code install (`claude` on your PATH).

@@ -996,6 +996,8 @@ ${c.bold("PIN RULES")}
 ${c.bold("ENVIRONMENT")}
   CLAUDE_PROFILES_DIR   where profiles live (default ~/.claudep; keep it out of iCloud/Dropbox)
   CLAUDEP_AUTO          set by the hook next to CLAUDE_CONFIG_DIR; marks the pin as hook-managed
+
+${c.dim("claudep is an independent, unofficial tool. It is not affiliated with, endorsed by or supported by Anthropic.")}
 `);
 }
 

@@ -21,6 +21,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Directory pins: a `.claudep` file names the profile for a directory tree. `claudep local`, `claudep resolve` and `claudep shell-init zsh|bash` manage and apply pins; the hook only touches a `CLAUDE_CONFIG_DIR` it set itself.
 - `claudep --version`.
 - Published as `@bordoni/claudep` on npm and GitHub Packages; the installed command is `claudep`.
+- A clear notice in the README, in `claudep help` and in the package description that this is an independent tool with no affiliation to Anthropic.
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
