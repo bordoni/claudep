@@ -42,7 +42,7 @@ claudep rm <name> [--keep-login]     log out and delete a profile (base is never
 
 ## How it works
 
-`~/.claude` is left exactly as it is and stays the **default** profile. Each named profile is a thin directory under `~/.claude-profiles/<name>`. Inside it, shared configuration is a symlink back into `~/.claude`:
+`~/.claude` is left exactly as it is and stays the **default** profile. Each named profile is a thin directory under `~/.claudep/<name>`. Inside it, shared configuration is a symlink back into `~/.claude`:
 
 | Shared (symlinked) | Per profile (real files) |
 |---|---|

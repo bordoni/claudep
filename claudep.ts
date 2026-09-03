@@ -3,7 +3,7 @@
  * claudep — run Claude Code under separate accounts on one machine.
  *
  * Keeps ~/.claude as the untouched "default" profile and creates thin overlay
- * profiles under ~/.claude-profiles/<name>. Shared config (CLAUDE.md, settings,
+ * profiles under ~/.claudep/<name>. Shared config (CLAUDE.md, settings,
  * skills, plugins, hooks, agents, sessions/memory) is symlinked back into the
  * base; credentials, .claude.json and runtime state are per profile.
  *
@@ -49,7 +49,7 @@ const BASE = canon(CALLER_CONFIG_DIR ?? join(HOME, ".claude"));
 /** Global state file for the base profile. Without CLAUDE_CONFIG_DIR it lives
  *  at ~/.claude.json; with it, inside the config dir. */
 const BASE_GLOBAL_JSON = CALLER_CONFIG_DIR ? join(BASE, ".claude.json") : join(HOME, ".claude.json");
-const PROFILES_ROOT = canon(process.env.CLAUDE_PROFILES_DIR ?? join(HOME, ".claude-profiles"));
+const PROFILES_ROOT = canon(process.env.CLAUDE_PROFILES_DIR ?? join(HOME, ".claudep"));
 
 /** Top-level base items symlinked into every profile (only if they exist). */
 const SHARED_FILES = ["CLAUDE.md", "settings.json", "keybindings.json", "statusline-command.sh"] as const;
@@ -586,7 +586,7 @@ ${c.bold("HOW IT WORKS")}
   login and refresh token and they cannot clobber each other.
 
 ${c.bold("ENVIRONMENT")}
-  CLAUDE_PROFILES_DIR   where profiles live (default ~/.claude-profiles; keep it out of iCloud/Dropbox)
+  CLAUDE_PROFILES_DIR   where profiles live (default ~/.claudep; keep it out of iCloud/Dropbox)
 `);
 }
 
