@@ -84,8 +84,8 @@ export function promote(md: string, version: string, date: string, repo: string)
   const withoutLinks = rebuilt.filter((l) => !LINK.test(l));
   while (withoutLinks.length && (withoutLinks[withoutLinks.length - 1] as string).trim() === "") withoutLinks.pop();
   const newLinks = [
-    `[Unreleased]: ${repo}/compare/v${version}...HEAD`,
-    prev ? `[${version}]: ${repo}/compare/v${prev}...v${version}` : `[${version}]: ${repo}/releases/tag/v${version}`,
+    `[Unreleased]: ${repo}/compare/${version}...HEAD`,
+    prev ? `[${version}]: ${repo}/compare/${prev}...${version}` : `[${version}]: ${repo}/releases/tag/${version}`,
     ...links,
   ];
   return `${[...withoutLinks, "", ...newLinks].join("\n")}\n`;

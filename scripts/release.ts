@@ -4,7 +4,7 @@
  *
  *   bun run release <patch|minor|major|x.y.z> [--dry-run] [--push]
  *
- * The tag push is what triggers .github/workflows/release.yml, which publishes
+ * The tag (bare version, e.g. 0.2.0) push is what triggers .github/workflows/release.yml, which publishes
  * to npm through trusted publishing and creates the GitHub Release from the
  * changelog section. Nothing here talks to a registry.
  */
@@ -38,7 +38,8 @@ if (!how) fail("usage: bun run release <patch|minor|major|x.y.z> [--dry-run] [--
 const pkg = (await Bun.file(PACKAGE).json()) as { version: string };
 const md = await Bun.file(CHANGELOG).text();
 const version = bump(pkg.version, how);
-const tag = `v${version}`;
+// Tags and GitHub Releases are the bare version, no v prefix.
+const tag = version;
 
 $.cwd(ROOT);
 const dirty = (await $`git status --porcelain`.text()).trim();

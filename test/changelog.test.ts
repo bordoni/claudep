@@ -32,8 +32,8 @@ const LATER = `# Changelog
 
 - Initial release.
 
-[Unreleased]: ${REPO_URL}/compare/v0.1.0...HEAD
-[0.1.0]: ${REPO_URL}/releases/tag/v0.1.0
+[Unreleased]: ${REPO_URL}/compare/0.1.0...HEAD
+[0.1.0]: ${REPO_URL}/releases/tag/0.1.0
 `;
 
 describe("sections", () => {
@@ -79,8 +79,8 @@ Intro text.
 
 - Something new.
 
-[Unreleased]: ${REPO_URL}/compare/v0.1.0...HEAD
-[0.1.0]: ${REPO_URL}/releases/tag/v0.1.0
+[Unreleased]: ${REPO_URL}/compare/0.1.0...HEAD
+[0.1.0]: ${REPO_URL}/releases/tag/0.1.0
 `);
   });
 
@@ -90,9 +90,9 @@ Intro text.
     expect(extract(out, "0.2.0")).toBe("### Fixed\n\n- A bug.");
     expect(extract(out, "0.1.0")).toBe("### Added\n\n- Initial release.");
     expect(out.trimEnd().split("\n").slice(-3)).toEqual([
-      `[Unreleased]: ${REPO_URL}/compare/v0.2.0...HEAD`,
-      `[0.2.0]: ${REPO_URL}/compare/v0.1.0...v0.2.0`,
-      `[0.1.0]: ${REPO_URL}/releases/tag/v0.1.0`,
+      `[Unreleased]: ${REPO_URL}/compare/0.2.0...HEAD`,
+      `[0.2.0]: ${REPO_URL}/compare/0.1.0...0.2.0`,
+      `[0.1.0]: ${REPO_URL}/releases/tag/0.1.0`,
     ]);
     expect(versions(out)).toEqual(["0.2.0", "0.1.0"]);
   });
@@ -112,7 +112,7 @@ Intro text.
       REPO_URL,
     );
     expect(versions(twice)).toEqual(["0.3.0", "0.2.0", "0.1.0"]);
-    expect(twice).toContain(`[0.3.0]: ${REPO_URL}/compare/v0.2.0...v0.3.0`);
+    expect(twice).toContain(`[0.3.0]: ${REPO_URL}/compare/0.2.0...0.3.0`);
   });
 });
 

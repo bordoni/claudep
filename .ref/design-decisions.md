@@ -70,7 +70,7 @@ Left behind, with the reason: empty profiles where nothing is shared (the reason
 
 ## 2026-09-03: Releases, npm and GitHub Packages
 
-Hand-written Keep a Changelog promoted by `scripts/changelog.ts`, a `bun run release` script that commits and tags, and a tag-triggered workflow that publishes. Chosen over release-please and changesets because it adds no dependency, no bot commits and no PAT, and the changelog reads like prose written for the people who run the tool. release-please reads this format unchanged if the team grows.
+Tags and GitHub Releases carry the bare version (`0.1.0`), matching `package.json` and npm exactly, so one string names a release everywhere. Hand-written Keep a Changelog promoted by `scripts/changelog.ts`, a `bun run release` script that commits and tags, and a tag-triggered workflow that publishes. Chosen over release-please and changesets because it adds no dependency, no bot commits and no PAT, and the changelog reads like prose written for the people who run the tool. release-please reads this format unchanged if the team grows.
 
 `npm publish` runs through the npm CLI on Node 24 in the workflow because `bun publish` has no trusted-publishing support (oven-sh/bun#22423 open, the PR closed unmerged). Trusted publishing was the deciding factor: classic tokens are gone, granular tokens expire in ninety days, and OIDC needs neither.
 

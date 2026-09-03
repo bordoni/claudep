@@ -1,11 +1,11 @@
 name: Release
 
-# Triggered by `bun run release <bump> --push`, which pushes a v* tag.
+# Triggered by `bun run release <bump> --push`, which pushes a bare-version tag such as 0.2.0.
 # This filename is registered as the npm Trusted Publisher workflow.
 
 on:
   push:
-    tags: ['v*']
+    tags: ['[0-9]+.[0-9]+.[0-9]+*']
 
 permissions: {}
 
@@ -34,12 +34,12 @@ jobs:
       - run: bun run pack:check
       - name: tag matches package.json
         run: |
-          TAG="${VERSION#v}"
+          TAG="$VERSION"
           PKG="$(bun --print "require('./package.json').version")"
           echo "tag=$TAG package.json=$PKG"
           [ "$TAG" = "$PKG" ]
       - name: changelog has a section for this version
-        run: bun scripts/changelog.ts extract "${VERSION#v}"
+        run: bun scripts/changelog.ts extract "$VERSION"
 
   npm:
     name: publish to npm
@@ -63,7 +63,7 @@ jobs:
           npm --version
       - name: publish unless this version is already on npm
         run: |
-          V="${VERSION#v}"
+          V="$VERSION"
           if npm view "@bordoni/claudep@$V" version >/dev/null 2>&1; then
             echo "@bordoni/claudep@$V is already on npm; skipping"
           else
@@ -106,7 +106,7 @@ jobs:
         with:
           bun-version-file: package.json
       - name: release notes from the changelog
-        run: bun scripts/changelog.ts extract "${VERSION#v}" > release-notes.md
+        run: bun scripts/changelog.ts extract "$VERSION" > release-notes.md
       - name: create the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

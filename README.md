@@ -97,7 +97,7 @@ The shared list is an allowlist, so an account-specific file cannot leak across 
 
 ## Releases
 
-Versions, dates and changes are in [`CHANGELOG.md`](./CHANGELOG.md). Releases are tagged `vX.Y.Z` and published to npm with provenance by GitHub Actions.
+Versions, dates and changes are in [`CHANGELOG.md`](./CHANGELOG.md). Releases are tagged with the bare version, `0.1.0`, and published to npm with provenance by GitHub Actions.
 
 ## Development
 
