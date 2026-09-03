@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Fixed
+
+- The 0.1.0 tarball on npm was published by hand from a commit that predates the notice that claudep is independent and not affiliated with Anthropic. This release is the same code with the notice in the README, in `claudep help` and in the package description.
+
 ## [0.1.0] - 2026-09-03
 
 ### Added
