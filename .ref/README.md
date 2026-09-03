@@ -1,4 +1,4 @@
-# .ref — on-demand reference for claudep
+# .ref: on-demand reference for claudep
 
 Notes an agent or developer fetches **on demand**, not read end to end. [`AGENTS.md`](../AGENTS.md) is the working agreement and tells you when to open each file; [`README.md`](../README.md) at the root is for users of the tool.
 

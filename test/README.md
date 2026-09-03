@@ -2,7 +2,7 @@
 
 Run `bun run check` from the repo root. Details, fixtures and the human-only checks are in [`.ref/testing.md`](../.ref/testing.md).
 
-Short version:
+The short version:
 
 - `preload.ts` sandboxes `$HOME` before anything loads. Nothing here can touch your real `~/.claude`.
 - `lib/home.ts` builds a fake `~/.claude`; `lib/cli.ts` runs `claudep.ts` against it with a fake `claude` and `security` on PATH.

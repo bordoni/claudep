@@ -4,7 +4,7 @@
 
 Run [Claude Code](https://code.claude.com) under separate accounts on one machine, for example a company Enterprise org and a personal Max plan, with fully isolated logins and shared configuration.
 
-Claude Code has no built-in account switching. `claudep` is a single dependency-free [bun](https://bun.sh) script that manages named **profiles**, each pointed at Claude Code through `CLAUDE_CONFIG_DIR`.
+Claude Code has no account switching of its own. `claudep` is one [bun](https://bun.sh) script with no dependencies. It manages named **profiles** and points Claude Code at them through `CLAUDE_CONFIG_DIR`.
 
 ```
 claudep init enterprise --sso --email you@company.com --alias eclaude
@@ -53,9 +53,9 @@ claudep rm <name> [--keep-login]     log out and delete a profile (base is never
 | `hooks/`, `skills/`, `commands/`, `agents/`, `plugins/`, `plans/` | `history.jsonl`, `todos/`, `sessions/`, caches, telemetry |
 | `projects/` (session transcripts and auto-memory) | credentials |
 
-Credentials never touch the profile directory. On macOS, Claude Code stores them in the Keychain under `Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[0:8]>`, so every profile has its own login and refresh token and they cannot overwrite each other. This was verified against Claude Code 2.1.259; an older bug where all config dirs shared one Keychain entry no longer applies.
+Credentials never touch the profile directory. On macOS, Claude Code stores them in the Keychain under `Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[0:8]>`, so every profile has its own login and refresh token and they cannot overwrite each other. I verified this against Claude Code 2.1.259. An older bug where every config dir shared one Keychain entry no longer applies.
 
-The shared list is an explicit allowlist, so account-specific files can never leak across profiles by accident. `claudep doctor` reports any base file that is neither shared nor known-private, which is how you notice when a new Claude Code version adds something.
+The shared list is an allowlist, so an account-specific file cannot leak across profiles by accident. `claudep doctor` reports any base file that is neither shared nor known-private. That is how you notice when a new Claude Code version adds something.
 
 ## Notes
 
@@ -71,7 +71,7 @@ bun install        # dev tooling only; nothing ships with the tool
 bun run check      # typecheck, lint, tests. Same as CI
 ```
 
-Working on the script? Start with [`AGENTS.md`](./AGENTS.md); the detail lives in [`.ref/`](./.ref/).
+To work on the script, start with [`AGENTS.md`](./AGENTS.md). The detail lives in [`.ref/`](./.ref/).
 
 ## License
 
