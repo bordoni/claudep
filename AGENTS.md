@@ -18,6 +18,7 @@ A single-file bun CLI, [`claudep.ts`](./claudep.ts), that runs Claude Code under
 | [`.ref/claude-code-internals.md`](./.ref/claude-code-internals.md) | You are debugging login isolation, a new Claude Code version moved something, or you need to re-verify a claim against the binary. |
 | [`.ref/shared-vs-private.md`](./.ref/shared-vs-private.md) | You are changing `SHARED_FILES`, `SHARED_DIRS`, `KNOWN_PRIVATE` or `SEED_KEYS`, or `claudep doctor` reports an unclassified file. |
 | [`.ref/testing.md`](./.ref/testing.md) | You changed `claudep.ts`, the shell hook, or anything under `test/`. How the suite is built, what the fake `claude` proves, and the checks that still need a human. |
+| [`.ref/releasing.md`](./.ref/releasing.md) | You are cutting a release, the release workflow failed, or you need the one-time npm and GitHub Packages setup. |
 | [`.ref/design-decisions.md`](./.ref/design-decisions.md) | You are tempted to restructure profiles, rename paths, or add a feature that was already considered. |
 
 ## Commands
@@ -39,7 +40,8 @@ claudep doctor                      # symlink, keychain and classification check
 4. The string handed to `CLAUDE_CONFIG_DIR` must be canonical (absolute, no trailing slash, NFC) because Claude Code hashes it for the Keychain service name. Always go through `profileDir()` / `canon()`.
 5. Any change to what `init` links or seeds must be reflected in `doctor`, which is the user's only way to see drift.
 6. Update `README.md` (user-facing), the `help()` text and `test/cli.test.ts` together when a command or flag changes. A change to the shell hook also updates `resolvePin()` and `test/shell.test.ts`; the two must agree.
-7. Helpers take their inputs as parameters and are exported; commands get a `Layout` from `layout()`. Without that the tests cannot redirect paths and the `$HOME` sandbox does nothing.
+7. Every change a user could notice gets a line under `[Unreleased]` in `CHANGELOG.md` in the same change. CI enforces it for pull requests that touch `claudep.ts`.
+8. Helpers take their inputs as parameters and are exported; commands get a `Layout` from `layout()`. Without that the tests cannot redirect paths and the `$HOME` sandbox does nothing.
 
 ## Never
 
@@ -53,4 +55,5 @@ claudep doctor                      # symlink, keychain and classification check
 8. **Never commit anything from `~/.claudep`** or reference a specific person's profile in code.
 9. **Never suggest putting `CLAUDE_CONFIG_DIR` in a settings `env` block.** Claude Code detects the mismatch and disables features.
 10. **Never put a subprocess or network call in the shell hook.** It runs on every directory change or prompt. Parameter expansion and builtins only.
-11. **Never let a test reach the real `~/.claude`, `~/.claudep`, `claude` or `security`.** Go through `test/lib`. The preload sandbox is a backstop for mistakes, and a test that needs it is already wrong.
+11. **Never publish from a laptop after 0.1.0.** Releases are `bun run release <bump> --push`; the tag triggers the workflow, which publishes through trusted publishing. No npm tokens anywhere.
+12. **Never let a test reach the real `~/.claude`, `~/.claudep`, `claude` or `security`.** Go through `test/lib`. The preload sandbox is a backstop for mistakes, and a test that needs it is already wrong.

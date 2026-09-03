@@ -7,6 +7,7 @@ Notes an agent or developer fetches **on demand**, not read end to end. [`AGENTS
 | [`claude-code-internals.md`](./claude-code-internals.md) | Debugging login isolation, a Claude Code update moved files, or you need to re-verify a claim against the binary. |
 | [`shared-vs-private.md`](./shared-vs-private.md) | Changing `SHARED_FILES`, `SHARED_DIRS`, `KNOWN_PRIVATE`, `SEED_KEYS`, or `doctor` reported an unclassified file. |
 | [`testing.md`](./testing.md) | You changed `claudep.ts`. Typecheck recipe, smoke cycle, install check, and the gotcha log. |
+| [`releasing.md`](./releasing.md) | Cutting a release, a failed release workflow, or the one-time npm and GitHub Packages bootstrap. |
 | [`design-decisions.md`](./design-decisions.md) | Considering a restructure, rename, or a feature that may already have been weighed and rejected. |
 
 ## Tiers

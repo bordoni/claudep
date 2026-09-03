@@ -14,11 +14,14 @@ claude           # Claude Code as whatever ~/.claude is logged in as
 
 ## Install
 
-Requires bun and an existing Claude Code install (`claude` on your PATH).
+Requires [bun](https://bun.sh) and an existing Claude Code install (`claude` on your PATH).
 
 ```sh
-bun install -g github:bordoni/claudep
+bun add -g claudep        # or: npm install -g claudep  (bun is still what runs it)
+bunx claudep --help       # try it without installing
 ```
+
+The package is also mirrored to GitHub Packages as `@bordoni/claudep`, which needs a token with `read:packages` even for public installs; `.ref/releasing.md` has the `.npmrc` lines.
 
 Or clone and symlink it anywhere on your PATH:
 
@@ -91,6 +94,10 @@ The shared list is an allowlist, so an account-specific file cannot leak across 
 - Two profiles running at the same time write the same `settings.json` and `plugins/`. That is the same situation as two terminals today.
 - Set `CLAUDE_PROFILES_DIR` to move the profiles root. Keep it out of iCloud or Dropbox; `.claude.json` is rewritten constantly and sync tools create conflict copies.
 - Never put `CLAUDE_CONFIG_DIR` in a `settings.json` `env` block. Claude Code detects that mismatch and disables features.
+
+## Releases
+
+Versions, dates and changes are in [`CHANGELOG.md`](./CHANGELOG.md). Releases are tagged `vX.Y.Z` and published to npm with provenance by GitHub Actions.
 
 ## Development
 

@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   check:
-    name: typecheck + lint
+    name: typecheck + lint + pack
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -24,6 +24,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run lint
+      - run: bun run pack:check
 
   test:
     name: test (${{ matrix.os }})
@@ -39,3 +40,23 @@ jobs:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
       - run: bun run test
+
+  changelog:
+    name: changelog entry
+    if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip-changelog')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - name: claudep.ts changes need a line under Unreleased
+        run: |
+          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -qx 'claudep.ts'; then
+            if [ -z "$(bun scripts/changelog.ts unreleased)" ]; then
+              echo "claudep.ts changed but CHANGELOG.md has nothing under [Unreleased]. Add a line, or label the PR skip-changelog."
+              exit 1
+            fi
+          fi

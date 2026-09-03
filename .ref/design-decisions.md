@@ -67,3 +67,15 @@ That project is a 1,586-line POSIX shell library (plus PowerShell and cmd ports,
 Two choices made while porting. Leaving every pinned tree returns the shell to `~/.claude` rather than keeping the last profile, because a silent stale profile is worse than a visible default. And a `CLAUDE_CONFIG_DIR` inside the profiles root is now recognised as an active profile rather than a custom base, so `claudep init` and the `default` row in `list` keep pointing at `~/.claude` from inside a pinned repo.
 
 Left behind, with the reason: empty profiles where nothing is shared (the reason claudep exists); shadowing bare `claude` with a function (overlay decision above); a `create --init` skeleton that writes `ANTHROPIC_API_KEY` into `settings.json` (against the Never list); a self-updater that runs `curl` inside the launch path (`bun install -g` already updates); three hand-ported implementations (against "keep it one file"); per-profile skill selection from a pool (right idea, conflicts with `skills/` being one shared symlink, revisit if context bloat becomes a real complaint).
+
+## 2026-09-03: Releases, npm and GitHub Packages
+
+Hand-written Keep a Changelog promoted by `scripts/changelog.ts`, a `bun run release` script that commits and tags, and a tag-triggered workflow that publishes. Chosen over release-please and changesets because it adds no dependency, no bot commits and no PAT, and the changelog reads like prose written for the people who run the tool. release-please reads this format unchanged if the team grows.
+
+`npm publish` runs through the npm CLI on Node 24 in the workflow because `bun publish` has no trusted-publishing support (oven-sh/bun#22423 open, the PR closed unmerged). Trusted publishing was the deciding factor: classic tokens are gone, granular tokens expire in ninety days, and OIDC needs neither.
+
+GitHub Packages is a best-effort mirror under `@bordoni/claudep`, published with `GITHUB_TOKEN` and `continue-on-error`. It only accepts scoped names and needs a token even to install a public package, so it cannot be the main channel.
+
+Not built: a Node launcher shim in `bin/` for machines without bun. `bunx claudep` and `bun add -g claudep` cover the intended audience; revisit if `npm install -g` users report `env: bun: No such file or directory`.
+
+Actions in `release.yml` are pinned to commit SHAs because that workflow holds `id-token: write` and `packages: write`. `ci.yml` keeps tag pins.

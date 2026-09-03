@@ -3,15 +3,40 @@
   "version": "0.1.0",
   "description": "Run Claude Code under separate accounts on one machine (work + personal) with isolated logins and shared config.",
   "type": "module",
+  "license": "MIT",
+  "author": "Gustavo Bordoni",
+  "homepage": "https://github.com/bordoni/claudep#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bordoni/claudep.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bordoni/claudep/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "cli",
+    "bun",
+    "profiles",
+    "accounts"
+  ],
   "bin": {
     "claudep": "./claudep.ts"
   },
-  "repository": "github:bordoni/claudep",
-  "license": "MIT",
+  "files": [
+    "claudep.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "engines": {
     "bun": ">=1.1"
   },
   "packageManager": "bun@1.4.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "test": "bun test --timeout 20000",
     "test:watch": "bun test --watch",
@@ -19,7 +44,10 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "check": "bun run typecheck && bun run lint && bun run test"
+    "check": "bun run typecheck && bun run lint && bun run test",
+    "pack:check": "bun pm pack --dry-run",
+    "changelog": "bun scripts/changelog.ts",
+    "release": "bun scripts/release.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.11",
