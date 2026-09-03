@@ -61,9 +61,6 @@ Do not run the plain `bun install -g` on the author's machine: `~/.bun/bin` prec
 
 ## Gotcha log
 
-- bun's `os.homedir()` reads `getpwuid()` and ignores `$HOME`. `claudep.ts` reads `process.env.HOME` first for this reason; without it the preload sandbox silently does nothing.
-- `Bun.main` is the symlink-resolved path. Use `Bun.which("claudep")` for the PATH location (alias shims) and `realpathSync(Bun.main)` for the file itself.
+Environment-level gotchas (shell, GitHub access, bun, npm) moved to `tooling-gotchas.md`. What stays here is specific to the tests.
+
 - Column padding: the table pads every cell, including the last column, so assert on `line.trimEnd()`.
-- `sed s/claude-profile/claudep/g` once rewrote `.claude-profiles` to `.claudeps`. Grep for collateral matches before global renames.
-- `grep -aoE` with context on the Claude Code binary times out; `claude-code-internals.md` has the `Buffer.indexOf` approach.
-- zsh's pipe status array is `$pipestatus`, not `$PIPESTATUS`.

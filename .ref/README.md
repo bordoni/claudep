@@ -9,6 +9,10 @@ Notes an agent or developer fetches **on demand**, not read end to end. [`AGENTS
 | [`testing.md`](./testing.md) | You changed `claudep.ts`. Typecheck recipe, smoke cycle, install check, and the gotcha log. |
 | [`releasing.md`](./releasing.md) | Cutting a release, a failed release workflow, or the one-time npm and GitHub Packages bootstrap. |
 | [`design-decisions.md`](./design-decisions.md) | Considering a restructure, rename, or a feature that may already have been weighed and rejected. |
+| [`directory-pins.md`](./directory-pins.md) | Touching `.claudep` pins, `resolvePin()`, `claudep current` or the shell hook from `shell-init`. |
+| [`prior-art.md`](./prior-art.md) | Someone asks "should we add X" or "how do other projects do this"; the research and verdicts are already here. |
+| [`tooling-gotchas.md`](./tooling-gotchas.md) | Before running non-trivial commands through the shell on the author's machine, or when a push, grep or inline script behaves strangely. |
+| [`writing.md`](./writing.md) | Writing or editing anything a person reads here: README, AGENTS.md, this folder, help text, messages. |
 
 ## Tiers
 

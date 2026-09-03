@@ -48,6 +48,10 @@ GitHub Packages needs a token even for public packages. A consumer adds to `.npm
 
 with a token that has `read:packages`. npm is the main channel; this is a mirror for anyone already wired to GitHub Packages.
 
+## Publish from the tagged commit
+
+0.1.0 on npm was published by hand from commit `25e2782`, two commits before the tag `0.1.0` was cut at `47713e4`. The tarball therefore lacks the Anthropic notice that the tag carries, and npm never allows a version to be republished. The workflow cannot make this mistake because it checks out the tag. A manual publish can: run `git checkout <tag>` first, or better, never publish by hand again after the bootstrap. `npm view @bordoni/claudep gitHead` shows which commit a published version came from.
+
 ## Recovery
 
 - A job failed after `verify`: fix nothing in git, re-run the failed jobs from the Actions page. `npm` is idempotent through the skip rule; `github-release` refuses to create a release that exists.

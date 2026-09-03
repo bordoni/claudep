@@ -19,6 +19,10 @@ A single-file bun CLI, [`claudep.ts`](./claudep.ts), that runs Claude Code under
 | [`.ref/shared-vs-private.md`](./.ref/shared-vs-private.md) | You are changing `SHARED_FILES`, `SHARED_DIRS`, `KNOWN_PRIVATE` or `SEED_KEYS`, or `claudep doctor` reports an unclassified file. |
 | [`.ref/testing.md`](./.ref/testing.md) | You changed `claudep.ts`, the shell hook, or anything under `test/`. How the suite is built, what the fake `claude` proves, and the checks that still need a human. |
 | [`.ref/releasing.md`](./.ref/releasing.md) | You are cutting a release, the release workflow failed, or you need the one-time npm and GitHub Packages setup. |
+| [`.ref/directory-pins.md`](./.ref/directory-pins.md) | You are touching `.claudep` pins, `resolvePin()`, `claudep current` or the shell hook. The TypeScript and the shell must agree. |
+| [`.ref/prior-art.md`](./.ref/prior-art.md) | Someone asks whether to add a feature another tool has, or how other bun CLIs test and release. |
+| [`.ref/tooling-gotchas.md`](./.ref/tooling-gotchas.md) | Before running non-trivial shell commands here: inline scripts lose braces, SSH to GitHub times out, zsh differs from bash. |
+| [`.ref/writing.md`](./.ref/writing.md) | You are writing or editing prose a person reads: README, this file, `.ref/`, help text, CLI messages. |
 | [`.ref/design-decisions.md`](./.ref/design-decisions.md) | You are tempted to restructure profiles, rename paths, or add a feature that was already considered. |
 
 ## Commands
