@@ -10,5 +10,20 @@
   "license": "MIT",
   "engines": {
     "bun": ">=1.1"
+  },
+  "packageManager": "bun@1.4.0",
+  "scripts": {
+    "test": "bun test --timeout 20000",
+    "test:watch": "bun test --watch",
+    "test:coverage": "bun test --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "check": "bun run typecheck && bun run lint && bun run test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.11",
+    "@types/bun": "^1.4.0",
+    "typescript": "^7.0.2"
   }
 }

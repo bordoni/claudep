@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * claudep — run Claude Code under separate accounts on one machine.
+ * claudep: run Claude Code under separate accounts on one machine.
  *
  * Keeps ~/.claude as the untouched "default" profile and creates thin overlay
  * profiles under ~/.claudep/<name>. Shared config (CLAUDE.md, settings,
@@ -11,11 +11,12 @@
  * ("Claude Code-credentials-<sha256(dir)[0:8]>"), so each profile is a fully
  * separate login. Run `claudep help` for usage.
  *
- * Zero dependencies. Requires bun >= 1.1 and a `claude` binary on PATH.
+ * Zero runtime dependencies. Requires bun >= 1.1 and a `claude` binary on PATH.
  */
 
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -24,64 +25,137 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
-  chmodSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Layout
 // ---------------------------------------------------------------------------
 
-const HOME = homedir();
+export type Env = Record<string, string | undefined>;
+
+/** Home directory. $HOME wins so tests and containers can redirect it; bun's
+ *  os.homedir() reads getpwuid() and ignores the variable. */
+export function homeDir(env: Env = process.env): string {
+  return env.HOME || homedir();
+}
 
 /** Canonical form of a config dir: absolute, no trailing slash, NFC.
  *  Claude Code hashes the *literal* CLAUDE_CONFIG_DIR string for the keychain
  *  service name, so the same profile must always produce the same string. */
-function canon(p: string): string {
-  const expanded = p.startsWith("~/") ? join(HOME, p.slice(2)) : p;
+export function canon(p: string, home: string = homeDir()): string {
+  const expanded = p.startsWith("~/") ? join(home, p.slice(2)) : p;
   return resolve(expanded).replace(/\/+$/, "").normalize("NFC");
 }
 
-const CALLER_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR;
-const BASE = canon(CALLER_CONFIG_DIR ?? join(HOME, ".claude"));
-/** Global state file for the base profile. Without CLAUDE_CONFIG_DIR it lives
- *  at ~/.claude.json; with it, inside the config dir. */
-const BASE_GLOBAL_JSON = CALLER_CONFIG_DIR ? join(BASE, ".claude.json") : join(HOME, ".claude.json");
-const PROFILES_ROOT = canon(process.env.CLAUDE_PROFILES_DIR ?? join(HOME, ".claudep"));
+export type Layout = {
+  home: string;
+  /** CLAUDE_CONFIG_DIR as set in the caller's shell, if any. */
+  callerConfigDir: string | undefined;
+  /** The base config dir every profile links back into. */
+  base: string;
+  /** Global state file for the base. Without CLAUDE_CONFIG_DIR it lives at
+   *  ~/.claude.json; with it, inside the config dir. */
+  baseGlobalJson: string;
+  profilesRoot: string;
+};
+
+export function layout(env: Env = process.env): Layout {
+  const home = homeDir(env);
+  const callerConfigDir = env.CLAUDE_CONFIG_DIR;
+  const base = canon(callerConfigDir ?? join(home, ".claude"), home);
+  return {
+    home,
+    callerConfigDir,
+    base,
+    baseGlobalJson: callerConfigDir ? join(base, ".claude.json") : join(home, ".claude.json"),
+    profilesRoot: canon(env.CLAUDE_PROFILES_DIR ?? join(home, ".claudep"), home),
+  };
+}
 
 /** Top-level base items symlinked into every profile (only if they exist). */
-const SHARED_FILES = ["CLAUDE.md", "settings.json", "keybindings.json", "statusline-command.sh"] as const;
-const SHARED_DIRS = ["hooks", "skills", "commands", "agents", "plugins", "plans", "projects"] as const;
+export const SHARED_FILES = ["CLAUDE.md", "settings.json", "keybindings.json", "statusline-command.sh"] as const;
+export const SHARED_DIRS = ["hooks", "skills", "commands", "agents", "plugins", "plans", "projects"] as const;
 
 /** Per-profile state. First block is Claude Code's own runtime-state list;
  *  the rest are observed extras. Never shared. */
-const KNOWN_PRIVATE = new Set<string>([
-  ".claude.json", ".claude.json.backup", ".credentials.json", "sessions", "todos",
-  "shell-snapshots", "statsig", "file-history", "history.jsonl", "ide", "logs", "backups",
+export const KNOWN_PRIVATE = new Set<string>([
+  ".claude.json",
+  ".claude.json.backup",
+  ".credentials.json",
+  "sessions",
+  "todos",
+  "shell-snapshots",
+  "statsig",
+  "file-history",
+  "history.jsonl",
+  "ide",
+  "logs",
+  "backups",
   ".session_ingress_token",
-  "remote-settings.json", "policy-limits.json", "stats-cache.json", "mcp-needs-auth-cache.json",
-  "telemetry", "debug", "cache", "daemon", "daemon.log", "tasks", "jobs", "session-env",
-  "paste-cache", "scheduled-tasks", "chrome", "feedback", "local", "settings.local.json",
-  ".DS_Store", ".config.json", ".last-cleanup", ".last-update-result.json", "daemon-auth-cooldown", "daemon-auth-status.json",
+  "remote-settings.json",
+  "policy-limits.json",
+  "stats-cache.json",
+  "mcp-needs-auth-cache.json",
+  "telemetry",
+  "debug",
+  "cache",
+  "daemon",
+  "daemon.log",
+  "tasks",
+  "jobs",
+  "session-env",
+  "paste-cache",
+  "scheduled-tasks",
+  "chrome",
+  "feedback",
+  "local",
+  "settings.local.json",
+  ".DS_Store",
+  ".config.json",
+  ".last-cleanup",
+  ".last-update-result.json",
+  "daemon-auth-cooldown",
+  "daemon-auth-status.json",
 ]);
 
 /** Keys copied from the base .claude.json into a fresh profile so first-run
  *  onboarding does not repeat. Account identity is deliberately excluded. */
-const SEED_KEYS = [
-  "hasCompletedOnboarding", "lastOnboardingVersion", "theme", "editorMode",
-  "preferredNotifChannel", "shiftEnterKeyBindingInstalled", "autoUpdates", "installMethod",
+export const SEED_KEYS = [
+  "hasCompletedOnboarding",
+  "lastOnboardingVersion",
+  "theme",
+  "editorMode",
+  "preferredNotifChannel",
+  "shiftEnterKeyBindingInstalled",
+  "autoUpdates",
+  "installMethod",
 ] as const;
 
-const NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
-const RESERVED = new Set(["default", "base", "init", "run", "list", "ls", "status", "env", "doctor", "rm", "remove", "alias", "help"]);
+export const NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
+export const RESERVED = new Set([
+  "default",
+  "base",
+  "init",
+  "run",
+  "list",
+  "ls",
+  "status",
+  "env",
+  "doctor",
+  "rm",
+  "remove",
+  "alias",
+  "help",
+]);
 
 // ---------------------------------------------------------------------------
 // Output helpers
 // ---------------------------------------------------------------------------
 
-const tty = Boolean(process.stdout.isTTY);
+const tty = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
 const c = {
   bold: (s: string) => (tty ? `\x1b[1m${s}\x1b[0m` : s),
   dim: (s: string) => (tty ? `\x1b[2m${s}\x1b[0m` : s),
@@ -93,7 +167,7 @@ const ok = (msg: string) => console.log(`${c.green("✓")} ${msg}`);
 const warn = (msg: string) => console.log(`${c.yellow("!")} ${msg}`);
 const bad = (msg: string) => console.log(`${c.red("✗")} ${msg}`);
 
-function die(msg: string, code = 1): never {
+export function die(msg: string, code = 1): never {
   console.error(`${c.red("error:")} ${msg}`);
   process.exit(code);
 }
@@ -102,44 +176,45 @@ function die(msg: string, code = 1): never {
 // Profile helpers
 // ---------------------------------------------------------------------------
 
-function profileDir(name: string): string {
+export function profileDir(L: Layout, name: string): string {
   if (!NAME_RE.test(name)) die(`invalid profile name "${name}" (use [a-z0-9_-], starting with a letter or digit)`);
   if (RESERVED.has(name)) die(`"${name}" is a reserved word and cannot be a profile name`);
-  return canon(join(PROFILES_ROOT, name));
+  return canon(join(L.profilesRoot, name), L.home);
 }
 
-function profileExists(name: string): boolean {
-  return NAME_RE.test(name) && !RESERVED.has(name) && existsSync(join(PROFILES_ROOT, name));
+export function profileExists(L: Layout, name: string): boolean {
+  return NAME_RE.test(name) && !RESERVED.has(name) && existsSync(join(L.profilesRoot, name));
 }
 
-function listProfileNames(): string[] {
-  if (!existsSync(PROFILES_ROOT)) return [];
-  return readdirSync(PROFILES_ROOT, { withFileTypes: true })
+export function listProfileNames(L: Layout): string[] {
+  if (!existsSync(L.profilesRoot)) return [];
+  return readdirSync(L.profilesRoot, { withFileTypes: true })
     .filter((d) => d.isDirectory() && NAME_RE.test(d.name) && !RESERVED.has(d.name))
     .map((d) => d.name)
     .sort();
 }
 
-function keychainService(dir: string): string {
+/** Keychain service name Claude Code uses for a non-default config dir. */
+export function keychainService(dir: string): string {
   const hash = createHash("sha256").update(dir).digest("hex").slice(0, 8);
   return `Claude Code-credentials-${hash}`;
 }
 
-type SharedItem = { name: string; kind: "file" | "dir" };
+export type SharedItem = { name: string; kind: "file" | "dir" };
 
 /** Shared items that actually exist in the base right now. */
-function sharedItems(): SharedItem[] {
+export function sharedItems(base: string): SharedItem[] {
   const items: SharedItem[] = [];
   const seen = new Set<string>();
   const push = (name: string, kind: SharedItem["kind"]) => {
     if (seen.has(name)) return;
-    if (!existsSync(join(BASE, name))) return;
+    if (!existsSync(join(base, name))) return;
     seen.add(name);
     items.push({ name, kind });
   };
   for (const f of SHARED_FILES) push(f, "file");
-  if (existsSync(BASE)) {
-    for (const entry of readdirSync(BASE, { withFileTypes: true })) {
+  if (existsSync(base)) {
+    for (const entry of readdirSync(base, { withFileTypes: true })) {
       if (entry.name.endsWith(".md") && !entry.isDirectory()) push(entry.name, "file");
     }
   }
@@ -147,11 +222,11 @@ function sharedItems(): SharedItem[] {
   return items;
 }
 
-type LinkResult = "linked" | "ok" | "wrong-target" | "conflict";
+export type LinkResult = "linked" | "ok" | "wrong-target" | "conflict";
 
 /** Idempotent symlink profile/<name> -> base/<name>. Never overwrites real files. */
-function link(dir: string, name: string, force: boolean): LinkResult {
-  const target = join(BASE, name);
+export function link(base: string, dir: string, name: string, force: boolean): LinkResult {
+  const target = join(base, name);
   const dest = join(dir, name);
   let st: ReturnType<typeof lstatSync> | undefined;
   try {
@@ -175,9 +250,9 @@ function link(dir: string, name: string, force: boolean): LinkResult {
   return "conflict";
 }
 
-type JsonObject = Record<string, unknown>;
+export type JsonObject = Record<string, unknown>;
 
-async function readJson(path: string): Promise<JsonObject | undefined> {
+export async function readJson(path: string): Promise<JsonObject | undefined> {
   try {
     const parsed: unknown = JSON.parse(await Bun.file(path).text());
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as JsonObject) : undefined;
@@ -186,15 +261,17 @@ async function readJson(path: string): Promise<JsonObject | undefined> {
   }
 }
 
-async function seedGlobalJson(dir: string, copyMcp: boolean): Promise<"seeded" | "exists" | "no-base"> {
+export type SeedResult = "seeded" | "exists" | "no-base";
+
+export async function seedGlobalJson(baseGlobalJson: string, dir: string, copyMcp: boolean): Promise<SeedResult> {
   const dest = join(dir, ".claude.json");
   if (existsSync(dest)) return "exists";
-  const base = await readJson(BASE_GLOBAL_JSON);
+  const base = await readJson(baseGlobalJson);
   if (!base) return "no-base";
   const seed: JsonObject = {};
   for (const k of SEED_KEYS) if (k in base) seed[k] = base[k];
   if (copyMcp && base.mcpServers && typeof base.mcpServers === "object") seed.mcpServers = base.mcpServers;
-  await Bun.write(dest, JSON.stringify(seed, null, 2) + "\n");
+  await Bun.write(dest, `${JSON.stringify(seed, null, 2)}\n`);
   return "seeded";
 }
 
@@ -208,14 +285,12 @@ function claudeBin(): string {
   return bin;
 }
 
-type ProfileEnv = Record<string, string | undefined>;
-
 /** Environment for a profile. `undefined` dir means "the base", i.e. leave the
  *  caller's CLAUDE_CONFIG_DIR exactly as it is (set or unset). */
-function envFor(dir: string | undefined): ProfileEnv {
-  const env: ProfileEnv = { ...process.env };
-  if (dir !== undefined) env.CLAUDE_CONFIG_DIR = dir;
-  return env;
+export function envFor(dir: string | undefined, env: Env = process.env): Env {
+  const out: Env = { ...env };
+  if (dir !== undefined) out.CLAUDE_CONFIG_DIR = dir;
+  return out;
 }
 
 async function execClaude(dir: string | undefined, args: string[]): Promise<never> {
@@ -246,7 +321,7 @@ async function captureClaude(dir: string | undefined, args: string[]): Promise<{
   return { code, out };
 }
 
-type AuthStatus = {
+export type AuthStatus = {
   loggedIn: boolean;
   email?: string;
   orgName?: string;
@@ -254,10 +329,9 @@ type AuthStatus = {
   authMethod?: string;
 };
 
-async function authStatus(dir: string | undefined): Promise<AuthStatus> {
-  const { out } = await captureClaude(dir, ["auth", "status", "--json"]);
+export function parseAuthStatus(text: string): AuthStatus {
   try {
-    const j: unknown = JSON.parse(out);
+    const j: unknown = JSON.parse(text);
     if (!j || typeof j !== "object") return { loggedIn: false };
     const o = j as JsonObject;
     const str = (k: string) => (typeof o[k] === "string" ? (o[k] as string) : undefined);
@@ -273,13 +347,29 @@ async function authStatus(dir: string | undefined): Promise<AuthStatus> {
   }
 }
 
-async function keychainHas(service: string): Promise<boolean | undefined> {
-  if (process.platform !== "darwin") return undefined;
-  const proc = Bun.spawn(["security", "find-generic-password", "-s", service, "-a", userInfo().username], {
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-  });
+async function authStatus(dir: string | undefined): Promise<AuthStatus> {
+  const { out } = await captureClaude(dir, ["auth", "status", "--json"]);
+  return parseAuthStatus(out);
+}
+
+/** Minimal spawner shape so the keychain check can be exercised without a real `security`. */
+export type Spawner = (cmd: string[]) => { exited: Promise<number> };
+
+export type KeychainDeps = { platform: NodeJS.Platform; username: string; spawn: Spawner };
+
+const defaultKeychainDeps = (): KeychainDeps => ({
+  platform: process.platform,
+  username: userInfo().username,
+  spawn: (cmd) => Bun.spawn(cmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore" }),
+});
+
+/** true/false on macOS, undefined elsewhere. Exit code only; the secret is never read. */
+export async function keychainHas(
+  service: string,
+  deps: KeychainDeps = defaultKeychainDeps(),
+): Promise<boolean | undefined> {
+  if (deps.platform !== "darwin") return undefined;
+  const proc = deps.spawn(["security", "find-generic-password", "-s", service, "-a", deps.username]);
   return (await proc.exited) === 0;
 }
 
@@ -287,12 +377,12 @@ async function keychainHas(service: string): Promise<boolean | undefined> {
 // Flag parsing
 // ---------------------------------------------------------------------------
 
-type Flags = { bools: Set<string>; strs: Map<string, string>; rest: string[] };
+export type Flags = { bools: Set<string>; strs: Map<string, string>; rest: string[] };
 
-function parseFlags(args: string[], boolNames: readonly string[], strNames: readonly string[]): Flags {
+export function parseFlags(args: string[], boolNames: readonly string[], strNames: readonly string[]): Flags {
   const flags: Flags = { bools: new Set(), strs: new Map(), rest: [] };
   for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
+    const a = args[i] as string;
     if (boolNames.includes(a)) {
       flags.bools.add(a);
     } else if (strNames.includes(a)) {
@@ -300,9 +390,9 @@ function parseFlags(args: string[], boolNames: readonly string[], strNames: read
       if (v === undefined) die(`${a} requires a value`);
       flags.strs.set(a, v);
       i++;
-    } else if (a.startsWith("--") && [...strNames].some((s) => a.startsWith(`${s}=`))) {
-      const [k, ...v] = a.split("=");
-      flags.strs.set(k!, v.join("="));
+    } else if (a.startsWith("--") && strNames.some((s) => a.startsWith(`${s}=`))) {
+      const eq = a.indexOf("=");
+      flags.strs.set(a.slice(0, eq), a.slice(eq + 1));
     } else if (a.startsWith("-")) {
       die(`unknown flag ${a}`);
     } else {
@@ -316,33 +406,43 @@ function parseFlags(args: string[], boolNames: readonly string[], strNames: read
 // Commands
 // ---------------------------------------------------------------------------
 
-async function cmdInit(args: string[]): Promise<void> {
+async function cmdInit(L: Layout, args: string[]): Promise<void> {
   const f = parseFlags(args, ["--copy-mcp", "--no-login", "--sso", "--console", "--force"], ["--email", "--alias"]);
   const name = f.rest[0];
-  if (!name) die("usage: claudep init <name> [--copy-mcp] [--no-login] [--sso] [--email <e>] [--console] [--alias <cmd>] [--force]");
-  if (!existsSync(BASE)) die(`base config dir ${BASE} does not exist — run \`claude\` once first`);
-  const dir = profileDir(name);
+  if (!name)
+    die(
+      "usage: claudep init <name> [--copy-mcp] [--no-login] [--sso] [--email <e>] [--console] [--alias <cmd>] [--force]",
+    );
+  if (!existsSync(L.base)) die(`base config dir ${L.base} does not exist. Run \`claude\` once first`);
+  const dir = profileDir(L, name);
   const fresh = !existsSync(dir);
   mkdirSync(dir, { recursive: true });
   console.log(`${c.bold(fresh ? "Creating" : "Updating")} profile ${c.bold(name)} at ${dir}`);
 
   let conflicts = 0;
-  for (const item of sharedItems()) {
-    const r = link(dir, item.name, f.bools.has("--force"));
+  for (const item of sharedItems(L.base)) {
+    const r = link(L.base, dir, item.name, f.bools.has("--force"));
     if (r === "linked") ok(`${item.name} → shared`);
     else if (r === "ok") console.log(`${c.dim("·")} ${item.name} ${c.dim("already shared")}`);
-    else if (r === "wrong-target") { warn(`${item.name} is a symlink to somewhere else (re-run with --force to relink)`); conflicts++; }
-    else { warn(`${item.name} is a real file/dir inside the profile — left alone (move it away to share)`); conflicts++; }
+    else if (r === "wrong-target") {
+      warn(`${item.name} is a symlink to somewhere else (re-run with --force to relink)`);
+      conflicts++;
+    } else {
+      warn(`${item.name} is a real file or dir inside the profile. Left alone; move it away to share it`);
+      conflicts++;
+    }
   }
 
-  const seeded = await seedGlobalJson(dir, f.bools.has("--copy-mcp"));
-  if (seeded === "seeded") ok(`.claude.json seeded${f.bools.has("--copy-mcp") ? " (with user-scope MCP servers)" : ""}`);
+  const seeded = await seedGlobalJson(L.baseGlobalJson, dir, f.bools.has("--copy-mcp"));
+  if (seeded === "seeded")
+    ok(`.claude.json seeded${f.bools.has("--copy-mcp") ? " (with user-scope MCP servers)" : ""}`);
   else if (seeded === "exists") console.log(`${c.dim("·")} .claude.json ${c.dim("already present")}`);
-  else warn(`could not read ${BASE_GLOBAL_JSON}; Claude Code will run its first-time onboarding`);
+  else warn(`could not read ${L.baseGlobalJson}; Claude Code will run its first-time onboarding`);
 
-  if (f.strs.has("--alias")) writeAlias(name, f.strs.get("--alias")!);
+  const alias = f.strs.get("--alias");
+  if (alias !== undefined) writeAlias(name, alias);
 
-  if (conflicts) warn(`${conflicts} item(s) need attention — see above`);
+  if (conflicts) warn(`${conflicts} item(s) need attention, see above`);
 
   if (f.bools.has("--no-login")) {
     console.log(`\nNext: ${c.bold(`claudep ${name} auth login`)}`);
@@ -351,7 +451,8 @@ async function cmdInit(args: string[]): Promise<void> {
   const loginArgs = ["auth", "login"];
   if (f.bools.has("--sso")) loginArgs.push("--sso");
   if (f.bools.has("--console")) loginArgs.push("--console");
-  if (f.strs.has("--email")) loginArgs.push("--email", f.strs.get("--email")!);
+  const email = f.strs.get("--email");
+  if (email !== undefined) loginArgs.push("--email", email);
   console.log(`\n${c.bold("Logging in")} to profile ${name} …`);
   await execClaude(dir, loginArgs);
 }
@@ -362,20 +463,24 @@ function scriptDir(): string {
 
 /** Directory where alias shims are written: next to the `claudep` command on
  *  PATH (usually a symlink into the repo), falling back to the script dir. */
-function aliasDir(): string {
+export function aliasDir(): string {
   const onPathBin = Bun.which("claudep");
   return onPathBin ? dirname(onPathBin) : scriptDir();
 }
 
 /** True when some PATH entry resolves (through symlinks) to `dir`. */
-function onPath(dir: string): boolean {
+export function onPath(dir: string, pathVar: string = process.env.PATH ?? ""): boolean {
   const want = realpathSync(dir);
-  return (process.env.PATH ?? "").split(":").some((p) => {
-    try { return realpathSync(canon(p)) === want; } catch { return false; }
+  return pathVar.split(":").some((p) => {
+    try {
+      return realpathSync(canon(p)) === want;
+    } catch {
+      return false;
+    }
   });
 }
 
-/** Write a tiny shim `<cmd>` next to this script: `exec claudep <name> "$@"`. */
+/** Write a tiny shim `<cmd>` next to the claudep on PATH: `exec claudep run <name> -- "$@"`. */
 function writeAlias(name: string, cmd: string): void {
   if (!NAME_RE.test(cmd)) die(`invalid alias command name "${cmd}"`);
   const dest = join(aliasDir(), cmd);
@@ -383,47 +488,47 @@ function writeAlias(name: string, cmd: string): void {
   if (existsSync(dest)) {
     const current = Bun.file(dest);
     if (!lstatSync(dest).isSymbolicLink() && current.size > 0) {
-      warn(`${dest} already exists — not overwriting (remove it first to regenerate)`);
+      warn(`${dest} already exists. Not overwriting; remove it first to regenerate`);
       return;
     }
   }
-  const shim = `#!/bin/sh\n# generated by claudep — runs Claude Code under the "${name}" profile\nexec bun "${self}" run ${name} -- "$@"\n`;
+  const shim = `#!/bin/sh\n# generated by claudep. Runs Claude Code under the "${name}" profile\nexec bun "${self}" run ${name} -- "$@"\n`;
   writeFileSync(dest, shim);
   chmodSync(dest, 0o755);
   ok(`alias ${c.bold(cmd)} → profile ${name} (${dest})`);
   if (!onPath(aliasDir())) warn(`${aliasDir()} is not on your PATH`);
 }
 
-async function cmdAlias(args: string[]): Promise<void> {
+async function cmdAlias(L: Layout, args: string[]): Promise<void> {
   const [name, cmd] = args;
   if (!name || !cmd) die("usage: claudep alias <profile> <command>   e.g. claudep alias enterprise eclaude");
-  if (!profileExists(name)) die(`profile "${name}" does not exist — run: claudep init ${name}`);
+  if (!profileExists(L, name)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
   writeAlias(name, cmd);
 }
 
-async function cmdRun(args: string[]): Promise<never> {
+async function cmdRun(L: Layout, args: string[]): Promise<never> {
   const name = args[0];
   if (!name) die("usage: claudep run <name> [claude args…]");
   const rest = args.slice(1);
   if (rest[0] === "--") rest.shift();
   if (name === "default" || name === "base") return execClaude(undefined, rest);
-  const dir = profileDir(name);
-  if (!existsSync(dir)) die(`profile "${name}" does not exist — run: claudep init ${name}`);
+  const dir = profileDir(L, name);
+  if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
   return execClaude(dir, rest);
 }
 
-type Row = { name: string; dir: string; status: AuthStatus };
+export type Row = { name: string; dir: string; status: AuthStatus };
 
-async function collectRows(names: string[]): Promise<Row[]> {
+async function collectRows(L: Layout, names: string[]): Promise<Row[]> {
   return Promise.all(
     names.map(async (name) => {
-      const dir = name === "default" ? BASE : profileDir(name);
+      const dir = name === "default" ? L.base : profileDir(L, name);
       return { name, dir, status: await authStatus(name === "default" ? undefined : dir) };
     }),
   );
 }
 
-function printTable(rows: Row[]): void {
+export function formatTable(rows: Row[], home: string): string[] {
   const cols = ["PROFILE", "LOGIN", "EMAIL", "ORG", "PLAN", "DIR"];
   const data = rows.map((r) => [
     r.name,
@@ -431,55 +536,62 @@ function printTable(rows: Row[]): void {
     r.status.email ?? "-",
     r.status.orgName ?? "-",
     r.status.subscriptionType ?? "-",
-    r.dir.replace(HOME, "~"),
+    r.dir.startsWith(home) ? `~${r.dir.slice(home.length)}` : r.dir,
   ]);
-  const widths = cols.map((h, i) => Math.max(h.length, ...data.map((d) => d[i]!.length)));
-  const fmt = (cells: string[]) => cells.map((v, i) => v.padEnd(widths[i]!)).join("  ");
-  console.log(c.bold(fmt(cols)));
-  for (const d of data) {
-    const line = fmt(d);
-    console.log(d[1] === "yes" ? line : c.dim(line));
-  }
+  const widths = cols.map((h, i) => Math.max(h.length, ...data.map((d) => (d[i] as string).length)));
+  const fmt = (cells: string[]) => cells.map((v, i) => v.padEnd(widths[i] as number)).join("  ");
+  return [fmt(cols), ...data.map((d) => fmt(d))];
 }
 
-async function cmdList(): Promise<void> {
-  const names = ["default", ...listProfileNames()];
-  printTable(await collectRows(names));
-  if (names.length === 1) console.log(c.dim(`\nNo profiles yet. Create one: claudep init <name>`));
+function printTable(rows: Row[], home: string): void {
+  const [header, ...lines] = formatTable(rows, home);
+  console.log(c.bold(header as string));
+  lines.forEach((line, i) => {
+    console.log(rows[i]?.status.loggedIn ? line : c.dim(line));
+  });
 }
 
-async function cmdStatus(args: string[]): Promise<void> {
+async function cmdList(L: Layout): Promise<void> {
+  const names = ["default", ...listProfileNames(L)];
+  printTable(await collectRows(L, names), L.home);
+  if (names.length === 1) console.log(c.dim("\nNo profiles yet. Create one: claudep init <name>"));
+}
+
+async function cmdStatus(L: Layout, args: string[]): Promise<void> {
   const f = parseFlags(args, ["--json"], []);
   const name = f.rest[0];
   if (!name) die("usage: claudep status <name> [--json]");
-  if (name !== "default" && !profileExists(name)) die(`profile "${name}" does not exist`);
-  const [row] = await collectRows([name]);
-  if (f.bools.has("--json")) console.log(JSON.stringify({ name: row!.name, dir: row!.dir, ...row!.status }, null, 2));
-  else printTable([row!]);
+  if (name !== "default" && !profileExists(L, name)) die(`profile "${name}" does not exist`);
+  const [row] = await collectRows(L, [name]);
+  if (!row) return;
+  if (f.bools.has("--json")) console.log(JSON.stringify({ name: row.name, dir: row.dir, ...row.status }, null, 2));
+  else printTable([row], L.home);
 }
 
-function cmdEnv(args: string[]): void {
+function cmdEnv(L: Layout, args: string[]): void {
   const name = args[0];
-  if (!name) die("usage: eval \"$(claudep env <name>)\"");
-  const dir = profileDir(name);
+  if (!name) die('usage: eval "$(claudep env <name>)"');
+  const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist`);
   console.log(`export CLAUDE_CONFIG_DIR='${dir.replace(/'/g, `'\\''`)}'`);
 }
 
-async function cmdDoctor(args: string[]): Promise<void> {
-  const names = args[0] ? [args[0]] : listProfileNames();
+async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
+  const names = args[0] ? [args[0]] : listProfileNames(L);
   const bin = Bun.which("claude");
   if (bin) {
     const { out } = await captureClaude(undefined, ["--version"]);
     ok(`claude: ${bin} (${out.trim() || "version unknown"})`);
   } else bad("claude binary not found on PATH");
-  ok(`base: ${BASE}${CALLER_CONFIG_DIR ? c.yellow("  (from CLAUDE_CONFIG_DIR in your shell)") : ""}`);
-  ok(`profiles root: ${PROFILES_ROOT}`);
+  ok(`base: ${L.base}${L.callerConfigDir ? c.yellow("  (from CLAUDE_CONFIG_DIR in your shell)") : ""}`);
+  ok(`profiles root: ${L.profilesRoot}`);
 
-  const shared = sharedItems();
+  const shared = sharedItems(L.base);
   const sharedNames = new Set(shared.map((s) => s.name));
-  const unclassified = existsSync(BASE)
-    ? readdirSync(BASE).filter((n) => !sharedNames.has(n) && !KNOWN_PRIVATE.has(n) && !n.endsWith(".md")).sort()
+  const unclassified = existsSync(L.base)
+    ? readdirSync(L.base)
+        .filter((n) => !sharedNames.has(n) && !KNOWN_PRIVATE.has(n) && !n.endsWith(".md"))
+        .sort()
     : [];
   if (unclassified.length) {
     warn(`base items neither shared nor known-private (they stay per-profile): ${unclassified.join(", ")}`);
@@ -487,17 +599,34 @@ async function cmdDoctor(args: string[]): Promise<void> {
 
   let problems = 0;
   for (const name of names) {
-    const dir = profileDir(name);
+    const dir = profileDir(L, name);
     console.log(`\n${c.bold(name)}  ${c.dim(dir)}`);
-    if (!existsSync(dir)) { bad("profile dir missing"); problems++; continue; }
+    if (!existsSync(dir)) {
+      bad("profile dir missing");
+      problems++;
+      continue;
+    }
     for (const item of shared) {
       const dest = join(dir, item.name);
       let st: ReturnType<typeof lstatSync> | undefined;
-      try { st = lstatSync(dest); } catch { st = undefined; }
-      if (!st) { warn(`${item.name}: not linked (run: claudep init ${name})`); problems++; }
-      else if (!st.isSymbolicLink()) { warn(`${item.name}: real ${item.kind} shadows the shared one`); problems++; }
-      else if (readlinkSync(dest) !== join(BASE, item.name)) { bad(`${item.name}: symlink points elsewhere (${readlinkSync(dest)})`); problems++; }
-      else if (!existsSync(dest)) { bad(`${item.name}: broken symlink`); problems++; }
+      try {
+        st = lstatSync(dest);
+      } catch {
+        st = undefined;
+      }
+      if (!st) {
+        warn(`${item.name}: not linked (run: claudep init ${name})`);
+        problems++;
+      } else if (!st.isSymbolicLink()) {
+        warn(`${item.name}: real ${item.kind} shadows the shared one`);
+        problems++;
+      } else if (readlinkSync(dest) !== join(L.base, item.name)) {
+        bad(`${item.name}: symlink points elsewhere (${readlinkSync(dest)})`);
+        problems++;
+      } else if (!existsSync(dest)) {
+        bad(`${item.name}: broken symlink`);
+        problems++;
+      }
     }
     ok(`${shared.length} shared item(s) checked`);
     const strays = readdirSync(dir).filter((n) => !sharedNames.has(n) && !KNOWN_PRIVATE.has(n) && !n.endsWith(".md"));
@@ -506,47 +635,63 @@ async function cmdDoctor(args: string[]): Promise<void> {
     const has = await keychainHas(svc);
     if (has === undefined) console.log(`${c.dim("·")} keychain check skipped (not macOS)`);
     else if (has) ok(`keychain item "${svc}" present`);
-    else warn(`no keychain item "${svc}" — not logged in yet (claudep ${name} auth login)`);
+    else warn(`no keychain item "${svc}". Not logged in yet (claudep ${name} auth login)`);
     const s = await authStatus(dir);
     if (s.loggedIn) ok(`logged in as ${s.email ?? "?"} (${s.orgName ?? "?"}, ${s.subscriptionType ?? "?"})`);
     else warn("not logged in");
   }
   if (!names.length) console.log(c.dim("\nNo profiles to check."));
-  if (problems) { console.log(`\n${c.red(`${problems} problem(s)`)}`); process.exit(1); }
+  if (problems) {
+    console.log(`\n${c.red(`${problems} problem(s)`)}`);
+    process.exit(1);
+  }
 }
 
-async function cmdRm(args: string[]): Promise<void> {
+async function cmdRm(L: Layout, args: string[]): Promise<void> {
   const f = parseFlags(args, ["--keep-login", "--yes"], []);
   const name = f.rest[0];
   if (!name) die("usage: claudep rm <name> [--keep-login] [--yes]");
-  const dir = profileDir(name);
+  const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist`);
   const real = realpathSync(dir);
-  if (!real.startsWith(`${realpathSync(PROFILES_ROOT)}/`) || real === realpathSync(BASE) || real === HOME)
-    die(`refusing to remove ${real}: not inside ${PROFILES_ROOT}`);
+  if (!real.startsWith(`${realpathSync(L.profilesRoot)}/`) || real === realpathSync(L.base) || real === L.home)
+    die(`refusing to remove ${real}: not inside ${L.profilesRoot}`);
   if (!f.bools.has("--yes")) {
-    const yes = confirm(`Remove profile "${name}" (${dir})? Shared items are only unlinked; ${BASE} is untouched.`);
-    if (!yes) { console.log("aborted"); return; }
+    const yes = confirm(`Remove profile "${name}" (${dir})? Shared items are only unlinked; ${L.base} is untouched.`);
+    if (!yes) {
+      console.log("aborted");
+      return;
+    }
   }
   if (!f.bools.has("--keep-login")) {
-    const proc = Bun.spawn([claudeBin(), "auth", "logout"], { env: envFor(dir), stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+    const proc = Bun.spawn([claudeBin(), "auth", "logout"], {
+      env: envFor(dir),
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    });
     if ((await proc.exited) === 0) ok("logged out (token revoked, keychain item removed)");
-    else warn("logout failed or was not logged in — continuing");
+    else warn("logout failed or was not logged in. Continuing");
   }
   rmSync(dir, { recursive: true, force: true });
   ok(`removed ${dir}`);
-  for (const entry of readdirSync(aliasDir())) {
-    const p = join(aliasDir(), entry);
+  const shims = aliasDir();
+  for (const entry of readdirSync(shims)) {
+    const p = join(shims, entry);
     try {
-      const txt = lstatSync(p).isFile() ? Bun.file(p) : undefined;
-      if (txt && (await txt.text()).includes(`generated by claudep`) && (await txt.text()).includes(` run ${name} -- `))
-        warn(`alias shim ${p} still points at this profile — remove it if unused`);
-    } catch { /* ignore unreadable entries */ }
+      if (!lstatSync(p).isFile()) continue;
+      const txt = await Bun.file(p).text();
+      if (txt.includes("generated by claudep") && txt.includes(` run ${name} -- `))
+        warn(`alias shim ${p} still points at this profile. Remove it if unused`);
+    } catch {
+      /* ignore unreadable entries */
+    }
   }
 }
 
-function help(): void {
-  console.log(`${c.bold("claudep")} — run Claude Code under separate accounts on one machine
+function help(L: Layout): void {
+  const root = L.profilesRoot.startsWith(L.home) ? `~${L.profilesRoot.slice(L.home.length)}` : L.profilesRoot;
+  console.log(`${c.bold("claudep")}: run Claude Code under separate accounts on one machine
 
 ${c.bold("USAGE")}
   claudep <name> [claude args…]        run claude with profile <name>  (alias for "run")
@@ -572,11 +717,11 @@ ${c.bold("EXAMPLES")}
   eclaude                                       # Claude Code as the enterprise account
   claude                                        # Claude Code as whatever ~/.claude is logged in as
   claudep enterprise -p "summarize this repo"
-  eval "$(claudep env enterprise)"       # pin the whole shell to a profile
+  eval "$(claudep env enterprise)"              # pin the whole shell to a profile
 
 ${c.bold("HOW IT WORKS")}
   ~/.claude stays exactly as it is and remains the "default" profile. Each named profile is a
-  thin directory under ${PROFILES_ROOT.replace(HOME, "~")}/<name> that Claude Code is pointed at via
+  thin directory under ${root}/<name> that Claude Code is pointed at via
   CLAUDE_CONFIG_DIR. Inside it, shared config is a symlink back into ~/.claude:
     ${[...SHARED_FILES, "*.md", ...SHARED_DIRS].join("  ")}
   Everything account-specific is real and per profile: .claude.json (login identity, MCP
@@ -594,38 +739,39 @@ ${c.bold("ENVIRONMENT")}
 // Entry
 // ---------------------------------------------------------------------------
 
-async function main(): Promise<void> {
-  const [cmd, ...args] = Bun.argv.slice(2);
+export async function main(argv: string[]): Promise<void> {
+  const L = layout();
+  const [cmd, ...args] = argv;
   switch (cmd) {
     case undefined:
     case "help":
     case "-h":
     case "--help":
-      help();
+      help(L);
       return;
     case "init":
-      return cmdInit(args);
+      return cmdInit(L, args);
     case "run":
-      return cmdRun(args);
+      return cmdRun(L, args);
     case "list":
     case "ls":
-      return cmdList();
+      return cmdList(L);
     case "status":
-      return cmdStatus(args);
+      return cmdStatus(L, args);
     case "env":
-      return cmdEnv(args);
+      return cmdEnv(L, args);
     case "alias":
-      return cmdAlias(args);
+      return cmdAlias(L, args);
     case "doctor":
-      return cmdDoctor(args);
+      return cmdDoctor(L, args);
     case "rm":
     case "remove":
-      return cmdRm(args);
+      return cmdRm(L, args);
     default:
-      if (cmd === "default" || cmd === "base" || profileExists(cmd)) return cmdRun([cmd, ...args]);
-      if (NAME_RE.test(cmd)) die(`no profile "${cmd}" — create it with: claudep init ${cmd}`);
-      die(`unknown command "${cmd}" — try: claudep help`);
+      if (cmd === "default" || cmd === "base" || profileExists(L, cmd)) return cmdRun(L, [cmd, ...args]);
+      if (NAME_RE.test(cmd)) die(`no profile "${cmd}". Create it with: claudep init ${cmd}`);
+      die(`unknown command "${cmd}". Try: claudep help`);
   }
 }
 
-await main();
+if (import.meta.main) await main(Bun.argv.slice(2));

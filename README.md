@@ -1,5 +1,7 @@
 # claudep
 
+[![CI](https://github.com/bordoni/claudep/actions/workflows/ci.yml/badge.svg)](https://github.com/bordoni/claudep/actions/workflows/ci.yml)
+
 Run [Claude Code](https://code.claude.com) under separate accounts on one machine, for example a company Enterprise org and a personal Max plan, with fully isolated logins and shared configuration.
 
 Claude Code has no built-in account switching. `claudep` is a single dependency-free [bun](https://bun.sh) script that manages named **profiles**, each pointed at Claude Code through `CLAUDE_CONFIG_DIR`.
@@ -62,7 +64,12 @@ The shared list is an explicit allowlist, so account-specific files can never le
 - Set `CLAUDE_PROFILES_DIR` to move the profiles root. Keep it out of iCloud or Dropbox; `.claude.json` is rewritten constantly and sync tools create conflict copies.
 - Never put `CLAUDE_CONFIG_DIR` in a `settings.json` `env` block. Claude Code detects that mismatch and disables features.
 
-## Contributing
+## Development
+
+```sh
+bun install        # dev tooling only; nothing ships with the tool
+bun run check      # typecheck, lint, tests. Same as CI
+```
 
 Working on the script? Start with [`AGENTS.md`](./AGENTS.md); the detail lives in [`.ref/`](./.ref/).
 

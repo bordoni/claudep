@@ -43,3 +43,15 @@ Deleting a profile directory does not remove its Keychain item. `rm` runs `claud
 - **Per-profile `settings.json` overrides.** Would need a merge layer; `--settings <file>` on the command line already covers the rare case.
 - **Auto-migration of an existing `~/.claude` login into a named profile.** Would touch the base, which is the one thing claudep promises not to do.
 - **Windows / Linux credential checks.** `doctor` reports "skipped"; the rest works because `CLAUDE_CONFIG_DIR` is honoured everywhere and `.credentials.json` is per directory.
+
+## 2026-09-02 — Tests: `bun test`, a fake `claude` on PATH, injection over module mocks
+
+The suite follows what bun-native CLIs on GitHub do (sst/opencode, oven-sh/bun, bunup, imessage-kit, OpenRouterLabs/spawn): `bun test`, a `test/` directory, a preload that sandboxes `$HOME`, and subprocess tests that spawn the real entrypoint. Command behaviour is asserted from the outside; helpers are unit-tested in process after being exported behind an `import.meta.main` guard.
+
+Rejected: `mock.module` for `Bun.spawn`. Both opencode and spawn moved away from it because of cross-file mock pollution. `keychainHas` takes an injected spawner instead, and the CLI tests use a fake `claude` and `security` on PATH, which also proves the environment claudep hands to the child.
+
+Dev-only dependencies (`typescript`, `@types/bun`, `@biomejs/biome`) are allowed. They do not ship: `bun install -g` of the package installs the `bin` entry and nothing else. The "never add a dependency" rule now reads "runtime dependency".
+
+## 2026-09-02 — `layout()` instead of import-time constants
+
+`HOME`, `BASE`, `PROFILES_ROOT` used to be computed when the module loaded, which made them impossible to redirect in tests. `layout(env)` computes them on call and every helper takes what it needs as a parameter. `main()` calls it once.

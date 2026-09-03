@@ -1,49 +1,55 @@
 # Testing claudep
 
-There is no automated test suite. Verification is a scripted manual cycle that must be run after any change to `claudep.ts`. Every step below was run on 2026-09-02 against Claude Code 2.1.259 and bun 1.4.0.
-
-## 1. Strict typecheck
-
-bun does not typecheck. Use `tsc` in a scratch directory so the repo stays dependency-free:
+`bun run check` is the gate: typecheck, lint, then the suite. CI runs the same three steps on every push and pull request (`.github/workflows/ci.yml`), with the tests on both macOS and Linux. The suite takes about four seconds locally.
 
 ```bash
-S=$(mktemp -d) && cd "$S" && bun add -d bun-types typescript >/dev/null \
-  && cp ~/workspace/claudep/claudep.ts . \
-  && printf '{"compilerOptions":{"strict":true,"noUncheckedIndexedAccess":true,"target":"esnext","module":"esnext","moduleResolution":"bundler","skipLibCheck":true,"noEmit":true,"types":["bun-types"]},"files":["claudep.ts"]}' > tsconfig.json \
-  && bunx tsc -p tsconfig.json; echo "tsc exit=$?"; rm -rf "$S"
+bun install              # dev tooling only: typescript, @types/bun, @biomejs/biome
+bun run check            # what CI runs
+bun test --watch         # while editing
+bun run test:coverage    # text table plus coverage/lcov.info
+bun run lint:fix         # let Biome format and fix what it can
 ```
 
-Expect `tsc exit=0` with no output.
+## How the suite is built
 
-## 2. Smoke cycle (no login needed)
+| Piece | Job |
+|---|---|
+| `bunfig.toml` | Points `bun test` at `test/preload.ts` and configures coverage. |
+| `test/preload.ts` | Runs before any test file. Moves `HOME` and the XDG dirs to a throwaway directory, sets `NO_COLOR=1`, and deletes every `ANTHROPIC_*` and `CLAUDE_*` variable from the shell. Nothing under test can reach the real `~/.claude`, `~/.claudep` or keychain. |
+| `test/lib/home.ts` | `using h = fakeHome()` builds a realistic `~/.claude` (shared files, private files, a `.claude.json` with seedable keys and identity that must never be copied) and removes it when the block ends. |
+| `test/lib/cli.ts` | `runCli(args, { home })` spawns the real `claudep.ts` with a fake `$HOME` and a bin dir prepended to PATH, and returns `{ exitCode, stdout, stderr }`. |
+| `test/lib/fake-claude.ts` | Stands in for `claude`. Reads and writes `<config dir>/.fake-login.json` for `auth status/login/logout`, prints a fake `--version`, and logs any other invocation to `$FAKE_CLAUDE_LOG` with the `CLAUDE_CONFIG_DIR` it saw. `FAKE_CLAUDE_EXIT` sets its exit code. |
+| `test/lib/fake-security.ts` | Stands in for macOS `security`. Exits 0 when the requested service is listed in `$FAKE_KEYCHAIN`. |
+
+Test files:
+
+- `test/unit.test.ts`: pure helpers imported from `claudep.ts` (`canon`, `layout`, `keychainService`, `parseFlags`, `formatTable`, `parseAuthStatus`, name rules).
+- `test/fs.test.ts`: `sharedItems`, `link`, `seedGlobalJson` against a fake home, in process.
+- `test/keychain.test.ts`: `keychainHas` with an injected spawner, plus one real `security` call gated on macOS.
+- `test/cli.test.ts`: every command as a subprocess. This is where behaviour lives; add a case here when you change a command.
+
+`claudep.ts` exports its helpers and guards the entrypoint with `import.meta.main`, so importing it in a test runs nothing.
+
+## What the fake claude proves and what it cannot
+
+It proves that claudep passes the right `CLAUDE_CONFIG_DIR` and arguments, reads `auth status --json` correctly, and calls `auth logout` before deleting a profile. It cannot prove that the real Claude Code isolates logins per config dir. That fact was verified against the binary (see `claude-code-internals.md`) and is re-checked by hand:
 
 ```bash
-claudep init smoke --no-login          # only symlinks + seeded .claude.json should appear
-ls -la ~/.claudep/smoke
-claudep doctor smoke                   # 11 shared items on the author's machine; no problems
-claudep smoke auth status --text       # "Not logged in", exit 1  → profile is isolated
-claude auth status --json              # base account still logged in, unchanged
-claudep list                           # default = yes, smoke = no
-claudep env smoke                      # export CLAUDE_CONFIG_DIR='/Users/<you>/.claudep/smoke'
-claudep status smoke --json
-claudep nope                           # error: no profile "nope"
-claudep init default                   # error: reserved word
-claudep rm smoke --yes --keep-login    # dir gone; ~/.claude and ~/.claude/projects intact
+claudep init smoke --no-login
+claudep smoke auth login                  # any account, in the browser
+claudep list                              # two rows, different logins
+security find-generic-password -s "Claude Code-credentials-$(printf '%s' "$HOME/.claudep/smoke" | shasum -a 256 | cut -c1-8)" -a "$USER" >/dev/null && echo isolated-keychain-item
+claudep smoke -p "reply with ok"
+claudep rm smoke --yes                    # logs out first; the keychain item disappears
 ```
 
-Check base integrity after `rm`: `ls ~/.claude/projects | wc -l` and `wc -c ~/.claude/CLAUDE.md` unchanged.
+Run that after a Claude Code major update. The `shasum` line matches only for ASCII paths; `claudep doctor` prints the exact service name it expects.
 
-## 3. Alias shim
+## Coverage
 
-```bash
-claudep alias enterprise eclaude       # shim lands next to the `claudep` on PATH, not in the repo
-cat "$(dirname "$(which claudep)")/eclaude"
-eclaude auth status --text
-```
+Coverage counts only code that ran in the test process. The subprocess tests exercise most of `claudep.ts` but do not show up in the table, so the reported line coverage understates the real number. There is no threshold gate.
 
-Confirm `git status` in the repo shows no new file.
-
-## 4. Global install from GitHub, isolated
+## Install check
 
 ```bash
 S=$(mktemp -d) && BUN_INSTALL="$S" bun install -g github:bordoni/claudep && "$S/bin/claudep" list; rm -rf "$S"
@@ -51,21 +57,11 @@ S=$(mktemp -d) && BUN_INSTALL="$S" bun install -g github:bordoni/claudep && "$S/
 
 Do not run the plain `bun install -g` on the author's machine: `~/.bun/bin` precedes `~/.dotfiles/bin` on PATH and would shadow the symlink.
 
-## 5. Login-dependent checks (needs a human in a browser)
-
-```bash
-claudep smoke auth login               # log in with any account
-claudep list                           # both rows logged in, different orgs
-security find-generic-password -s "Claude Code-credentials-$(printf '%s' "$HOME/.claudep/smoke" | shasum -a 256 | cut -c1-8)" -a "$USER" >/dev/null && echo isolated-keychain-item
-claudep smoke -p "reply with ok"
-claudep rm smoke --yes                 # logs out first; the keychain item disappears
-```
-
-The `shasum` line only matches when the path has no non-ASCII characters (claudep hashes the NFC-normalized string). `claudep doctor` prints the exact service name it expects.
-
 ## Gotcha log
 
-- `sed s/claude-profile/claudep/g` during the rename also rewrote `.claude-profiles` to `.claudeps`. Grep for collateral matches before global renames.
-- `Bun.main` is the symlink-resolved path. Use `Bun.which("claudep")` when you need the PATH location (alias shims), `realpathSync(Bun.main)` when you need the file itself (the shim's `exec` target).
-- `grep -aoE '.{0,200}needle.{0,200}'` on the Claude Code binary times out; see `claude-code-internals.md` for the `Buffer.indexOf` approach.
+- bun's `os.homedir()` reads `getpwuid()` and ignores `$HOME`. `claudep.ts` reads `process.env.HOME` first for this reason; without it the preload sandbox silently does nothing.
+- `Bun.main` is the symlink-resolved path. Use `Bun.which("claudep")` for the PATH location (alias shims) and `realpathSync(Bun.main)` for the file itself.
+- Column padding: the table pads every cell, including the last column, so assert on `line.trimEnd()`.
+- `sed s/claude-profile/claudep/g` once rewrote `.claude-profiles` to `.claudeps`. Grep for collateral matches before global renames.
+- `grep -aoE` with context on the Claude Code binary times out; `claude-code-internals.md` has the `Buffer.indexOf` approach.
 - zsh's pipe status array is `$pipestatus`, not `$PIPESTATUS`.
