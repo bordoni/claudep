@@ -12,7 +12,7 @@ A `.claudep` file names the profile every hooked shell should use inside that di
 ## Resolution rules
 
 1. Walk upward from the current directory to `/`. The first **regular file** named `.claudep` wins. A directory with that name is skipped, which is how `~/.claudep` (the profiles root) never counts as a pin.
-2. The pin is the first line that is not empty and does not start with `#`, trimmed.
+2. The pin is the first line that is not empty and does not start with `#`, trimmed. A trailing `\r` is stripped, so a pin file committed with CRLF endings names the same profile. `readPinName()` gets that from `trim()`; the hook strips it with `${line%$'\r'}` after `read -r`.
 3. An empty pin file, or one with only comments, means "no pin here". That is how a subtree cancels a parent's pin.
 4. A pin naming a profile directory that does not exist sets nothing and prints one warning per directory change.
 
