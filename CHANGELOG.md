@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Added
 
 - Windows support from PowerShell and Git Bash: `claudep init` stops with Developer Mode instructions when Windows refuses to create a symlink; `claudep alias` writes `<command>.cmd` next to the sh shim; an npm-installed `claude.cmd` is launched through cmd.exe and `claude.exe` is preferred when both exist; the bash hook under Git Bash exports the native `C:\` path. CI runs the suite on Windows, and the README has a Windows section.
+- `claudep shell-init powershell` prints a hook for Windows PowerShell 5.1 and PowerShell 7 that follows `.claudep` pins by wrapping `prompt`. `claudep env` prints PowerShell syntax when run from PowerShell. `shell-init` with no argument now picks the shell from `$SHELL`, or PowerShell on Windows. `claudep current` and `doctor` warn about a POSIX-style `CLAUDE_CONFIG_DIR` on Windows.
 
 ### Changed
 

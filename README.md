@@ -47,7 +47,7 @@ Two things differ from macOS:
 - Profiles share configuration through symlinks, and Windows lets a normal user create symlinks only with Developer Mode on (Settings > For developers > Developer Mode). `claudep init` stops and says so when it is off. Turn it on, open a new terminal and run the same command again.
 - There is no keychain. Claude Code keeps each profile's login in `<profile>\.credentials.json`, and `claudep doctor` checks that the file is there.
 
-Git Bash works the same as bash elsewhere: put `eval "$(claudep shell-init bash)"` in `~/.bashrc`. An npm-installed `claude.cmd` runs through cmd.exe; the native installer's `claude.exe` avoids that hop and is what `claudep doctor` recommends. cmd.exe itself is not supported.
+`claudep env` prints PowerShell syntax when run from PowerShell and sh syntax from Git Bash, so `claudep env work | Invoke-Expression` and `eval "$(claudep env work)"` both work. Git Bash otherwise behaves like bash elsewhere: put `eval "$(claudep shell-init bash)"` in `~/.bashrc`. An npm-installed `claude.cmd` runs through cmd.exe; the native installer's `claude.exe` avoids that hop and is what `claudep doctor` recommends. cmd.exe itself is not supported.
 
 ## Usage
 
@@ -63,7 +63,7 @@ claudep doctor [name]                verify symlinks, keychain entry, unclassifi
 claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
 claudep local <name> | --remove      pin the current directory tree to a profile (see below)
 claudep resolve [dir]                print the profile pinned for a directory
-claudep shell-init [zsh|bash]        print the hook that applies pins on cd
+claudep shell-init [zsh|bash|powershell]   print the hook that applies pins on cd
 claudep --version
 ```
 
@@ -78,16 +78,22 @@ cd ~/work/acme
 claudep local enterprise          # writes ./.claudep containing "enterprise"
 ```
 
-Shells apply pins through a hook. Add one line to `~/.zshrc` (or `~/.bashrc` with `bash`):
+Shells apply pins through a hook. Add one line to `~/.zshrc` (or `~/.bashrc` with `bash`, including Git Bash on Windows):
 
 ```sh
 eval "$(claudep shell-init zsh)"
 ```
 
-From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile and `cd` out of it returns the shell to `~/.claude`. The hook is pure shell with no subprocess, so it costs nothing at the prompt. The rules:
+In PowerShell the line goes in `$PROFILE`:
+
+```powershell
+claudep shell-init powershell | Out-String | Invoke-Expression
+```
+
+From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile and `cd` out of it returns the shell to `~/.claude`. The hook is pure shell with no subprocess (cmdlets only in PowerShell), so it costs nothing at the prompt. The rules:
 
 - The nearest `.claudep` file upward from the current directory wins. An empty one cancels a parent pin.
-- The hook only changes a `CLAUDE_CONFIG_DIR` it set itself. It tracks that in `CLAUDEP_AUTO`, so a manual pin from `eval "$(claudep env work)"` or a plain `export` stays put until you `eval "$(claudep env --unset)"`.
+- The hook only changes a `CLAUDE_CONFIG_DIR` it set itself. It tracks that in `CLAUDEP_AUTO`, so a manual pin from `eval "$(claudep env work)"` (`claudep env work | Invoke-Expression` in PowerShell) or a plain `export` stays put until you `eval "$(claudep env --unset)"`.
 - A pin that names a profile you have not created prints one warning per directory change and sets nothing.
 
 `claudep current` tells you which profile the shell is on and how it got there (hook, manual pin, or nothing). `claudep list` adds the same line at the bottom.

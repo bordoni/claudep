@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { aliasFiles, keychainService } from "../claudep.ts";
+import { aliasFiles, envScript, keychainService, SHELLS } from "../claudep.ts";
 import { fakeBin, REPO, runCli } from "./lib/cli.ts";
 import { BASE_DIRS, BASE_FILES, fakeHome, PRIVATE_DIRS, PRIVATE_FILES, writeLogin } from "./lib/home.ts";
 import { norm, rx, tilde } from "./lib/paths.ts";
@@ -182,12 +182,15 @@ describe("list and status", () => {
 });
 
 describe("env", () => {
-  test("prints one export line with the canonical dir", async () => {
+  test("prints the pin in the syntax of the shell it runs from", async () => {
     using h = fakeHome();
     await runCli(["init", "smoke", "--no-login"], { home: h.home });
-    const r = await runCli(["env", "smoke"], { home: h.home });
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout).toBe(`export CLAUDE_CONFIG_DIR='${join(h.profilesRoot, "smoke")}'\nunset CLAUDEP_AUTO\n`);
+    const dir = join(h.profilesRoot, "smoke");
+    const native = await runCli(["env", "smoke"], { home: h.home, env: { MSYSTEM: undefined } });
+    expect(native.exitCode).toBe(0);
+    expect(native.stdout).toBe(envScript(dir, WIN ? "powershell" : "sh"));
+    const gitBash = await runCli(["env", "smoke"], { home: h.home, env: { MSYSTEM: "MINGW64" } });
+    expect(gitBash.stdout).toBe(`export CLAUDE_CONFIG_DIR='${dir}'\nunset CLAUDEP_AUTO\n`);
   });
 });
 
@@ -415,8 +418,10 @@ describe("version", () => {
 describe("env --unset", () => {
   test("prints the unset for both variables", async () => {
     using h = fakeHome();
-    const r = await runCli(["env", "--unset"], { home: h.home });
-    expect(r.stdout).toBe("unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO\n");
+    const r = await runCli(["env", "--unset"], { home: h.home, env: { MSYSTEM: undefined } });
+    expect(r.stdout).toBe(envScript(undefined, WIN ? "powershell" : "sh"));
+    const gitBash = await runCli(["env", "--unset"], { home: h.home, env: { MSYSTEM: "MINGW64" } });
+    expect(gitBash.stdout).toBe("unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO\n");
   });
 });
 
@@ -554,5 +559,17 @@ describe("local and resolve", () => {
     const r = await runCli(["shell-init", "fish"], { home: h.home });
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("unsupported shell");
+  });
+
+  test("shell-init prints a hook for every supported shell", async () => {
+    using h = fakeHome();
+    for (const shell of SHELLS) {
+      const r = await runCli(["shell-init", shell], { home: h.home });
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("_claudep_auto");
+      expect(r.stdout).toContain(h.profilesRoot);
+    }
+    const ps = await runCli(["shell-init", "powershell"], { home: h.home });
+    expect(ps.stdout).toContain("function global:prompt");
   });
 });
