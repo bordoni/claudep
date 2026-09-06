@@ -12,6 +12,7 @@ import { join } from "node:path";
 const root = mkdtempSync(join(realpathSync.native(tmpdir()), "claudep-test-"));
 
 process.env.HOME = root;
+process.env.USERPROFILE = root;
 process.env.XDG_CONFIG_HOME = join(root, ".config");
 process.env.XDG_DATA_HOME = join(root, ".local", "share");
 process.env.XDG_STATE_HOME = join(root, ".local", "state");

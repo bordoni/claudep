@@ -34,6 +34,21 @@ git clone git@github.com:bordoni/claudep.git ~/workspace/claudep
 ln -s ~/workspace/claudep/claudep.ts ~/.local/bin/claudep
 ```
 
+### Windows
+
+claudep runs natively on Windows from PowerShell 5.1, PowerShell 7 and Git Bash. Install it with bun, which writes `claudep.exe` into `%USERPROFILE%\.bun\bin`:
+
+```powershell
+bun add -g @bordoni/claudep
+```
+
+Two things differ from macOS:
+
+- Profiles share configuration through symlinks, and Windows lets a normal user create symlinks only with Developer Mode on (Settings > For developers > Developer Mode). `claudep init` stops and says so when it is off. Turn it on, open a new terminal and run the same command again.
+- There is no keychain. Claude Code keeps each profile's login in `<profile>\.credentials.json`, and `claudep doctor` checks that the file is there.
+
+Git Bash works the same as bash elsewhere: put `eval "$(claudep shell-init bash)"` in `~/.bashrc`. An npm-installed `claude.cmd` runs through cmd.exe; the native installer's `claude.exe` avoids that hop and is what `claudep doctor` recommends. cmd.exe itself is not supported.
+
 ## Usage
 
 ```
@@ -88,7 +103,7 @@ From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile 
 | `hooks/`, `skills/`, `commands/`, `agents/`, `plugins/`, `plans/` | `history.jsonl`, `todos/`, `sessions/`, caches, telemetry |
 | `projects/` (session transcripts and auto-memory) | credentials |
 
-Credentials never touch the profile directory. On macOS, Claude Code stores them in the Keychain under `Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[0:8]>`, so every profile has its own login and refresh token and they cannot overwrite each other. I verified this against Claude Code 2.1.259. An older bug where every config dir shared one Keychain entry no longer applies.
+On macOS, credentials never touch the profile directory: Claude Code stores them in the Keychain under `Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[0:8]>`, so every profile has its own login and refresh token and they cannot overwrite each other. I verified this against Claude Code 2.1.259. An older bug where every config dir shared one Keychain entry no longer applies. On Linux and Windows the login is `<profile>/.credentials.json`, a real file inside the profile that is never shared.
 
 The shared list is an allowlist, so an account-specific file cannot leak across profiles by accident. `claudep doctor` reports any base file that is neither shared nor known-private. That is how you notice when a new Claude Code version adds something.
 

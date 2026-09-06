@@ -616,9 +616,16 @@ function spawnClaude(L: Layout, dir: string | undefined, args: string[], io: "in
 
 /** Environment for a profile. `undefined` dir means "the base", i.e. leave the
  *  caller's CLAUDE_CONFIG_DIR exactly as it is (set or unset). */
-export function envFor(dir: string | undefined, env: Env = process.env): Env {
+export function envFor(
+  dir: string | undefined,
+  env: Env = process.env,
+  platform: NodeJS.Platform = process.platform,
+): Env {
   const out: Env = { ...env };
-  if (dir !== undefined) out.CLAUDE_CONFIG_DIR = dir;
+  if (dir !== undefined) {
+    deleteEnv(out, "CLAUDE_CONFIG_DIR", platform);
+    out.CLAUDE_CONFIG_DIR = dir;
+  }
   return out;
 }
 
@@ -635,7 +642,7 @@ export function baseEnv(L: Layout, env: Env = process.env): Env {
 }
 
 function claudeEnv(L: Layout, dir: string | undefined): Env {
-  return dir === undefined ? baseEnv(L) : envFor(dir);
+  return dir === undefined ? baseEnv(L) : envFor(dir, process.env, L.platform);
 }
 
 async function execClaude(L: Layout, dir: string | undefined, args: string[]): Promise<never> {
@@ -1029,10 +1036,19 @@ function cmdLocal(L: Layout, args: string[]): void {
 /** The shell hook. Pure parameter expansion and builtins: it runs on every
  *  directory change (zsh chpwd) or prompt (bash PROMPT_COMMAND), so no
  *  subprocess is allowed here. Logic mirrors resolvePin(). */
-export function shellInit(shell: "zsh" | "bash", profilesRoot: string): string {
+export function shellInit(
+  shell: "zsh" | "bash",
+  profilesRoot: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const q = profilesRoot.replace(/'/g, `'\\''`);
+  // Under Git Bash $PWD is POSIX-style but the exported value must be the
+  // native path claude.exe reads, so the root and its separator are embedded
+  // as the native bun saw them and only the walk uses $PWD.
+  const sep = platform === "win32" ? "\\" : "/";
   const core = `# claudep shell hook. Load it from your rc file:  eval "$(claudep shell-init ${shell})"
 _claudep_root='${q}'
+_claudep_sep='${sep}'
 _claudep_auto() {
   [ "$PWD" = "\${_claudep_last_pwd:-}" ] && return 0
   _claudep_last_pwd="$PWD"
@@ -1060,12 +1076,12 @@ _claudep_auto() {
     [ -n "\${CLAUDEP_AUTO:-}" ] && unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO
     return 0
   fi
-  if [ ! -d "$_claudep_root/$_claudep_name" ]; then
+  if [ ! -d "$_claudep_root$_claudep_sep$_claudep_name" ]; then
     [ -n "\${CLAUDEP_AUTO:-}" ] && unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO
     printf 'claudep: %s/${PIN_FILE} names profile "%s", which does not exist. Run: claudep init %s\\n' "$_claudep_found" "$_claudep_name" "$_claudep_name" >&2
     return 0
   fi
-  export CLAUDE_CONFIG_DIR="$_claudep_root/$_claudep_name" CLAUDEP_AUTO="$_claudep_root/$_claudep_name"
+  export CLAUDE_CONFIG_DIR="$_claudep_root$_claudep_sep$_claudep_name" CLAUDEP_AUTO="$_claudep_root$_claudep_sep$_claudep_name"
 }
 `;
   const tail =

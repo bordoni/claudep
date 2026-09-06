@@ -7,7 +7,7 @@ This is the source of truth for anyone changing this repository, human or agent.
 A single-file bun CLI, [`claudep.ts`](./claudep.ts), that runs Claude Code under separate accounts on one machine. It creates named profiles under `~/.claudep/<name>`, points Claude Code at them via `CLAUDE_CONFIG_DIR`, symlinks shared config back into `~/.claude`, and leaves credentials and account state per profile.
 
 - Zero runtime dependencies. Strict TypeScript, executed directly by bun (`#!/usr/bin/env bun`). No build step. Dev tooling only: `typescript`, `@types/bun`, `@biomejs/biome`.
-- macOS-first: the Keychain check is darwin-only and degrades to "skipped" elsewhere; everything else is portable.
+- Runs on macOS, Linux and Windows (PowerShell 5.1 and 7, Git Bash). The Keychain check is darwin-only; elsewhere `doctor` checks for `.credentials.json`. cmd.exe is not a target. CI runs the suite on all three.
 - Installed either by symlinking `claudep.ts` onto PATH (how the author runs it: `~/.dotfiles/bin/claudep`) or with `bun install -g github:bordoni/claudep` (the `bin` entry in `package.json`).
 - `~/.claude` is never modified. It is the implicit `default` profile.
 
@@ -24,6 +24,7 @@ A single-file bun CLI, [`claudep.ts`](./claudep.ts), that runs Claude Code under
 | [`.ref/tooling-gotchas.md`](./.ref/tooling-gotchas.md) | Before running non-trivial shell commands here: inline scripts lose braces, SSH to GitHub times out, zsh differs from bash. |
 | [`.ref/writing.md`](./.ref/writing.md) | You are writing or editing prose a person reads: README, this file, `.ref/`, help text, CLI messages. |
 | [`.ref/design-decisions.md`](./.ref/design-decisions.md) | You are tempted to restructure profiles, rename paths, or add a feature that was already considered. |
+| [`.ref/windows.md`](./.ref/windows.md) | You are touching symlinks, the launcher, path comparison or the hook, or the Windows CI job failed. What Claude Code and bun do on Windows and what the job proves. |
 
 ## Commands
 
