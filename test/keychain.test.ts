@@ -27,8 +27,8 @@ describe("keychainHas", () => {
     expect(await keychainHas("svc", deps(44))).toBe(false);
   });
 
-  test("is undefined off macOS and never spawns", async () => {
-    const d = deps(0, "linux");
+  test.each(["linux", "win32"] as const)("is undefined on %s and never spawns", async (platform) => {
+    const d = deps(0, platform);
     expect(await keychainHas("svc", d)).toBeUndefined();
     expect(d.calls).toEqual([]);
   });

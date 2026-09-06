@@ -229,7 +229,8 @@ describe("doctor", () => {
     if (process.platform === "darwin") {
       expect(r.stdout).toContain(`no keychain item "${keychainService(join(h.profilesRoot, "smoke"))}"`);
     } else {
-      expect(r.stdout).toContain("keychain check skipped");
+      expect(r.stdout).toContain("no .credentials.json in the profile");
+      expect(r.stdout).not.toContain("keychain");
     }
     expect(r.stdout).toContain("not logged in");
   });
@@ -240,6 +241,16 @@ describe("doctor", () => {
     const svc = keychainService(join(h.profilesRoot, "smoke"));
     const r = await runCli(["doctor", "smoke"], { home: h.home, env: { FAKE_KEYCHAIN: svc } });
     expect(r.stdout).toContain(`keychain item "${svc}" present`);
+  });
+
+  test.if(process.platform !== "darwin")("sees the credentials file where there is no keychain", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    writeFileSync(join(h.profilesRoot, "smoke", ".credentials.json"), "{}\n");
+    const r = await runCli(["doctor", "smoke"], { home: h.home });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(".credentials.json present");
+    expect(r.stdout).not.toContain("unexpected private items");
   });
 
   test("flags a shadowing real file, a foreign symlink and a stray, and exits 1", async () => {
