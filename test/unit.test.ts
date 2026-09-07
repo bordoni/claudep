@@ -6,11 +6,14 @@ import {
   baseEnv,
   canon,
   currentProfile,
+  defaultShell,
   deleteEnv,
   type Env,
   envFor,
+  envScript,
   formatTable,
   homeDir,
+  hookHint,
   isInside,
   isMsysPath,
   keychainService,
@@ -23,8 +26,11 @@ import {
   pathKey,
   RESERVED,
   resolvePin,
+  SHELLS,
+  type Shell,
   samePath,
   shellInit,
+  shellSyntax,
   shortHome,
   splitPathVar,
   toNativePath,
@@ -551,15 +557,26 @@ describe("version", () => {
 });
 
 describe("shellInit", () => {
-  test.each(["zsh", "bash"] as const)("%s hook has no subprocess and embeds the profiles root", (shell) => {
-    const out = shellInit(shell, "/home/me/.claudep");
-    expect(out).toContain("_claudep_root='/home/me/.claudep'");
+  test.each([...SHELLS])("%s hook has no subprocess and embeds the profiles root", (shell: Shell) => {
+    const out = shellInit(shell, "/home/me/.claudep", "linux");
+    expect(out).toContain("_claudep_root");
+    expect(out).toContain("'/home/me/.claudep'");
     const body = out
       .split("\n")
       .filter((l) => !l.trim().startsWith("#"))
       .join("\n");
+    // $( and backticks are subshells in sh; a backtick is PowerShell's escape and must not appear either.
     expect(body).not.toMatch(/\$\(|`/);
-    expect(out).toContain(shell === "zsh" ? "add-zsh-hook chpwd _claudep_auto" : "PROMPT_COMMAND");
+    if (shell === "powershell") {
+      expect(out).toContain("function global:prompt");
+      expect(out).toContain("function global:_claudep_auto");
+      // Only the saved prompt is ever invoked with &; no external command runs on every prompt.
+      expect(body.match(/&\s*\S+/g)).toEqual(["& $global:_claudep_prompt_orig"]);
+      expect(body).not.toMatch(/Start-Process|Invoke-Expression|cygpath/);
+      expect([...out].every((ch) => ch.charCodeAt(0) < 128)).toBe(true);
+    } else {
+      expect(out).toContain(shell === "zsh" ? "add-zsh-hook chpwd _claudep_auto" : "PROMPT_COMMAND");
+    }
   });
 
   test("strips a carriage return from the pin line", () => {
@@ -576,5 +593,44 @@ describe("shellInit", () => {
 
   test("single-quotes a root with an apostrophe safely", () => {
     expect(shellInit("bash", "/home/o'brien/.claudep")).toContain(`_claudep_root='/home/o'\\''brien/.claudep'`);
+    expect(shellInit("powershell", "C:\\Users\\o'brien\\.claudep")).toContain(
+      "$global:_claudep_root = 'C:\\Users\\o''brien\\.claudep'",
+    );
+  });
+});
+
+describe("shell selection", () => {
+  test("defaultShell follows $SHELL on POSIX and MSYSTEM on Windows", () => {
+    expect(defaultShell({ SHELL: "/bin/zsh" }, "linux")).toBe("zsh");
+    expect(defaultShell({ SHELL: "/usr/local/bin/bash" }, "darwin")).toBe("bash");
+    expect(defaultShell({ SHELL: "/usr/bin/fish" }, "darwin")).toBe("zsh");
+    expect(defaultShell({}, "linux")).toBe("bash");
+    expect(defaultShell({}, "win32")).toBe("powershell");
+    expect(defaultShell({ MSYSTEM: "MINGW64" }, "win32")).toBe("bash");
+  });
+
+  test("hookHint is the one rc-file line per shell", () => {
+    expect(hookHint("zsh")).toBe('eval "$(claudep shell-init zsh)"');
+    expect(hookHint("bash")).toBe('eval "$(claudep shell-init bash)"');
+    expect(hookHint("powershell")).toBe("claudep shell-init powershell | Out-String | Invoke-Expression");
+  });
+
+  test("shellSyntax is PowerShell only on Windows outside Git Bash", () => {
+    expect(shellSyntax({}, "darwin")).toBe("sh");
+    expect(shellSyntax({}, "win32")).toBe("powershell");
+    expect(shellSyntax({ MSYSTEM: "MINGW64" }, "win32")).toBe("sh");
+  });
+
+  test("envScript in both syntaxes, with the value quoted for that shell", () => {
+    expect(envScript("/p/work", "sh")).toBe("export CLAUDE_CONFIG_DIR='/p/work'\nunset CLAUDEP_AUTO\n");
+    expect(envScript("/o'brien", "sh")).toBe(`export CLAUDE_CONFIG_DIR='/o'\\''brien'\nunset CLAUDEP_AUTO\n`);
+    expect(envScript(undefined, "sh")).toBe("unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO\n");
+    expect(envScript("C:\\p\\work", "powershell")).toBe(
+      "$env:CLAUDE_CONFIG_DIR = 'C:\\p\\work'\nRemove-Item Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue\n",
+    );
+    expect(envScript("C:\\o'brien", "powershell")).toContain("'C:\\o''brien'");
+    expect(envScript(undefined, "powershell")).toBe(
+      "Remove-Item Env:CLAUDE_CONFIG_DIR, Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue\n",
+    );
   });
 });

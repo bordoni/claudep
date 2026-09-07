@@ -44,7 +44,7 @@ claudep doctor                      # symlink, keychain and classification check
 3. A profile name must match `NAME_RE` and must not be in `RESERVED`; both live near the top of `claudep.ts`.
 4. The string handed to `CLAUDE_CONFIG_DIR` must be canonical (absolute, no trailing slash, NFC) because Claude Code hashes it for the Keychain service name. Always go through `profileDir()` / `canon()`.
 5. Any change to what `init` links or seeds must be reflected in `doctor`, which is the user's only way to see drift. `link()` and `linkState()` are the two halves; keep them agreeing.
-6. Update `README.md` (user-facing), the `help()` text and `test/cli.test.ts` together when a command or flag changes. A change to the shell hook also updates `resolvePin()` and `test/shell.test.ts`; the two must agree.
+6. Update `README.md` (user-facing), the `help()` text and `test/cli.test.ts` together when a command or flag changes. A change to the shell hook also updates `resolvePin()` and `test/shell.test.ts`; the sh hook, the PowerShell hook and the TypeScript must agree.
 7. Every change a user could notice gets a line under `[Unreleased]` in `CHANGELOG.md` in the same change. CI enforces it for pull requests that touch `claudep.ts`.
 8. Helpers take their inputs as parameters and are exported; commands get a `Layout` from `layout()`. Without that the tests cannot redirect paths and the `$HOME` sandbox does nothing.
 9. Compare paths with `samePath()` and `isInside()`, never with `startsWith` or `===`, and split `PATH` with `splitPathVar()`. Every helper that builds or compares a path takes `platform` as its last parameter and goes through `pathApi(platform)`, so the tests can run the win32 branch on any host. Commands read `L.platform`.
@@ -60,6 +60,6 @@ claudep doctor                      # symlink, keychain and classification check
 7. **Never write alias shims into this repo.** They go next to the `claudep` found on PATH (`aliasDir()`), because `Bun.main` resolves symlinks and would otherwise point into the checkout.
 8. **Never commit anything from `~/.claudep`** or reference a specific person's profile in code.
 9. **Never suggest putting `CLAUDE_CONFIG_DIR` in a settings `env` block.** Claude Code detects the mismatch and disables features.
-10. **Never put a subprocess or network call in the shell hook.** It runs on every directory change or prompt. Parameter expansion and builtins only.
+10. **Never put a subprocess or network call in the shell hook.** It runs on every directory change or prompt. Parameter expansion and builtins only; in the PowerShell hook, cmdlets only, and the only `&` is the saved `prompt`.
 11. **Never publish from a laptop after 0.1.0.** Releases are `bun run release <bump> --push`; the tag triggers the workflow, which publishes through trusted publishing. No npm tokens anywhere.
 12. **Never let a test reach the real `~/.claude`, `~/.claudep`, `claude` or `security`.** Go through `test/lib`. The preload sandbox is a backstop for mistakes, and a test that needs it is already wrong.

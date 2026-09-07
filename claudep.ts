@@ -952,16 +952,20 @@ async function cmdStatus(L: Layout, args: string[]): Promise<void> {
 
 function cmdEnv(L: Layout, args: string[]): void {
   const name = args[0];
-  if (!name) die('usage: eval "$(claudep env <name>)"   or   eval "$(claudep env --unset)"');
+  const syntax = shellSyntax(process.env, L.platform);
+  if (!name)
+    die(
+      syntax === "powershell"
+        ? "usage: claudep env <name> | Invoke-Expression   or   claudep env --unset | Invoke-Expression"
+        : 'usage: eval "$(claudep env <name>)"   or   eval "$(claudep env --unset)"',
+    );
   if (name === "--unset") {
-    console.log("unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO");
+    process.stdout.write(envScript(undefined, syntax));
     return;
   }
   const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist`);
-  // Clearing CLAUDEP_AUTO turns this into a manual pin the shell hook will not touch.
-  console.log(`export CLAUDE_CONFIG_DIR='${dir.replace(/'/g, `'\\''`)}'`);
-  console.log("unset CLAUDEP_AUTO");
+  process.stdout.write(envScript(dir, syntax));
 }
 
 function describeCurrent(cur: Current): string {
@@ -985,10 +989,12 @@ function cmdCurrent(L: Layout, args: string[]): void {
   else if (cur.setBy === "manual") console.log("set by: manual pin (claudep env or export CLAUDE_CONFIG_DIR)");
   else console.log("set by: nothing pinned; this is ~/.claude");
   if (cur.kind === "custom") console.log(c.dim("CLAUDE_CONFIG_DIR points outside the claudep profiles root"));
+  const msysWarning = msysConfigDirWarning(L);
+  if (msysWarning) console.log(c.yellow(msysWarning));
   if (pin && pin.name !== "" && pin.name !== cur.name) {
     console.log(
       c.yellow(
-        `pinned here: ${pin.name} (${shortHome(pin.file, L.home, L.platform)}), but this shell is on ${label}. Load the hook: eval "$(claudep shell-init zsh)"`,
+        `pinned here: ${pin.name} (${shortHome(pin.file, L.home, L.platform)}), but this shell is on ${label}. Load the hook: ${hookHint(defaultShell(process.env, L.platform))}`,
       ),
     );
   }
@@ -1030,17 +1036,109 @@ function cmdLocal(L: Layout, args: string[]): void {
   writeFileSync(file, `${name}\n`);
   ok(`${shortHome(file, L.home, L.platform)} pins this directory tree to ${c.bold(name)}`);
   if (!process.env.CLAUDEP_AUTO && !process.env.CLAUDE_CONFIG_DIR)
-    console.log(c.dim(`Shells load pins through the hook: eval "$(claudep shell-init zsh)"`));
+    console.log(c.dim(`Shells load pins through the hook: ${hookHint(defaultShell(process.env, L.platform))}`));
 }
 
 /** The shell hook. Pure parameter expansion and builtins: it runs on every
  *  directory change (zsh chpwd) or prompt (bash PROMPT_COMMAND), so no
  *  subprocess is allowed here. Logic mirrors resolvePin(). */
-export function shellInit(
-  shell: "zsh" | "bash",
-  profilesRoot: string,
-  platform: NodeJS.Platform = process.platform,
-): string {
+export type Shell = "zsh" | "bash" | "powershell";
+export const SHELLS: readonly Shell[] = ["zsh", "bash", "powershell"];
+
+/** The shell to name in hints and to default `shell-init` to. */
+export function defaultShell(env: Env = process.env, platform: NodeJS.Platform = process.platform): Shell {
+  if (platform === "win32") return env.MSYSTEM ? "bash" : "powershell";
+  const name = env.SHELL ? posix.basename(env.SHELL) : "";
+  if (name === "zsh" || name === "bash") return name;
+  return platform === "darwin" ? "zsh" : "bash";
+}
+
+/** The one line that loads the hook in a shell's rc file. */
+export function hookHint(shell: Shell): string {
+  if (shell === "powershell") return "claudep shell-init powershell | Out-String | Invoke-Expression";
+  return `eval "$(claudep shell-init ${shell})"`;
+}
+
+export type EnvSyntax = "sh" | "powershell";
+
+/** What `claudep env` prints. PowerShell syntax only on Windows outside Git Bash. */
+export function shellSyntax(env: Env = process.env, platform: NodeJS.Platform = process.platform): EnvSyntax {
+  return platform === "win32" && !env.MSYSTEM ? "powershell" : "sh";
+}
+
+/** The `claudep env` script: pin the shell to `dir`, or clear the pin. */
+export function envScript(dir: string | undefined, syntax: EnvSyntax): string {
+  if (syntax === "powershell") {
+    if (dir === undefined) return "Remove-Item Env:CLAUDE_CONFIG_DIR, Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue\n";
+    // Clearing CLAUDEP_AUTO turns this into a manual pin the shell hook will not touch.
+    return `$env:CLAUDE_CONFIG_DIR = '${dir.replace(/'/g, "''")}'\nRemove-Item Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue\n`;
+  }
+  if (dir === undefined) return "unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO\n";
+  return `export CLAUDE_CONFIG_DIR='${dir.replace(/'/g, `'\\''`)}'\nunset CLAUDEP_AUTO\n`;
+}
+
+export function shellInit(shell: Shell, profilesRoot: string, platform: NodeJS.Platform = process.platform): string {
+  return shell === "powershell" ? powershellHook(profilesRoot) : shHook(shell, profilesRoot, platform);
+}
+
+/** The PowerShell hook, for Windows PowerShell 5.1 and PowerShell 7. Wraps
+ *  `prompt` because there is no chpwd and LocationChangedAction is 7 only.
+ *  Cmdlets and builtins only, ASCII only, and every value it manages lives
+ *  in $global: because the profile dot-sources what Invoke-Expression ran.
+ *  The parent step is .NET GetDirectoryName: Split-Path cannot combine
+ *  -LiteralPath with -Parent, and -Path would expand wildcards. */
+function powershellHook(profilesRoot: string): string {
+  const q = profilesRoot.replace(/'/g, "''");
+  return `# claudep shell hook. Load it from your $PROFILE:  ${hookHint("powershell")}
+$global:_claudep_root = '${q}'
+function global:_claudep_auto {
+  $here = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
+  if ($here -ceq $global:_claudep_last_pwd) { return }
+  $global:_claudep_last_pwd = $here
+  # Only manage a CLAUDE_CONFIG_DIR this hook set itself. A manual pin wins.
+  if ($env:CLAUDE_CONFIG_DIR -and ($env:CLAUDE_CONFIG_DIR -cne $env:CLAUDEP_AUTO)) { return }
+  $dir = $here
+  $name = ''
+  $found = ''
+  while ($true) {
+    $pin = Join-Path $dir '${PIN_FILE}'
+    if (Test-Path -LiteralPath $pin -PathType Leaf) {
+      $found = $dir
+      foreach ($line in @(Get-Content -LiteralPath $pin)) {
+        $t = ([string]$line).Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        $name = $t
+        break
+      }
+      break
+    }
+    $parent = [System.IO.Path]::GetDirectoryName($dir)
+    if (-not $parent -or ($parent -ceq $dir)) { break }
+    $dir = $parent
+  }
+  if ($name -eq '') {
+    # No pin here: hand the shell back to the base account.
+    if ($env:CLAUDEP_AUTO) { Remove-Item Env:CLAUDE_CONFIG_DIR, Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue }
+    return
+  }
+  $target = Join-Path $global:_claudep_root $name
+  if (-not (Test-Path -LiteralPath $target -PathType Container)) {
+    if ($env:CLAUDEP_AUTO) { Remove-Item Env:CLAUDE_CONFIG_DIR, Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue }
+    [Console]::Error.WriteLine('claudep: ' + (Join-Path $found '${PIN_FILE}') + ' names profile "' + $name + '", which does not exist. Run: claudep init ' + $name)
+    return
+  }
+  $env:CLAUDE_CONFIG_DIR = $target
+  $env:CLAUDEP_AUTO = $target
+}
+if (-not $global:_claudep_prompt_orig) {
+  $global:_claudep_prompt_orig = if (Test-Path Function:\\prompt) { $function:prompt } else { { 'PS> ' } }
+  function global:prompt { _claudep_auto; & $global:_claudep_prompt_orig }
+}
+_claudep_auto
+`;
+}
+
+function shHook(shell: "zsh" | "bash", profilesRoot: string, platform: NodeJS.Platform): string {
   const q = profilesRoot.replace(/'/g, `'\\''`);
   // Under Git Bash $PWD is POSIX-style but the exported value must be the
   // native path claude.exe reads, so the root and its separator are embedded
@@ -1097,9 +1195,16 @@ _claudep_auto
 }
 
 function cmdShellInit(L: Layout, args: string[]): void {
-  const shell = args[0] ?? "zsh";
-  if (shell !== "zsh" && shell !== "bash") die(`unsupported shell "${shell}". Use zsh or bash`);
-  process.stdout.write(shellInit(shell, L.profilesRoot));
+  const shell = args[0] ?? defaultShell(process.env, L.platform);
+  if (!SHELLS.includes(shell as Shell)) die(`unsupported shell "${shell}". Use zsh, bash or powershell`);
+  process.stdout.write(shellInit(shell as Shell, L.profilesRoot, L.platform));
+}
+
+/** A POSIX-style CLAUDE_CONFIG_DIR on Windows is one claude.exe cannot read. */
+function msysConfigDirWarning(L: Layout, env: Env = process.env): string | undefined {
+  const cfg = env.CLAUDE_CONFIG_DIR;
+  if (L.platform !== "win32" || !cfg || !isMsysPath(cfg)) return undefined;
+  return `CLAUDE_CONFIG_DIR is a POSIX-style path (${cfg}); claude.exe will not read it. Set it with: eval "$(claudep env <name>)"`;
 }
 
 async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
@@ -1115,6 +1220,8 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
   } else if (launch) bad(`only ${launch.bin} found; claudep needs claude.exe or claude.cmd`);
   else bad("claude binary not found on PATH");
   ok(`base: ${L.base}${L.callerConfigDir && !L.managed ? c.yellow("  (from CLAUDE_CONFIG_DIR in your shell)") : ""}`);
+  const msysWarning = msysConfigDirWarning(L);
+  if (msysWarning) warn(msysWarning);
   ok(`profiles root: ${L.profilesRoot}`);
 
   const shared = sharedItems(L.base);
@@ -1231,7 +1338,7 @@ ${c.bold("USAGE")}
   claudep list                         show every profile and who it is logged in as
   claudep status <name> [--json]       login state for one profile ("default" = ~/.claude)
   claudep current [--json]             which profile this shell is on, and why
-  claudep env <name> | --unset         print "export CLAUDE_CONFIG_DIR=…" (or the unset) for eval
+  claudep env <name> | --unset         print the CLAUDE_CONFIG_DIR export (or the unset) for eval / Invoke-Expression
   claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
   claudep doctor [name]                verify symlinks, keychain entry, unclassified files
   claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
@@ -1241,7 +1348,7 @@ ${c.bold("DIRECTORY PINS")}
   claudep local <name> [--force]       write ./${PIN_FILE} so this tree uses <name>; --remove deletes it
   claudep local                        show the pin that applies to the current directory
   claudep resolve [dir] [--json]       print the profile pinned for a directory (exit 1 when none)
-  claudep shell-init [zsh|bash]        print the hook that applies pins on cd; eval it in your rc file
+  claudep shell-init [zsh|bash|powershell]   print the hook that applies pins on cd; load it from your rc file
 
 ${c.bold("INIT OPTIONS")}
   --sso               force the SSO login flow (Enterprise orgs)
@@ -1258,8 +1365,10 @@ ${c.bold("EXAMPLES")}
   claude                                        # Claude Code as whatever ~/.claude is logged in as
   claudep enterprise -p "summarize this repo"
   eval "$(claudep env enterprise)"              # pin the whole shell to a profile
+  claudep env enterprise | Invoke-Expression    # the same from PowerShell
   claudep local enterprise                      # pin this repo; commit the ${PIN_FILE} file for the team
   eval "$(claudep shell-init zsh)"              # in .zshrc: shells follow ${PIN_FILE} pins on cd
+  ${hookHint("powershell")}   # the same line for $PROFILE
 
 ${c.bold("HOW IT WORKS")}
   ~/.claude stays exactly as it is and remains the "default" profile. Each named profile is a
@@ -1268,9 +1377,10 @@ ${c.bold("HOW IT WORKS")}
     ${[...SHARED_FILES, "*.md", ...SHARED_DIRS].join("  ")}
   Everything account-specific is real and per profile: .claude.json (login identity, MCP
   servers, folder trust), org-pushed remote-settings.json, history, todos, caches.
-  Credentials never touch the profile dir: Claude Code stores them in the macOS Keychain under
+  On macOS credentials never touch the profile dir: Claude Code stores them in the Keychain under
   "Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[0:8]>", so every profile has its own
-  login and refresh token and they cannot clobber each other.
+  login and refresh token and they cannot clobber each other. On Linux and Windows the login is
+  <profile>/.credentials.json, a real file inside the profile that is never shared.
 
 ${c.bold("PIN RULES")}
   The nearest ${PIN_FILE} file upward from the current directory wins; an empty one cancels a
