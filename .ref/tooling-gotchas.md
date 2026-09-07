@@ -17,13 +17,7 @@ Rule: never pass code with braces inline. Write the script to a file with a quot
 
 ## GitHub access
 
-- SSH to github.com times out intermittently from this machine. `gh api` always works. When `git push` over SSH fails, push over HTTPS with a one-off credential helper:
-
-  ```bash
-  git -c "credential.helper=!gh auth git-credential" push https://github.com/bordoni/claudep.git main
-  ```
-
-  Then `git fetch https://... main && git update-ref refs/remotes/origin/main FETCH_HEAD` so `git status` stops saying "ahead".
+- SSH to github.com is flaky now and then, not broken. Use the normal `git push` and `git fetch origin`; when one times out, run it again. Do not route around SSH: pushing through an HTTPS URL leaves the branches without `origin/*` tracking refs and `git status` wrong until someone repairs them by hand. If several retries in a row fail, `gh api` still works for reading, and the one-off is `git -c "credential.helper=!gh auth git-credential" push https://github.com/bordoni/claudep.git <branch>`, followed by `git fetch origin` once SSH is back.
 - `gh run list` and `gh run watch` need `--repo bordoni/claudep` when the working directory is not the checkout.
 - The `gh` token has no `read:packages`, so the GitHub Packages mirror cannot be listed or installed from here until `gh auth refresh -h github.com -s read:packages` is run.
 
