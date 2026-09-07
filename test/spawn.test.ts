@@ -4,6 +4,7 @@
  * quoting, signal tables, the Developer Mode hint and alias shim text.
  */
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import {
   aliasFiles,
   aliasShim,
@@ -114,7 +115,7 @@ describe("credentialsFileHas", () => {
       return p.endsWith(".credentials.json");
     };
     expect(credentialsFileHas("/p/work", exists)).toBe(true);
-    expect(seen).toEqual(["/p/work/.credentials.json"]);
+    expect(seen).toEqual([join("/p/work", ".credentials.json")]);
     expect(credentialsFileHas("/p/work", () => false)).toBe(false);
   });
 });
