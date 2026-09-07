@@ -23,7 +23,7 @@ bun run lint:fix         # let Biome format and fix what it can
 
 Test files:
 
-- `test/unit.test.ts`: pure helpers imported from `claudep.ts` (`canon`, `layout`, `keychainService`, `parseFlags`, `formatTable`, `parseAuthStatus`, name rules).
+- `test/unit.test.ts`: pure helpers imported from `claudep.ts` (`canon`, `layout`, `keychainService`, `parseFlags`, `formatTable`, `parseAuthStatus`, name rules). Path helpers are called with an explicit platform: the POSIX cases pass `"linux"` so they hold on a Windows runner, and the `"win32"` cases run on every host.
 - `test/fs.test.ts`: `sharedItems`, `link`, `seedGlobalJson` against a fake home, in process.
 - `test/keychain.test.ts`: `keychainHas` with an injected spawner, plus one real `security` call gated on macOS.
 - `test/cli.test.ts`: every command as a subprocess. This is where behaviour lives; add a case here when you change a command.

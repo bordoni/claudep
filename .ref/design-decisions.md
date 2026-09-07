@@ -26,6 +26,14 @@ Kept outside iCloud/Dropbox on purpose; `.claude.json` churn creates conflict co
 
 `canon()` = absolute, no trailing slash, NFC. Because Claude Code hashes the literal env value for the Keychain service name, two spellings of the same directory are two logins. All paths flow through `profileDir()`.
 
+## 2026-09-06: Canonical path on win32, and case-insensitive comparison there only
+
+`canon()` on Windows returns what `path.win32.resolve` gives (backslashes, no trailing separator) with the drive letter upper-cased, after rewriting an MSYS `/c/x` path to `C:/x` and dropping a `\\?\` prefix. NFC still applies. `homeDir()` prefers `USERPROFILE` there because Git Bash sets `HOME` to a POSIX-style path that `claude.exe` cannot use.
+
+Comparisons go through `pathKey()`: identity on POSIX, where two spellings are two directories, and lower-cased with folded separators on win32, where NTFS is case-insensitive and `readlink` may answer with a `\\?\` prefix. `samePath()` and `isInside()` replaced every `startsWith(root + "/")` and `===` on paths. The old `canon()` also turned `/` into an empty string by stripping trailing slashes with a regex; `resolve()` already strips them and keeps the root.
+
+Rejected: lower-casing the canonical string itself on Windows. Claude Code compares the literal `CLAUDE_CONFIG_DIR` in places, so the string handed to it must be one stable spelling of what the user typed, not a folded one.
+
 ## 2026-09-02: Alias shims live next to the `claudep` on PATH
 
 `Bun.main` resolves symlinks, so "next to the script" meant "inside the git checkout" once the script moved into a repo. `aliasDir()` uses `Bun.which("claudep")` first. Shims are plain `#!/bin/sh` files that `exec bun <realpath of claudep.ts> run <name> -- "$@"`, so they survive the symlink being repointed.

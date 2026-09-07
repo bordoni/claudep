@@ -90,6 +90,15 @@ describe.each(shells)("%s hook", (shell) => {
     expect(r.stdout.trim().split("\n")).toEqual([`${manual}|<unset>`, `${work}|${work}`]);
   });
 
+  test("reads a pin file with CRLF line endings", async () => {
+    using h = fakeHome();
+    const { repo, nested, work } = pinnedTree(h.home, h.profilesRoot);
+    writeFileSync(join(repo, ".claudep"), "# from Windows\r\nwork\r\n");
+    const r = await runShell(shell, h.home, `cd ${JSON.stringify(nested)}; tick; show`);
+    expect(r.stderr).toBe("");
+    expect(r.stdout.trim().split("\n")).toEqual([`${work}|${work}`]);
+  });
+
   test("an empty pin in a subtree cancels the parent pin", async () => {
     using h = fakeHome();
     const { repo, nested, work } = pinnedTree(h.home, h.profilesRoot);

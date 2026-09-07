@@ -30,7 +30,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve, win32 } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Layout
@@ -38,21 +38,94 @@ import { dirname, join, resolve } from "node:path";
 
 export type Env = Record<string, string | undefined>;
 
+/** The path module for a platform. Every helper that must be exercised for
+ *  win32 on a macOS or Linux host takes `platform` as a parameter and goes
+ *  through this instead of the ambient `node:path`. */
+export function pathApi(platform: NodeJS.Platform = process.platform): typeof posix | typeof win32 {
+  return platform === "win32" ? win32 : posix;
+}
+
+/** An MSYS or Git Bash style path such as /c/Users/me. */
+export function isMsysPath(p: string): boolean {
+  return /^\/[a-zA-Z](\/|$)/.test(p);
+}
+
+/** win32 only: drop the \\?\ and \\?\UNC\ prefixes readlink and realpath can
+ *  add, and rewrite an MSYS /c/x path to C:/x. A pure string operation; the
+ *  result still goes through resolve() to pick the separator. */
+export function toNativePath(p: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== "win32") return p;
+  let out = p;
+  if (out.startsWith("\\\\?\\UNC\\")) out = `\\\\${out.slice(8)}`;
+  else if (out.startsWith("\\\\?\\")) out = out.slice(4);
+  if (isMsysPath(out)) out = `${(out[1] as string).toUpperCase()}:${out.slice(2) || "/"}`;
+  return out;
+}
+
 /** Home directory. $HOME wins so tests and containers can redirect it; bun's
- *  os.homedir() reads getpwuid() and ignores the variable. */
-export function homeDir(env: Env = process.env): string {
+ *  os.homedir() reads getpwuid() and ignores the variable. On Windows
+ *  USERPROFILE is the native home; Git Bash sets HOME to a POSIX-style path
+ *  that claude.exe would not understand. */
+export function homeDir(env: Env = process.env, platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") return toNativePath(env.USERPROFILE || env.HOME || homedir(), platform);
   return env.HOME || homedir();
 }
 
-/** Canonical form of a config dir: absolute, no trailing slash, NFC.
- *  Claude Code hashes the *literal* CLAUDE_CONFIG_DIR string for the keychain
- *  service name, so the same profile must always produce the same string. */
-export function canon(p: string, home: string = homeDir()): string {
-  const expanded = p.startsWith("~/") ? join(home, p.slice(2)) : p;
-  return resolve(expanded).replace(/\/+$/, "").normalize("NFC");
+/** Canonical form of a config dir: absolute, no trailing separator, NFC, and
+ *  on Windows an upper-case drive letter and backslashes. Claude Code hashes
+ *  the *literal* CLAUDE_CONFIG_DIR string for the keychain service name and
+ *  compares it literally elsewhere, so the same profile must always produce
+ *  the same string. */
+export function canon(p: string, home: string = homeDir(), platform: NodeJS.Platform = process.platform): string {
+  const P = pathApi(platform);
+  const tilde = p.startsWith("~/") || (platform === "win32" && p.startsWith("~\\"));
+  const expanded = tilde ? P.join(home, p.slice(2)) : toNativePath(p, platform);
+  let out = P.resolve(expanded);
+  if (platform === "win32" && /^[a-z]:/.test(out)) out = `${(out[0] as string).toUpperCase()}${out.slice(1)}`;
+  return out.normalize("NFC");
+}
+
+/** Comparison key for a path. Identity on POSIX, where two spellings are two
+ *  directories. On Windows the file system is case-insensitive and readlink
+ *  may add a \\?\ prefix or use forward slashes, so the key folds all of that. */
+export function pathKey(p: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== "win32") return p;
+  return toNativePath(p, platform).replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+}
+
+export function samePath(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
+  return pathKey(a, platform) === pathKey(b, platform);
+}
+
+/** True when `child` is strictly inside `parent`. Never use startsWith for
+ *  this: "/r" is not a parent of "/rx", and on Windows case must not matter. */
+export function isInside(parent: string, child: string, platform: NodeJS.Platform = process.platform): boolean {
+  const sep = pathApi(platform).sep;
+  const pk = pathKey(parent, platform);
+  const prefix = pk.endsWith(sep) ? pk : `${pk}${sep}`;
+  return pathKey(child, platform).startsWith(prefix);
+}
+
+/** `~` plus the tail of `p` when it lives under `home`, otherwise `p` unchanged. */
+export function shortHome(p: string, home: string, platform: NodeJS.Platform = process.platform): string {
+  const np = toNativePath(p, platform);
+  if (samePath(np, home, platform)) return "~";
+  return isInside(home, np, platform) ? `~${np.slice(home.length)}` : np;
+}
+
+/** Delete a variable from an env copy. Windows environments are
+ *  case-insensitive, so every spelling of the name goes. */
+export function deleteEnv(env: Env, name: string, platform: NodeJS.Platform = process.platform): void {
+  if (platform !== "win32") {
+    delete env[name];
+    return;
+  }
+  const want = name.toUpperCase();
+  for (const k of Object.keys(env)) if (k.toUpperCase() === want) delete env[k];
 }
 
 export type Layout = {
+  platform: NodeJS.Platform;
   home: string;
   /** CLAUDE_CONFIG_DIR as set in the caller's shell, if any. */
   callerConfigDir: string | undefined;
@@ -69,25 +142,27 @@ export type Layout = {
   profilesRoot: string;
 };
 
-export function layout(env: Env = process.env): Layout {
-  const home = homeDir(env);
+export function layout(env: Env = process.env, platform: NodeJS.Platform = process.platform): Layout {
+  const P = pathApi(platform);
+  const home = homeDir(env, platform);
   const callerConfigDir = env.CLAUDE_CONFIG_DIR;
-  const profilesRoot = canon(env.CLAUDE_PROFILES_DIR ?? join(home, ".claudep"), home);
-  const callerCanon = callerConfigDir !== undefined ? canon(callerConfigDir, home) : undefined;
-  const managed = callerCanon !== undefined && callerCanon.startsWith(`${profilesRoot}/`);
+  const profilesRoot = canon(env.CLAUDE_PROFILES_DIR ?? P.join(home, ".claudep"), home, platform);
+  const callerCanon = callerConfigDir !== undefined ? canon(callerConfigDir, home, platform) : undefined;
+  const managed = callerCanon !== undefined && isInside(profilesRoot, callerCanon, platform);
   const tail = managed && callerCanon !== undefined ? callerCanon.slice(profilesRoot.length + 1) : undefined;
   const activeProfile = tail !== undefined && NAME_RE.test(tail) ? tail : undefined;
   // A custom CLAUDE_CONFIG_DIR outside the profiles root is the user's real base.
   // One inside it is a claudep profile and must never be treated as the base.
   const customBase = callerCanon !== undefined && !managed;
-  const base = customBase && callerCanon !== undefined ? callerCanon : canon(join(home, ".claude"), home);
+  const base = customBase && callerCanon !== undefined ? callerCanon : canon(P.join(home, ".claude"), home, platform);
   return {
+    platform,
     home,
     callerConfigDir,
     managed,
     activeProfile,
     base,
-    baseGlobalJson: customBase ? join(base, ".claude.json") : join(home, ".claude.json"),
+    baseGlobalJson: customBase ? P.join(base, ".claude.json") : P.join(home, ".claude.json"),
     profilesRoot,
   };
 }
@@ -140,9 +215,9 @@ export type Current = {
 export function currentProfile(L: Layout, env: Env = process.env): Current {
   const cfg = env.CLAUDE_CONFIG_DIR;
   if (!cfg) return { kind: "base", name: undefined, dir: L.base, setBy: "none" };
-  const dir = canon(cfg, L.home);
+  const dir = canon(cfg, L.home, L.platform);
   const auto = env.CLAUDEP_AUTO;
-  const setBy = auto !== undefined && canon(auto, L.home) === dir ? "hook" : "manual";
+  const setBy = auto !== undefined && samePath(canon(auto, L.home, L.platform), dir, L.platform) ? "hook" : "manual";
   if (L.activeProfile !== undefined) return { kind: "profile", name: L.activeProfile, dir, setBy };
   return { kind: "custom", name: undefined, dir, setBy };
 }
@@ -266,11 +341,11 @@ export function die(msg: string, code = 1): never {
 export function profileDir(L: Layout, name: string): string {
   if (!NAME_RE.test(name)) die(`invalid profile name "${name}" (use [a-z0-9_-], starting with a letter or digit)`);
   if (RESERVED.has(name)) die(`"${name}" is a reserved word and cannot be a profile name`);
-  return canon(join(L.profilesRoot, name), L.home);
+  return canon(pathApi(L.platform).join(L.profilesRoot, name), L.home, L.platform);
 }
 
 export function profileExists(L: Layout, name: string): boolean {
-  return NAME_RE.test(name) && !RESERVED.has(name) && existsSync(join(L.profilesRoot, name));
+  return NAME_RE.test(name) && !RESERVED.has(name) && existsSync(pathApi(L.platform).join(L.profilesRoot, name));
 }
 
 export function listProfileNames(L: Layout): string[] {
@@ -386,8 +461,8 @@ export function envFor(dir: string | undefined, env: Env = process.env): Env {
 export function baseEnv(L: Layout, env: Env = process.env): Env {
   const out: Env = { ...env };
   if (L.managed) {
-    delete out.CLAUDE_CONFIG_DIR;
-    delete out.CLAUDEP_AUTO;
+    deleteEnv(out, "CLAUDE_CONFIG_DIR", L.platform);
+    deleteEnv(out, "CLAUDEP_AUTO", L.platform);
   }
   return out;
 }
@@ -575,12 +650,22 @@ export function aliasDir(): string {
   return onPathBin ? dirname(onPathBin) : scriptDir();
 }
 
+/** PATH entries. `:` on POSIX, `;` on Windows, where `:` would split every
+ *  entry at its drive letter. */
+export function splitPathVar(pathVar: string, platform: NodeJS.Platform = process.platform): string[] {
+  return pathVar.split(pathApi(platform).delimiter).filter((p) => p !== "");
+}
+
 /** True when some PATH entry resolves (through symlinks) to `dir`. */
-export function onPath(dir: string, pathVar: string = process.env.PATH ?? ""): boolean {
+export function onPath(
+  dir: string,
+  pathVar: string = process.env.PATH ?? "",
+  platform: NodeJS.Platform = process.platform,
+): boolean {
   const want = realpathSync(dir);
-  return pathVar.split(":").some((p) => {
+  return splitPathVar(pathVar, platform).some((p) => {
     try {
-      return realpathSync(canon(p)) === want;
+      return samePath(realpathSync(canon(p, undefined, platform)), want, platform);
     } catch {
       return false;
     }
@@ -635,7 +720,7 @@ async function collectRows(L: Layout, names: string[]): Promise<Row[]> {
   );
 }
 
-export function formatTable(rows: Row[], home: string): string[] {
+export function formatTable(rows: Row[], home: string, platform: NodeJS.Platform = process.platform): string[] {
   const cols = ["PROFILE", "LOGIN", "EMAIL", "ORG", "PLAN", "DIR"];
   const data = rows.map((r) => [
     r.name,
@@ -643,15 +728,15 @@ export function formatTable(rows: Row[], home: string): string[] {
     r.status.email ?? "-",
     r.status.orgName ?? "-",
     r.status.subscriptionType ?? "-",
-    r.dir.startsWith(home) ? `~${r.dir.slice(home.length)}` : r.dir,
+    shortHome(r.dir, home, platform),
   ]);
   const widths = cols.map((h, i) => Math.max(h.length, ...data.map((d) => (d[i] as string).length)));
   const fmt = (cells: string[]) => cells.map((v, i) => v.padEnd(widths[i] as number)).join("  ");
   return [fmt(cols), ...data.map((d) => fmt(d))];
 }
 
-function printTable(rows: Row[], home: string): void {
-  const [header, ...lines] = formatTable(rows, home);
+function printTable(rows: Row[], home: string, platform: NodeJS.Platform): void {
+  const [header, ...lines] = formatTable(rows, home, platform);
   console.log(c.bold(header as string));
   lines.forEach((line, i) => {
     console.log(rows[i]?.status.loggedIn ? line : c.dim(line));
@@ -660,7 +745,7 @@ function printTable(rows: Row[], home: string): void {
 
 async function cmdList(L: Layout): Promise<void> {
   const names = ["default", ...listProfileNames(L)];
-  printTable(await collectRows(L, names), L.home);
+  printTable(await collectRows(L, names), L.home, L.platform);
   if (names.length === 1) console.log(c.dim("\nNo profiles yet. Create one: claudep init <name>"));
   const cur = currentProfile(L);
   if (cur.kind !== "base") console.log(c.dim(`\nactive in this shell: ${describeCurrent(cur)}`));
@@ -674,7 +759,7 @@ async function cmdStatus(L: Layout, args: string[]): Promise<void> {
   const [row] = await collectRows(L, [name]);
   if (!row) return;
   if (f.bools.has("--json")) console.log(JSON.stringify({ name: row.name, dir: row.dir, ...row.status }, null, 2));
-  else printTable([row], L.home);
+  else printTable([row], L.home, L.platform);
 }
 
 function cmdEnv(L: Layout, args: string[]): void {
@@ -697,10 +782,6 @@ function describeCurrent(cur: Current): string {
   return `${label} (${how})`;
 }
 
-function shortHome(p: string, home: string): string {
-  return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
-}
-
 function cmdCurrent(L: Layout, args: string[]): void {
   const f = parseFlags(args, ["--json"], []);
   const cur = currentProfile(L);
@@ -710,16 +791,16 @@ function cmdCurrent(L: Layout, args: string[]): void {
     return;
   }
   const label = cur.kind === "profile" ? (cur.name ?? "?") : cur.kind === "custom" ? "custom" : "default";
-  console.log(`${c.bold(label)}  ${c.dim(shortHome(cur.dir, L.home))}`);
+  console.log(`${c.bold(label)}  ${c.dim(shortHome(cur.dir, L.home, L.platform))}`);
   if (cur.setBy === "hook")
-    console.log(`set by: shell hook${pin ? ` (${PIN_FILE} in ${shortHome(pin.dir, L.home)})` : ""}`);
+    console.log(`set by: shell hook${pin ? ` (${PIN_FILE} in ${shortHome(pin.dir, L.home, L.platform)})` : ""}`);
   else if (cur.setBy === "manual") console.log("set by: manual pin (claudep env or export CLAUDE_CONFIG_DIR)");
   else console.log("set by: nothing pinned; this is ~/.claude");
   if (cur.kind === "custom") console.log(c.dim("CLAUDE_CONFIG_DIR points outside the claudep profiles root"));
   if (pin && pin.name !== "" && pin.name !== cur.name) {
     console.log(
       c.yellow(
-        `pinned here: ${pin.name} (${shortHome(pin.file, L.home)}), but this shell is on ${label}. Load the hook: eval "$(claudep shell-init zsh)"`,
+        `pinned here: ${pin.name} (${shortHome(pin.file, L.home, L.platform)}), but this shell is on ${label}. Load the hook: eval "$(claudep shell-init zsh)"`,
       ),
     );
   }
@@ -749,17 +830,17 @@ function cmdLocal(L: Layout, args: string[]): void {
   if (!name) {
     const pin = resolvePin(process.cwd());
     if (!pin || pin.name === "") {
-      console.log(`no ${PIN_FILE} pin from ${shortHome(process.cwd(), L.home)} upward`);
+      console.log(`no ${PIN_FILE} pin from ${shortHome(process.cwd(), L.home, L.platform)} upward`);
       process.exit(1);
     }
-    console.log(`${pin.name}  ${c.dim(shortHome(pin.file, L.home))}`);
+    console.log(`${pin.name}  ${c.dim(shortHome(pin.file, L.home, L.platform))}`);
     return;
   }
   if (!NAME_RE.test(name)) die(`invalid profile name "${name}"`);
   if (!f.bools.has("--force") && !profileExists(L, name))
     die(`profile "${name}" does not exist. Run: claudep init ${name}   (or pass --force to pin it anyway)`);
   writeFileSync(file, `${name}\n`);
-  ok(`${shortHome(file, L.home)} pins this directory tree to ${c.bold(name)}`);
+  ok(`${shortHome(file, L.home, L.platform)} pins this directory tree to ${c.bold(name)}`);
   if (!process.env.CLAUDEP_AUTO && !process.env.CLAUDE_CONFIG_DIR)
     console.log(c.dim(`Shells load pins through the hook: eval "$(claudep shell-init zsh)"`));
 }
@@ -783,6 +864,7 @@ _claudep_auto() {
     if [ -f "\${_claudep_dir%/}/${PIN_FILE}" ]; then
       _claudep_found="\${_claudep_dir:-/}"
       while read -r _claudep_line || [ -n "$_claudep_line" ]; do
+        _claudep_line="\${_claudep_line%$'\\r'}"
         case "$_claudep_line" in "" | "#"*) continue ;; esac
         _claudep_name="$_claudep_line"
         break
@@ -901,7 +983,11 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
   const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist`);
   const real = realpathSync(dir);
-  if (!real.startsWith(`${realpathSync(L.profilesRoot)}/`) || real === realpathSync(L.base) || real === L.home)
+  if (
+    !isInside(realpathSync(L.profilesRoot), real, L.platform) ||
+    samePath(real, realpathSync(L.base), L.platform) ||
+    samePath(real, L.home, L.platform)
+  )
     die(`refusing to remove ${real}: not inside ${L.profilesRoot}`);
   if (!f.bools.has("--yes")) {
     const yes = confirm(`Remove profile "${name}" (${dir})? Shared items are only unlinked; ${L.base} is untouched.`);
@@ -937,7 +1023,7 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
 }
 
 function help(L: Layout): void {
-  const root = L.profilesRoot.startsWith(L.home) ? `~${L.profilesRoot.slice(L.home.length)}` : L.profilesRoot;
+  const root = shortHome(L.profilesRoot, L.home, L.platform);
   console.log(`${c.bold("claudep")} ${c.dim(version())}: run Claude Code under separate accounts on one machine
 
 ${c.bold("USAGE")}

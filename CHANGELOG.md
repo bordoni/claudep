@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Changed
+
+- Path comparisons for pins, the `claudep rm` safety check and `~` shortening accept `~\`, drive letters and MSYS `/c/` paths, and are case-insensitive on Windows. Groundwork for Windows support; no behaviour change on macOS or Linux.
+
+### Fixed
+
+- The shell hook reads `.claudep` pin files with CRLF line endings. The `\r` used to become part of the profile name.
+
 ## [0.1.1] - 2026-09-03
 
 ### Fixed

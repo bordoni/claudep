@@ -46,6 +46,7 @@ claudep doctor                      # symlink, keychain and classification check
 6. Update `README.md` (user-facing), the `help()` text and `test/cli.test.ts` together when a command or flag changes. A change to the shell hook also updates `resolvePin()` and `test/shell.test.ts`; the two must agree.
 7. Every change a user could notice gets a line under `[Unreleased]` in `CHANGELOG.md` in the same change. CI enforces it for pull requests that touch `claudep.ts`.
 8. Helpers take their inputs as parameters and are exported; commands get a `Layout` from `layout()`. Without that the tests cannot redirect paths and the `$HOME` sandbox does nothing.
+9. Compare paths with `samePath()` and `isInside()`, never with `startsWith` or `===`, and split `PATH` with `splitPathVar()`. Every helper that builds or compares a path takes `platform` as its last parameter and goes through `pathApi(platform)`, so the tests can run the win32 branch on any host. Commands read `L.platform`.
 
 ## Never
 
