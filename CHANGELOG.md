@@ -8,14 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
-- Windows support from PowerShell and Git Bash: `claudep init` stops with Developer Mode instructions when Windows refuses to create a symlink; `claudep alias` writes `<command>.cmd` next to the sh shim; an npm-installed `claude.cmd` is launched through cmd.exe and `claude.exe` is preferred when both exist; the bash hook under Git Bash exports the native `C:\` path. CI runs the suite on Windows, and the README has a Windows section.
-- `claudep shell-init powershell` prints a hook for Windows PowerShell 5.1 and PowerShell 7 that follows `.claudep` pins by wrapping `prompt`. `claudep env` prints PowerShell syntax when run from PowerShell. `shell-init` with no argument now picks the shell from `$SHELL`, or PowerShell on Windows. `claudep current` and `doctor` warn about a POSIX-style `CLAUDE_CONFIG_DIR` on Windows.
+- Windows support, from PowerShell 5.1, PowerShell 7 and Git Bash, with a native `claude.exe` or an npm-installed `claude.cmd`. Install with `bun add -g @bordoni/claudep`. cmd.exe is not a target. The README has a Windows section.
+- `claudep init` on Windows stops with instructions to turn on Developer Mode when Windows refuses to create a symlink, and finishes the profile on the next run. Symlinks are always created with their kind, which Windows needs and other systems ignore.
+- `claudep shell-init powershell` prints a hook for `$PROFILE` that follows `.claudep` pins by wrapping `prompt`. `shell-init` with no argument picks the shell from `$SHELL`, or PowerShell on Windows outside Git Bash.
+- `claudep env` prints `$env:` syntax when run from PowerShell, so `claudep env work | Invoke-Expression` works there and `eval "$(claudep env work)"` keeps working in Git Bash and elsewhere.
+- `claudep alias` on Windows writes `<command>.cmd`, which PowerShell finds through `PATHEXT`, next to the sh shim Git Bash runs.
+- An npm-installed `claude.cmd` is launched through cmd.exe; `claude.exe` is preferred when both are on PATH, and `claudep doctor` says which one it found.
+- `claudep current` and `claudep doctor` warn on Windows when `CLAUDE_CONFIG_DIR` is a POSIX-style path that `claude.exe` cannot read.
+- CI runs the suite on Windows as well as macOS and Linux, including the shell hook under Git Bash, `pwsh` and Windows PowerShell 5.1.
 
 ### Changed
 
-- Path comparisons for pins, the `claudep rm` safety check and `~` shortening accept `~\`, drive letters and MSYS `/c/` paths, and are case-insensitive on Windows. Groundwork for Windows support; no behaviour change on macOS or Linux.
 - `claudep doctor` on Linux and Windows checks that the profile has a `.credentials.json` instead of printing `keychain check skipped`. `Thumbs.db` and `desktop.ini` are known-private.
+- Path comparisons for pins, the `claudep rm` safety check and `~` shortening accept `~\`, drive letters and MSYS `/c/` paths, and are case-insensitive on Windows only. No behaviour change on macOS or Linux.
 - `claudep rm` unlinks the shared items itself before deleting the profile directory.
+- The bash hook under Git Bash exports the native `C:\` path for the pinned profile while still walking the POSIX `$PWD`.
 
 ### Fixed
 
