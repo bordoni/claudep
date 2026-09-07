@@ -287,6 +287,12 @@ describe("envFor", () => {
     expect(envFor(undefined, { CLAUDE_CONFIG_DIR: "/keep" })).toEqual({ CLAUDE_CONFIG_DIR: "/keep" });
     expect(envFor(undefined, {})).toEqual({});
   });
+
+  test("replaces every spelling of CLAUDE_CONFIG_DIR on win32", () => {
+    const env = { claude_config_dir: "C:\\old", PATH: "C:\\bin" };
+    expect(envFor("C:\\p", env, "win32")).toEqual({ PATH: "C:\\bin", CLAUDE_CONFIG_DIR: "C:\\p" });
+    expect(envFor("/p", env, "linux")).toEqual({ ...env, CLAUDE_CONFIG_DIR: "/p" });
+  });
 });
 
 describe("parseFlags", () => {
@@ -558,6 +564,14 @@ describe("shellInit", () => {
 
   test("strips a carriage return from the pin line", () => {
     expect(shellInit("bash", "/home/me/.claudep")).toContain(`_claudep_line="\${_claudep_line%$'\\r'}"`);
+  });
+
+  test("embeds the native separator so Git Bash exports a path claude.exe reads", () => {
+    expect(shellInit("bash", "/home/me/.claudep", "linux")).toContain("_claudep_sep='/'");
+    const win = shellInit("bash", "C:\\Users\\me\\.claudep", "win32");
+    expect(win).toContain("_claudep_root='C:\\Users\\me\\.claudep'");
+    expect(win).toContain("_claudep_sep='\\'");
+    expect(win).toContain('export CLAUDE_CONFIG_DIR="$_claudep_root$_claudep_sep$_claudep_name"');
   });
 
   test("single-quotes a root with an apostrophe safely", () => {

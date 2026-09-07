@@ -1,17 +1,36 @@
 /**
  * Drives the emitted shell hook in a real bash (and zsh when present) against
  * a fake home, and checks it agrees with resolvePin() and the pin rules.
+ * On Windows the bash is Git for Windows', which is what a Git Bash user runs.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SCRIPT } from "./lib/cli.ts";
 import { fakeHome } from "./lib/home.ts";
+import { msys } from "./lib/paths.ts";
 
 type ShellRun = { exitCode: number; stdout: string; stderr: string };
 
+const WIN = process.platform === "win32";
+
+/** Git for Windows' bash, never Bun.which("bash"): System32 has a WSL stub by that name. */
+function gitBash(): string | undefined {
+  for (const root of [process.env.ProgramFiles, process.env["ProgramFiles(x86)"], "C:\\Program Files"]) {
+    if (!root) continue;
+    const p = join(root, "Git", "bin", "bash.exe");
+    if (existsSync(p)) return p;
+  }
+  return undefined;
+}
+
+const shells: { name: "bash" | "zsh"; exe: string }[] = WIN
+  ? [gitBash()].filter((p): p is string => p !== undefined).map((exe) => ({ name: "bash" as const, exe }))
+  : [{ name: "bash", exe: "bash" }, ...(Bun.which("zsh") ? [{ name: "zsh" as const, exe: "zsh" }] : [])];
+
 async function runShell(
   shell: "bash" | "zsh",
+  exe: string,
   home: string,
   script: string,
   env: Record<string, string> = {},
@@ -29,7 +48,14 @@ async function runShell(
     NO_COLOR: "1",
     ...env,
   };
-  const proc = Bun.spawn([shell, "-c", `${prelude}\n${script}`], {
+  if (WIN) {
+    cleanEnv.USERPROFILE = home;
+    for (const k of ["SystemRoot", "TEMP", "TMP", "PATHEXT", "COMSPEC"]) {
+      const v = process.env[k];
+      if (v !== undefined) cleanEnv[k] = v;
+    }
+  }
+  const proc = Bun.spawn([exe, "-c", `${prelude}\n${script}`], {
     env: cleanEnv,
     cwd: home,
     stdin: "ignore",
@@ -54,13 +80,13 @@ function pinnedTree(home: string, profilesRoot: string): { repo: string; nested:
   return { repo, nested, work };
 }
 
-const shells: ("bash" | "zsh")[] = ["bash", ...(Bun.which("zsh") ? (["zsh"] as const) : [])];
+describe.each(shells)("$name hook", ({ name: shell, exe }) => {
+  const run = (home: string, script: string, env?: Record<string, string>) => runShell(shell, exe, home, script, env);
 
-describe.each(shells)("%s hook", (shell) => {
   test("sets the profile on entering a pinned tree and clears it on leaving", async () => {
     using h = fakeHome();
     const { nested, work } = pinnedTree(h.home, h.profilesRoot);
-    const r = await runShell(shell, h.home, `show; cd ${JSON.stringify(nested)}; tick; show; cd /; tick; show`);
+    const r = await run(h.home, `show; cd ${JSON.stringify(nested)}; tick; show; cd /; tick; show`);
     expect(r.stderr).toBe("");
     expect(r.stdout.trim().split("\n")).toEqual(["<unset>|<unset>", `${work}|${work}`, "<unset>|<unset>"]);
   });
@@ -70,7 +96,7 @@ describe.each(shells)("%s hook", (shell) => {
     const { nested } = pinnedTree(h.home, h.profilesRoot);
     const manual = join(h.profilesRoot, "manual");
     mkdirSync(manual);
-    const r = await runShell(shell, h.home, `cd ${JSON.stringify(nested)}; tick; show; cd /; tick; show`, {
+    const r = await run(h.home, `cd ${JSON.stringify(nested)}; tick; show; cd /; tick; show`, {
       CLAUDE_CONFIG_DIR: manual,
     });
     expect(r.stdout.trim().split("\n")).toEqual([`${manual}|<unset>`, `${manual}|<unset>`]);
@@ -81,8 +107,7 @@ describe.each(shells)("%s hook", (shell) => {
     const { nested, work } = pinnedTree(h.home, h.profilesRoot);
     const manual = join(h.profilesRoot, "manual");
     mkdirSync(manual);
-    const r = await runShell(
-      shell,
+    const r = await run(
       h.home,
       `cd ${JSON.stringify(nested)}; tick; show; unset CLAUDE_CONFIG_DIR; cd ${JSON.stringify(h.home)}; tick; cd ${JSON.stringify(nested)}; tick; show`,
       { CLAUDE_CONFIG_DIR: manual },
@@ -94,7 +119,7 @@ describe.each(shells)("%s hook", (shell) => {
     using h = fakeHome();
     const { repo, nested, work } = pinnedTree(h.home, h.profilesRoot);
     writeFileSync(join(repo, ".claudep"), "# from Windows\r\nwork\r\n");
-    const r = await runShell(shell, h.home, `cd ${JSON.stringify(nested)}; tick; show`);
+    const r = await run(h.home, `cd ${JSON.stringify(nested)}; tick; show`);
     expect(r.stderr).toBe("");
     expect(r.stdout.trim().split("\n")).toEqual([`${work}|${work}`]);
   });
@@ -103,40 +128,36 @@ describe.each(shells)("%s hook", (shell) => {
     using h = fakeHome();
     const { repo, nested, work } = pinnedTree(h.home, h.profilesRoot);
     writeFileSync(join(repo, "src", ".claudep"), "# no pin below here\n");
-    const r = await runShell(
-      shell,
-      h.home,
-      `cd ${JSON.stringify(repo)}; tick; show; cd ${JSON.stringify(nested)}; tick; show`,
-    );
+    const r = await run(h.home, `cd ${JSON.stringify(repo)}; tick; show; cd ${JSON.stringify(nested)}; tick; show`);
     expect(r.stdout.trim().split("\n")).toEqual([`${work}|${work}`, "<unset>|<unset>"]);
   });
 
   test("warns once per directory change when the pinned profile does not exist, and clears any auto pin", async () => {
     using h = fakeHome();
-    const { repo, nested, work } = pinnedTree(h.home, h.profilesRoot);
+    const { nested } = pinnedTree(h.home, h.profilesRoot);
     const other = join(h.home, "other");
     mkdirSync(other);
     writeFileSync(join(other, ".claudep"), "ghost\n");
-    const r = await runShell(
-      shell,
-      h.home,
-      `cd ${JSON.stringify(nested)}; tick; cd ${JSON.stringify(other)}; tick; tick; show`,
-    );
+    const r = await run(h.home, `cd ${JSON.stringify(nested)}; tick; cd ${JSON.stringify(other)}; tick; tick; show`);
     expect(r.stdout.trim()).toBe("<unset>|<unset>");
+    // The hook reports where it found the pin in the shell's own spelling of $PWD.
     expect(r.stderr.trim().split("\n")).toEqual([
-      `claudep: ${other}/.claudep names profile "ghost", which does not exist. Run: claudep init ghost`,
+      `claudep: ${msys(other)}/.claudep names profile "ghost", which does not exist. Run: claudep init ghost`,
     ]);
-    expect(work).toContain(repo.split("/").slice(0, -1).join("/"));
   });
 
   test("agrees with `claudep resolve` on the nearest pin", async () => {
     using h = fakeHome();
     const { nested, work } = pinnedTree(h.home, h.profilesRoot);
-    const r = await runShell(
-      shell,
+    const r = await run(
       h.home,
       `cd ${JSON.stringify(nested)}; tick; printf "%s\\n" "$CLAUDE_CONFIG_DIR"; ${JSON.stringify(process.execPath)} ${JSON.stringify(SCRIPT)} resolve`,
     );
     expect(r.stdout.trim().split("\n")).toEqual([work, "work"]);
   });
+});
+
+test.if(shells.length === 0)("no shell to drive the hook with on this machine", () => {
+  // Windows without Git for Windows. The unit tests still cover the hook text.
+  expect(WIN).toBe(true);
 });

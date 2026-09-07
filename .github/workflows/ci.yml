@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2

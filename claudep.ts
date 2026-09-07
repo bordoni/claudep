@@ -24,9 +24,11 @@ import {
   readFileSync,
   readlinkSync,
   realpathSync,
+  rmdirSync,
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
@@ -271,6 +273,8 @@ export const KNOWN_PRIVATE = new Set<string>([
   "local",
   "settings.local.json",
   ".DS_Store",
+  "Thumbs.db",
+  "desktop.ini",
   ".config.json",
   ".last-cleanup",
   ".last-update-result.json",
@@ -384,32 +388,105 @@ export function sharedItems(base: string): SharedItem[] {
   return items;
 }
 
-export type LinkResult = "linked" | "ok" | "wrong-target" | "conflict";
+/** The two file-system calls link() makes, injectable so the tests can record
+ *  the symlink type and simulate Windows refusing to create one. */
+export type LinkDeps = {
+  platform: NodeJS.Platform;
+  symlink: (target: string, dest: string, type: SharedItem["kind"]) => void;
+  readlink: (p: string) => string;
+};
 
-/** Idempotent symlink profile/<name> -> base/<name>. Never overwrites real files. */
-export function link(base: string, dir: string, name: string, force: boolean): LinkResult {
-  const target = join(base, name);
-  const dest = join(dir, name);
+export const defaultLinkDeps = (): LinkDeps => ({
+  platform: process.platform,
+  symlink: (target, dest, type) => symlinkSync(target, dest, type),
+  readlink: (p) => readlinkSync(p),
+});
+
+export type LinkResult = "linked" | "ok" | "wrong-target" | "conflict" | "denied";
+
+/** Remove a symlink. On Windows a directory symlink is removed with rmdir. */
+function removeLink(p: string): void {
+  try {
+    unlinkSync(p);
+  } catch {
+    rmdirSync(p);
+  }
+}
+
+/** false when the OS refused with EPERM, which on Windows means Developer
+ *  Mode is off. Anything else propagates. */
+function trySymlink(deps: LinkDeps, target: string, dest: string, type: SharedItem["kind"]): boolean {
+  try {
+    deps.symlink(target, dest, type);
+    return true;
+  } catch (e) {
+    if ((e as { code?: string }).code === "EPERM") return false;
+    throw e;
+  }
+}
+
+/** Idempotent symlink profile/<name> -> base/<name>. Never overwrites real
+ *  files. The type is always passed: POSIX ignores it, Windows needs it. */
+export function link(
+  base: string,
+  dir: string,
+  item: SharedItem,
+  force: boolean,
+  deps: LinkDeps = defaultLinkDeps(),
+): LinkResult {
+  const target = join(base, item.name);
+  const dest = join(dir, item.name);
   let st: ReturnType<typeof lstatSync> | undefined;
   try {
     st = lstatSync(dest);
   } catch {
     st = undefined;
   }
-  if (!st) {
-    symlinkSync(target, dest);
-    return "linked";
-  }
+  if (!st) return trySymlink(deps, target, dest, item.kind) ? "linked" : "denied";
   if (st.isSymbolicLink()) {
-    if (readlinkSync(dest) === target) return "ok";
+    if (samePath(deps.readlink(dest), target, deps.platform)) return "ok";
     if (force) {
-      rmSync(dest);
-      symlinkSync(target, dest);
-      return "linked";
+      removeLink(dest);
+      return trySymlink(deps, target, dest, item.kind) ? "linked" : "denied";
     }
     return "wrong-target";
   }
   return "conflict";
+}
+
+export type LinkState = "ok" | "missing" | "shadowed" | "wrong-target" | "broken";
+
+/** What doctor reports for one shared item. Read-only twin of link(). */
+export function linkState(
+  base: string,
+  dir: string,
+  item: SharedItem,
+  deps: Pick<LinkDeps, "platform" | "readlink"> = defaultLinkDeps(),
+): LinkState {
+  const dest = join(dir, item.name);
+  let st: ReturnType<typeof lstatSync> | undefined;
+  try {
+    st = lstatSync(dest);
+  } catch {
+    st = undefined;
+  }
+  if (!st) return "missing";
+  if (!st.isSymbolicLink()) return "shadowed";
+  if (!samePath(deps.readlink(dest), join(base, item.name), deps.platform)) return "wrong-target";
+  return existsSync(dest) ? "ok" : "broken";
+}
+
+/** What to tell the user when the OS refused to create a symlink. */
+export function symlinkDeniedHint(platform: NodeJS.Platform, name: string): string {
+  if (platform === "win32")
+    return `Windows refused to create a symlink. Turn on Developer Mode (Settings > For developers > Developer Mode), open a new terminal and run: claudep init ${name}`;
+  return `the OS refused to create a symlink (EPERM). Check the permissions on the profiles root, then run: claudep init ${name}`;
+}
+
+/** True when the profile has Claude Code's file credential store. Existence
+ *  only; the file is never read. This is the login check everywhere but macOS. */
+export function credentialsFileHas(dir: string, exists: (p: string) => boolean = existsSync): boolean {
+  return exists(join(dir, ".credentials.json"));
 }
 
 export type JsonObject = Record<string, unknown>;
@@ -441,17 +518,114 @@ export async function seedGlobalJson(baseGlobalJson: string, dir: string, copyMc
 // Running claude
 // ---------------------------------------------------------------------------
 
-function claudeBin(): string {
-  const bin = Bun.which("claude");
-  if (!bin) die("`claude` not found on PATH. Install Claude Code first: https://code.claude.com/docs/en/setup");
-  return bin;
+/** How `claude` is installed. A native binary or npm's Windows shims. */
+export type ClaudeLaunch = { bin: string; kind: "exe" | "cmd" | "ps1" };
+
+export type FindDeps = {
+  platform: NodeJS.Platform;
+  pathVar: string;
+  exists: (p: string) => boolean;
+  which: (name: string) => string | null;
+};
+
+export const defaultFindDeps = (): FindDeps => ({
+  platform: process.platform,
+  pathVar: process.env.PATH ?? "",
+  exists: existsSync,
+  which: (name) => Bun.which(name),
+});
+
+/** Locate claude. POSIX asks which(). Windows walks PATH one directory at a
+ *  time so the first directory wins even when a later one has claude.exe,
+ *  and prefers claude.exe over the npm shims inside a directory. */
+export function findClaude(deps: FindDeps = defaultFindDeps()): ClaudeLaunch | undefined {
+  if (deps.platform !== "win32") {
+    const bin = deps.which("claude");
+    return bin ? { bin, kind: "exe" } : undefined;
+  }
+  const candidates: [string, ClaudeLaunch["kind"]][] = [
+    ["claude.exe", "exe"],
+    ["claude.cmd", "cmd"],
+    ["claude.bat", "cmd"],
+    ["claude.ps1", "ps1"],
+  ];
+  for (const dir of splitPathVar(deps.pathVar, "win32")) {
+    for (const [file, kind] of candidates) {
+      const bin = win32.join(dir, file);
+      if (deps.exists(bin)) return { bin, kind };
+    }
+  }
+  return undefined;
+}
+
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
+
+/** The command word for `cmd.exe /d /s /c "..."`, the way cross-spawn does
+ *  it: caret-escape cmd's metacharacters, spaces included, and no quotes. */
+export function cmdExeCommand(cmd: string): string {
+  return cmd.replace(CMD_META, "^$1");
+}
+
+/** One argument for the same line: double backslashes before quotes, escape
+ *  quotes, wrap in quotes, then caret-escape every metacharacter. Twice when
+ *  the target is a .cmd shim, because its own cmd.exe parses `%*` again. */
+export function cmdExeQuote(arg: string, doubleEscape = true): string {
+  let out = arg.replace(/(?=(\\+?)?)"/g, '$1$1\\"');
+  out = out.replace(/(\\+)$/, "$1$1");
+  out = `"${out}"`.replace(CMD_META, "^$1");
+  if (doubleEscape) out = out.replace(CMD_META, "^$1");
+  return out;
+}
+
+/** argv and spawn option for a launch. A .cmd shim cannot be executed
+ *  directly; it runs through cmd.exe with one pre-quoted command line. */
+export function claudeSpawn(launch: ClaudeLaunch, args: string[]): { cmd: string[]; verbatim: boolean } {
+  if (launch.kind !== "cmd") return { cmd: [launch.bin, ...args], verbatim: false };
+  const line = [cmdExeCommand(launch.bin), ...args.map((a) => cmdExeQuote(a))].join(" ");
+  return { cmd: ["cmd.exe", "/d", "/s", "/c", `"${line}"`], verbatim: true };
+}
+
+/** Signals the wrapper ignores (so it survives to report the child's exit
+ *  code; the terminal delivers Ctrl+C to the child itself) and forwards.
+ *  Windows has no SIGHUP. */
+export function wrapperSignals(platform: NodeJS.Platform): { ignore: NodeJS.Signals[]; forward: NodeJS.Signals[] } {
+  if (platform === "win32") return { ignore: ["SIGINT"], forward: ["SIGTERM"] };
+  return { ignore: ["SIGINT"], forward: ["SIGTERM", "SIGHUP"] };
+}
+
+function claudeLaunch(): ClaudeLaunch {
+  const launch = findClaude();
+  if (!launch) die("`claude` not found on PATH. Install Claude Code first: https://code.claude.com/docs/en/setup");
+  if (launch.kind === "ps1")
+    die(
+      `only ${launch.bin} was found. Install Claude Code with the native installer or npm so claude.exe or claude.cmd exists: https://code.claude.com/docs/en/setup`,
+    );
+  return launch;
+}
+
+function spawnClaude(L: Layout, dir: string | undefined, args: string[], io: "inherit" | "pipe") {
+  const { cmd, verbatim } = claudeSpawn(claudeLaunch(), args);
+  return Bun.spawn(cmd, {
+    env: claudeEnv(L, dir),
+    stdin: io === "inherit" ? "inherit" : "ignore",
+    stdout: io,
+    stderr: io,
+    windowsVerbatimArguments: verbatim,
+  });
 }
 
 /** Environment for a profile. `undefined` dir means "the base", i.e. leave the
  *  caller's CLAUDE_CONFIG_DIR exactly as it is (set or unset). */
-export function envFor(dir: string | undefined, env: Env = process.env): Env {
+export function envFor(
+  dir: string | undefined,
+  env: Env = process.env,
+  platform: NodeJS.Platform = process.platform,
+): Env {
   const out: Env = { ...env };
-  if (dir !== undefined) out.CLAUDE_CONFIG_DIR = dir;
+  if (dir !== undefined) {
+    deleteEnv(out, "CLAUDE_CONFIG_DIR", platform);
+    out.CLAUDE_CONFIG_DIR = dir;
+  }
   return out;
 }
 
@@ -468,21 +642,16 @@ export function baseEnv(L: Layout, env: Env = process.env): Env {
 }
 
 function claudeEnv(L: Layout, dir: string | undefined): Env {
-  return dir === undefined ? baseEnv(L) : envFor(dir);
+  return dir === undefined ? baseEnv(L) : envFor(dir, process.env, L.platform);
 }
 
 async function execClaude(L: Layout, dir: string | undefined, args: string[]): Promise<never> {
-  const proc = Bun.spawn([claudeBin(), ...args], {
-    env: claudeEnv(L, dir),
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
+  const proc = spawnClaude(L, dir, args, "inherit");
   // Ctrl+C reaches the child through the terminal; keep the wrapper alive so
   // it can report the child's real exit code.
-  process.on("SIGINT", () => {});
-  process.on("SIGTERM", () => proc.kill("SIGTERM"));
-  process.on("SIGHUP", () => proc.kill("SIGHUP"));
+  const signals = wrapperSignals(L.platform);
+  for (const s of signals.ignore) process.on(s, () => {});
+  for (const s of signals.forward) process.on(s, () => proc.kill(s));
   await proc.exited;
   process.exit(proc.exitCode ?? 1);
 }
@@ -492,12 +661,7 @@ async function captureClaude(
   dir: string | undefined,
   args: string[],
 ): Promise<{ code: number; out: string }> {
-  const proc = Bun.spawn([claudeBin(), ...args], {
-    env: claudeEnv(L, dir),
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const proc = spawnClaude(L, dir, args, "pipe");
   const out = await new Response(proc.stdout).text();
   const code = await proc.exited;
   return { code, out };
@@ -603,9 +767,10 @@ async function cmdInit(L: Layout, args: string[]): Promise<void> {
 
   let conflicts = 0;
   for (const item of sharedItems(L.base)) {
-    const r = link(L.base, dir, item.name, f.bools.has("--force"));
+    const r = link(L.base, dir, item, f.bools.has("--force"));
     if (r === "linked") ok(`${item.name} → shared`);
     else if (r === "ok") console.log(`${c.dim("·")} ${item.name} ${c.dim("already shared")}`);
+    else if (r === "denied") die(symlinkDeniedHint(L.platform, name));
     else if (r === "wrong-target") {
       warn(`${item.name} is a symlink to somewhere else (re-run with --force to relink)`);
       conflicts++;
@@ -622,7 +787,7 @@ async function cmdInit(L: Layout, args: string[]): Promise<void> {
   else warn(`could not read ${L.baseGlobalJson}; Claude Code will run its first-time onboarding`);
 
   const alias = f.strs.get("--alias");
-  if (alias !== undefined) writeAlias(name, alias);
+  if (alias !== undefined) writeAlias(L, name, alias);
 
   if (conflicts) warn(`${conflicts} item(s) need attention, see above`);
 
@@ -672,30 +837,53 @@ export function onPath(
   });
 }
 
-/** Write a tiny shim `<cmd>` next to the claudep on PATH: `exec claudep run <name> -- "$@"`. */
-function writeAlias(name: string, cmd: string): void {
+export type AliasKind = "sh" | "cmd";
+
+/** The shim text. Both say "generated by claudep" and ` run <name> -- ` so
+ *  `claudep rm` can find them. */
+export function aliasShim(kind: AliasKind, self: string, name: string): string {
+  if (kind === "cmd")
+    return `@echo off\r\nREM generated by claudep. Runs Claude Code under the "${name}" profile\r\nbun "${self}" run ${name} -- %*\r\n`;
+  return `#!/bin/sh\n# generated by claudep. Runs Claude Code under the "${name}" profile\nexec bun "${self}" run ${name} -- "$@"\n`;
+}
+
+/** Where the shims for `<cmd>` go. One sh file on POSIX. On Windows a .cmd
+ *  file, which PowerShell finds through PATHEXT, plus the sh file for Git Bash. */
+export function aliasFiles(
+  dir: string,
+  cmd: string,
+  platform: NodeJS.Platform = process.platform,
+): { path: string; kind: AliasKind }[] {
+  const P = pathApi(platform);
+  const sh = { path: P.join(dir, cmd), kind: "sh" as const };
+  if (platform !== "win32") return [sh];
+  return [{ path: P.join(dir, `${cmd}.cmd`), kind: "cmd" as const }, sh];
+}
+
+/** Write the shim(s) for `<cmd>` next to the claudep on PATH: `claudep run <name> -- "$@"`. */
+function writeAlias(L: Layout, name: string, cmd: string): void {
   if (!NAME_RE.test(cmd)) die(`invalid alias command name "${cmd}"`);
-  const dest = join(aliasDir(), cmd);
   const self = realpathSync(Bun.main);
-  if (existsSync(dest)) {
-    const current = Bun.file(dest);
-    if (!lstatSync(dest).isSymbolicLink() && current.size > 0) {
-      warn(`${dest} already exists. Not overwriting; remove it first to regenerate`);
-      return;
+  for (const { path: dest, kind } of aliasFiles(aliasDir(), cmd, L.platform)) {
+    if (existsSync(dest)) {
+      const current = Bun.file(dest);
+      if (!lstatSync(dest).isSymbolicLink() && current.size > 0) {
+        warn(`${dest} already exists. Not overwriting; remove it first to regenerate`);
+        continue;
+      }
     }
+    writeFileSync(dest, aliasShim(kind, self, name));
+    if (kind === "sh") chmodSync(dest, 0o755);
+    ok(`alias ${c.bold(cmd)} → profile ${name} (${dest})`);
   }
-  const shim = `#!/bin/sh\n# generated by claudep. Runs Claude Code under the "${name}" profile\nexec bun "${self}" run ${name} -- "$@"\n`;
-  writeFileSync(dest, shim);
-  chmodSync(dest, 0o755);
-  ok(`alias ${c.bold(cmd)} → profile ${name} (${dest})`);
-  if (!onPath(aliasDir())) warn(`${aliasDir()} is not on your PATH`);
+  if (!onPath(aliasDir(), undefined, L.platform)) warn(`${aliasDir()} is not on your PATH`);
 }
 
 async function cmdAlias(L: Layout, args: string[]): Promise<void> {
   const [name, cmd] = args;
   if (!name || !cmd) die("usage: claudep alias <profile> <command>   e.g. claudep alias enterprise eclaude");
   if (!profileExists(L, name)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
-  writeAlias(name, cmd);
+  writeAlias(L, name, cmd);
 }
 
 async function cmdRun(L: Layout, args: string[]): Promise<never> {
@@ -848,10 +1036,19 @@ function cmdLocal(L: Layout, args: string[]): void {
 /** The shell hook. Pure parameter expansion and builtins: it runs on every
  *  directory change (zsh chpwd) or prompt (bash PROMPT_COMMAND), so no
  *  subprocess is allowed here. Logic mirrors resolvePin(). */
-export function shellInit(shell: "zsh" | "bash", profilesRoot: string): string {
+export function shellInit(
+  shell: "zsh" | "bash",
+  profilesRoot: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const q = profilesRoot.replace(/'/g, `'\\''`);
+  // Under Git Bash $PWD is POSIX-style but the exported value must be the
+  // native path claude.exe reads, so the root and its separator are embedded
+  // as the native bun saw them and only the walk uses $PWD.
+  const sep = platform === "win32" ? "\\" : "/";
   const core = `# claudep shell hook. Load it from your rc file:  eval "$(claudep shell-init ${shell})"
 _claudep_root='${q}'
+_claudep_sep='${sep}'
 _claudep_auto() {
   [ "$PWD" = "\${_claudep_last_pwd:-}" ] && return 0
   _claudep_last_pwd="$PWD"
@@ -879,12 +1076,12 @@ _claudep_auto() {
     [ -n "\${CLAUDEP_AUTO:-}" ] && unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO
     return 0
   fi
-  if [ ! -d "$_claudep_root/$_claudep_name" ]; then
+  if [ ! -d "$_claudep_root$_claudep_sep$_claudep_name" ]; then
     [ -n "\${CLAUDEP_AUTO:-}" ] && unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO
     printf 'claudep: %s/${PIN_FILE} names profile "%s", which does not exist. Run: claudep init %s\\n' "$_claudep_found" "$_claudep_name" "$_claudep_name" >&2
     return 0
   fi
-  export CLAUDE_CONFIG_DIR="$_claudep_root/$_claudep_name" CLAUDEP_AUTO="$_claudep_root/$_claudep_name"
+  export CLAUDE_CONFIG_DIR="$_claudep_root$_claudep_sep$_claudep_name" CLAUDEP_AUTO="$_claudep_root$_claudep_sep$_claudep_name"
 }
 `;
   const tail =
@@ -907,11 +1104,16 @@ function cmdShellInit(L: Layout, args: string[]): void {
 
 async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
   const names = args[0] ? [args[0]] : listProfileNames(L);
-  const bin = Bun.which("claude");
-  if (bin) {
+  const launch = findClaude();
+  if (launch && launch.kind !== "ps1") {
     const { out } = await captureClaude(L, undefined, ["--version"]);
-    ok(`claude: ${bin} (${out.trim() || "version unknown"})`);
-  } else bad("claude binary not found on PATH");
+    ok(`claude: ${launch.bin} (${out.trim() || "version unknown"})`);
+    if (launch.kind === "cmd")
+      console.log(
+        `${c.dim("·")} claude is the npm cmd shim and runs through cmd.exe; the native installer's claude.exe avoids that hop`,
+      );
+  } else if (launch) bad(`only ${launch.bin} found; claudep needs claude.exe or claude.cmd`);
+  else bad("claude binary not found on PATH");
   ok(`base: ${L.base}${L.callerConfigDir && !L.managed ? c.yellow("  (from CLAUDE_CONFIG_DIR in your shell)") : ""}`);
   ok(`profiles root: ${L.profilesRoot}`);
 
@@ -935,36 +1137,32 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       problems++;
       continue;
     }
+    let missing = 0;
     for (const item of shared) {
-      const dest = join(dir, item.name);
-      let st: ReturnType<typeof lstatSync> | undefined;
-      try {
-        st = lstatSync(dest);
-      } catch {
-        st = undefined;
-      }
-      if (!st) {
+      const state = linkState(L.base, dir, item);
+      if (state === "ok") continue;
+      problems++;
+      if (state === "missing") {
+        missing++;
         warn(`${item.name}: not linked (run: claudep init ${name})`);
-        problems++;
-      } else if (!st.isSymbolicLink()) {
-        warn(`${item.name}: real ${item.kind} shadows the shared one`);
-        problems++;
-      } else if (readlinkSync(dest) !== join(L.base, item.name)) {
-        bad(`${item.name}: symlink points elsewhere (${readlinkSync(dest)})`);
-        problems++;
-      } else if (!existsSync(dest)) {
-        bad(`${item.name}: broken symlink`);
-        problems++;
-      }
+      } else if (state === "shadowed") warn(`${item.name}: real ${item.kind} shadows the shared one`);
+      else if (state === "wrong-target")
+        bad(`${item.name}: symlink points elsewhere (${readlinkSync(join(dir, item.name))})`);
+      else bad(`${item.name}: broken symlink`);
     }
+    if (missing && L.platform === "win32")
+      console.log(
+        `${c.dim("·")} Windows creates symlinks only with Developer Mode on; claudep init ${name} says so when it is off`,
+      );
     ok(`${shared.length} shared item(s) checked`);
     const strays = readdirSync(dir).filter((n) => !sharedNames.has(n) && !KNOWN_PRIVATE.has(n) && !n.endsWith(".md"));
     if (strays.length) warn(`unexpected private items: ${strays.join(", ")}`);
-    const svc = keychainService(dir);
-    const has = await keychainHas(svc);
-    if (has === undefined) console.log(`${c.dim("·")} keychain check skipped (not macOS)`);
-    else if (has) ok(`keychain item "${svc}" present`);
-    else warn(`no keychain item "${svc}". Not logged in yet (claudep ${name} auth login)`);
+    if (L.platform === "darwin") {
+      const svc = keychainService(dir);
+      if (await keychainHas(svc)) ok(`keychain item "${svc}" present`);
+      else warn(`no keychain item "${svc}". Not logged in yet (claudep ${name} auth login)`);
+    } else if (credentialsFileHas(dir)) ok(".credentials.json present");
+    else warn(`no .credentials.json in the profile. Not logged in yet (claudep ${name} auth login)`);
     const s = await authStatus(L, dir);
     if (s.loggedIn) ok(`logged in as ${s.email ?? "?"} (${s.orgName ?? "?"}, ${s.subscriptionType ?? "?"})`);
     else warn("not logged in");
@@ -997,14 +1195,15 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
     }
   }
   if (!f.bools.has("--keep-login")) {
-    const proc = Bun.spawn([claudeBin(), "auth", "logout"], {
-      env: envFor(dir),
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    if ((await proc.exited) === 0) ok("logged out (token revoked, keychain item removed)");
+    const proc = spawnClaude(L, dir, ["auth", "logout"], "inherit");
+    if ((await proc.exited) === 0) ok("logged out (token revoked, credentials removed)");
     else warn("logout failed or was not logged in. Continuing");
+  }
+  // Unlink the shared items first so no recursive delete ever looks through
+  // a symlink into the base, whatever the platform's rm does with them.
+  for (const entry of readdirSync(dir)) {
+    const p = join(dir, entry);
+    if (lstatSync(p).isSymbolicLink()) removeLink(p);
   }
   rmSync(dir, { recursive: true, force: true });
   ok(`removed ${dir}`);

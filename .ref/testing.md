@@ -1,6 +1,6 @@
 # Testing claudep
 
-`bun run check` is the gate: typecheck, lint, then the suite. CI runs the same three steps on every push and pull request (`.github/workflows/ci.yml`), with the tests on both macOS and Linux. The suite takes about four seconds locally.
+`bun run check` is the gate: typecheck, lint, then the suite. CI runs the same three steps on every push and pull request (`.github/workflows/ci.yml`), with the tests on macOS, Linux and Windows. The suite takes about six seconds locally.
 
 ```bash
 bun install              # dev tooling only: typescript, @types/bun, @biomejs/biome
@@ -15,20 +15,24 @@ bun run lint:fix         # let Biome format and fix what it can
 | Piece | Job |
 |---|---|
 | `bunfig.toml` | Points `bun test` at `test/preload.ts` and configures coverage. |
-| `test/preload.ts` | Runs before any test file. Moves `HOME` and the XDG dirs to a throwaway directory, sets `NO_COLOR=1`, and deletes every `ANTHROPIC_*` and `CLAUDE_*` variable from the shell. Nothing under test can reach the real `~/.claude`, `~/.claudep` or keychain. |
+| `test/preload.ts` | Runs before any test file. Moves `HOME`, `USERPROFILE` and the XDG dirs to a throwaway directory, sets `NO_COLOR=1`, and deletes every `ANTHROPIC_*` and `CLAUDE_*` variable from the shell. Nothing under test can reach the real `~/.claude`, `~/.claudep` or keychain. |
 | `test/lib/home.ts` | `using h = fakeHome()` builds a realistic `~/.claude` (shared files, private files, a `.claude.json` with seedable keys and identity that must never be copied) and removes it when the block ends. |
-| `test/lib/cli.ts` | `runCli(args, { home })` spawns the real `claudep.ts` with a fake `$HOME` and a bin dir prepended to PATH, and returns `{ exitCode, stdout, stderr }`. |
+| `test/lib/cli.ts` | `runCli(args, { home })` spawns the real `claudep.ts` with a fake `$HOME` and a bin dir prepended to PATH, and returns `{ exitCode, stdout, stderr }`. The fake `claude` is an sh shim on POSIX and a `claude.cmd` on Windows, so the Windows job goes through claudep's cmd.exe launcher the way an npm install does. |
+| `test/lib/paths.ts` | `norm()` for readlink results, `tilde()` for `~` output with the native separator, `rx()` for regexes, `msys()` for the `/c/` spelling Git Bash prints. |
 | `test/lib/fake-claude.ts` | Stands in for `claude`. Reads and writes `<config dir>/.fake-login.json` for `auth status/login/logout`, prints a fake `--version`, and logs any other invocation to `$FAKE_CLAUDE_LOG` with the `CLAUDE_CONFIG_DIR` it saw. `FAKE_CLAUDE_EXIT` sets its exit code. |
 | `test/lib/fake-security.ts` | Stands in for macOS `security`. Exits 0 when the requested service is listed in `$FAKE_KEYCHAIN`. |
 
 Test files:
 
 - `test/unit.test.ts`: pure helpers imported from `claudep.ts` (`canon`, `layout`, `keychainService`, `parseFlags`, `formatTable`, `parseAuthStatus`, name rules). Path helpers are called with an explicit platform: the POSIX cases pass `"linux"` so they hold on a Windows runner, and the `"win32"` cases run on every host.
-- `test/fs.test.ts`: `sharedItems`, `link`, `seedGlobalJson` against a fake home, in process.
+- `test/fs.test.ts`: `sharedItems`, `link`, `linkState`, `seedGlobalJson` against a fake home, in process. The `EPERM` branch uses an injected `symlink`, because the Windows runner is elevated and never hits it for real.
+- `test/spawn.test.ts`: `findClaude`, cmd.exe quoting, `claudeSpawn`, `wrapperSignals`, the Developer Mode hint, `credentialsFileHas` and the alias shim text. Pure functions with injected deps, so the win32 shapes run on every host.
 - `test/keychain.test.ts`: `keychainHas` with an injected spawner, plus one real `security` call gated on macOS.
 - `test/cli.test.ts`: every command as a subprocess. This is where behaviour lives; add a case here when you change a command.
 - `test/changelog.test.ts`: the Keep a Changelog helpers in `scripts/changelog.ts` (`extract`, `promote`, link rewriting) plus one run of the CLI, and a check that the real `CHANGELOG.md` parses.
-- `test/shell.test.ts`: runs the hook printed by `shell-init` in a real `bash`, and in `zsh` when `Bun.which("zsh")` finds one (macOS runners have it, Ubuntu runners do not). Checks entering and leaving pinned trees, the manual-pin rule, the empty-pin cancel, the missing-profile warning, and that the hook and `claudep resolve` agree.
+- `test/shell.test.ts`: runs the hook printed by `shell-init` in a real `bash`, and in `zsh` when `Bun.which("zsh")` finds one (macOS runners have it, Ubuntu runners do not). On Windows the bash is Git for Windows' `bash.exe`, found under `%ProgramFiles%\Git`, never `Bun.which("bash")`, which can answer the WSL stub in System32. Checks entering and leaving pinned trees, the manual-pin rule, the empty-pin cancel, CRLF pin files, the missing-profile warning, and that the hook and `claudep resolve` agree.
+
+A `.gitattributes` with `* text=auto eol=lf` keeps the Windows checkout on LF; `test/changelog.test.ts` parses the real `CHANGELOG.md` by `\n`.
 
 `claudep.ts` exports its helpers and guards the entrypoint with `import.meta.main`, so importing it in a test runs nothing.
 

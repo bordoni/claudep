@@ -7,7 +7,7 @@ This is the source of truth for anyone changing this repository, human or agent.
 A single-file bun CLI, [`claudep.ts`](./claudep.ts), that runs Claude Code under separate accounts on one machine. It creates named profiles under `~/.claudep/<name>`, points Claude Code at them via `CLAUDE_CONFIG_DIR`, symlinks shared config back into `~/.claude`, and leaves credentials and account state per profile.
 
 - Zero runtime dependencies. Strict TypeScript, executed directly by bun (`#!/usr/bin/env bun`). No build step. Dev tooling only: `typescript`, `@types/bun`, `@biomejs/biome`.
-- macOS-first: the Keychain check is darwin-only and degrades to "skipped" elsewhere; everything else is portable.
+- Runs on macOS, Linux and Windows (PowerShell 5.1 and 7, Git Bash). The Keychain check is darwin-only; elsewhere `doctor` checks for `.credentials.json`. cmd.exe is not a target. CI runs the suite on all three.
 - Installed either by symlinking `claudep.ts` onto PATH (how the author runs it: `~/.dotfiles/bin/claudep`) or with `bun install -g github:bordoni/claudep` (the `bin` entry in `package.json`).
 - `~/.claude` is never modified. It is the implicit `default` profile.
 
@@ -24,6 +24,7 @@ A single-file bun CLI, [`claudep.ts`](./claudep.ts), that runs Claude Code under
 | [`.ref/tooling-gotchas.md`](./.ref/tooling-gotchas.md) | Before running non-trivial shell commands here: inline scripts lose braces, SSH to GitHub times out, zsh differs from bash. |
 | [`.ref/writing.md`](./.ref/writing.md) | You are writing or editing prose a person reads: README, this file, `.ref/`, help text, CLI messages. |
 | [`.ref/design-decisions.md`](./.ref/design-decisions.md) | You are tempted to restructure profiles, rename paths, or add a feature that was already considered. |
+| [`.ref/windows.md`](./.ref/windows.md) | You are touching symlinks, the launcher, path comparison or the hook, or the Windows CI job failed. What Claude Code and bun do on Windows and what the job proves. |
 
 ## Commands
 
@@ -42,7 +43,7 @@ claudep doctor                      # symlink, keychain and classification check
 2. Every shared item is an explicit allowlist entry with a reason recorded in `.ref/shared-vs-private.md`. Unknown files stay private by default.
 3. A profile name must match `NAME_RE` and must not be in `RESERVED`; both live near the top of `claudep.ts`.
 4. The string handed to `CLAUDE_CONFIG_DIR` must be canonical (absolute, no trailing slash, NFC) because Claude Code hashes it for the Keychain service name. Always go through `profileDir()` / `canon()`.
-5. Any change to what `init` links or seeds must be reflected in `doctor`, which is the user's only way to see drift.
+5. Any change to what `init` links or seeds must be reflected in `doctor`, which is the user's only way to see drift. `link()` and `linkState()` are the two halves; keep them agreeing.
 6. Update `README.md` (user-facing), the `help()` text and `test/cli.test.ts` together when a command or flag changes. A change to the shell hook also updates `resolvePin()` and `test/shell.test.ts`; the two must agree.
 7. Every change a user could notice gets a line under `[Unreleased]` in `CHANGELOG.md` in the same change. CI enforces it for pull requests that touch `claudep.ts`.
 8. Helpers take their inputs as parameters and are exported; commands get a `Layout` from `layout()`. Without that the tests cannot redirect paths and the `$HOME` sandbox does nothing.
@@ -51,7 +52,7 @@ claudep doctor                      # symlink, keychain and classification check
 ## Never
 
 1. **Never add a runtime dependency.** Users install one file. Dev-only tooling is fine and lives in `devDependencies`. Prefer `Bun.*` APIs; use `node:*` only where bun has no equivalent (symlinks, lstat).
-2. **Never write Python** or shell-heavy helpers. Scripts and tooling are bun + TypeScript. Two-line `#!/bin/sh` shims that only `exec` something are fine.
+2. **Never write Python** or shell-heavy helpers. Scripts and tooling are bun + TypeScript. Two-line `#!/bin/sh` shims that only `exec` something, and their `.cmd` twin on Windows, are fine.
 3. **Never print, log, or store credential material.** Keychain checks use `security find-generic-password` for its exit code only, with stdout and stderr discarded.
 4. **Never overwrite a real file or directory inside a profile.** `link()` refuses and reports; keep that behaviour.
 5. **Never touch `~/.claude` from `rm`** or any other command. `rm` unlinks symlinks inside the profile dir and refuses paths outside the profiles root.

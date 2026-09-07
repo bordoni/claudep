@@ -23,11 +23,11 @@ Sharing is opt-in per item. Anything not listed stays inside the profile directo
 | Item | Why |
 |---|---|
 | `.claude.json`, `.claude.json.backup` | `oauthAccount`, `userID`, user-scope `mcpServers`, per-cwd `projects[...]` trust and `allowedTools`. This *is* the account. |
-| `.credentials.json` | Fallback credential store on non-macOS. |
+| `.credentials.json` | The credential store on Linux and Windows, plain JSON. `doctor` checks that it exists there and never reads it. |
 | `remote-settings.json`, `policy-limits.json` | Pushed by the org. Leaking these applies one org's policy to another's session. |
 | `history.jsonl`, `sessions/`, `todos/`, `tasks/`, `jobs/`, `scheduled-tasks/` | Prompt history and task state tied to one login. |
 | `shell-snapshots/`, `file-history/`, `statsig/`, `telemetry/`, `cache/`, `debug/`, `backups/`, `logs/`, `ide/`, `daemon*`, `session-env/`, `paste-cache/`, `chrome/`, `feedback/`, `local/`, `stats-cache.json`, `mcp-needs-auth-cache.json`, `.last-cleanup`, `.last-update-result.json`, `daemon-auth-*` | Caches and runtime scratch. Cheap to regenerate, pointless to share. |
-| `settings.local.json`, `.config.json`, `.DS_Store` | Machine-local or noise. |
+| `settings.local.json`, `.config.json`, `.DS_Store`, `Thumbs.db`, `desktop.ini` | Machine-local or noise. The last two are Windows Explorer's. |
 
 ## Seeded into a new profile's `.claude.json`
 

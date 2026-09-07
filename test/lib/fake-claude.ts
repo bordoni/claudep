@@ -12,7 +12,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { join } from "node:path";
 
 const argv = process.argv.slice(2);
-const home = process.env.HOME ?? "/nonexistent";
+const home = process.env.HOME ?? process.env.USERPROFILE ?? "/nonexistent";
 const configDir = process.env.CLAUDE_CONFIG_DIR ?? join(home, ".claude");
 const loginFile = join(configDir, ".fake-login.json");
 

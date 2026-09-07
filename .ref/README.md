@@ -13,6 +13,7 @@ Notes an agent or developer fetches **on demand**, not read end to end. [`AGENTS
 | [`prior-art.md`](./prior-art.md) | Someone asks "should we add X" or "how do other projects do this"; the research and verdicts are already here. |
 | [`tooling-gotchas.md`](./tooling-gotchas.md) | Before running non-trivial commands through the shell on the author's machine, or when a push, grep or inline script behaves strangely. |
 | [`writing.md`](./writing.md) | Writing or editing anything a person reads here: README, AGENTS.md, this folder, help text, messages. |
+| [`windows.md`](./windows.md) | Touching symlinks, the launcher, path comparison or the hook, or the Windows CI job failed. |
 
 ## Tiers
 

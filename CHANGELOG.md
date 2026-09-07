@@ -6,9 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Windows support from PowerShell and Git Bash: `claudep init` stops with Developer Mode instructions when Windows refuses to create a symlink; `claudep alias` writes `<command>.cmd` next to the sh shim; an npm-installed `claude.cmd` is launched through cmd.exe and `claude.exe` is preferred when both exist; the bash hook under Git Bash exports the native `C:\` path. CI runs the suite on Windows, and the README has a Windows section.
+
 ### Changed
 
 - Path comparisons for pins, the `claudep rm` safety check and `~` shortening accept `~\`, drive letters and MSYS `/c/` paths, and are case-insensitive on Windows. Groundwork for Windows support; no behaviour change on macOS or Linux.
+- `claudep doctor` on Linux and Windows checks that the profile has a `.credentials.json` instead of printing `keychain check skipped`. `Thumbs.db` and `desktop.ini` are known-private.
+- `claudep rm` unlinks the shared items itself before deleting the profile directory.
 
 ### Fixed
 

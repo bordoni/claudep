@@ -20,7 +20,7 @@ Fetched and read: sst/opencode, oven-sh/bun, bunup/bunup, photon-hq/imessage-kit
 | `packageManager` field, committed lockfile, `scripts` for test/typecheck/lint | bunup, blume, imessage-kit | `package.json` |
 | One `ci.yml`, Linux for static checks, macOS for tests when the tool is macOS-first | imessage-kit, bunup | `.github/workflows/ci.yml` (tests on both) |
 
-Skipped on purpose: vitest, changesets, husky, Codecov, snapshot tests of stdout, a three-OS matrix.
+Skipped on purpose: vitest, changesets, husky, Codecov, snapshot tests of stdout. The three-OS matrix was skipped at first and added on 2026-09-06 with Windows support.
 
 ## quinnjr/claude-code-profiles (2026-09-03)
 
@@ -33,8 +33,8 @@ A 1,586-line POSIX shell library with PowerShell and cmd ports, 91 stars, no tes
 | `version` command | pulled as `--version` | |
 | Pure parameter-expansion directory walk | pulled | A fork per prompt would be felt. |
 | Per-profile skill selection from a shared pool | not now | Conflicts with `skills/` being one shared symlink; needs a manifest, doctor support and tests. Revisit if context bloat becomes a real complaint. |
-| Windows, PowerShell, cmd ports | not now | bun runs on Windows and `CLAUDE_CONFIG_DIR` is honoured there; the gap is untested, not unimplemented. A Windows CI job is the cheap first step. |
-| MSYS `cygpath -w` conversion, fail loudly if missing | recorded, not built | Passing a `/c/Users/...` path to `claude.exe` makes it create a config dir somewhere unexpected. |
+| Windows, PowerShell, cmd ports | built 2026-09-06, as one file | Windows support lives in `claudep.ts` behind `platform` parameters, with a `windows-latest` CI job. cmd.exe is excluded: no per-prompt hook. See `windows.md`. |
+| MSYS `cygpath -w` conversion, fail loudly if missing | not needed | claudep runs as a native Windows bun even under Git Bash, so `canon()` rewrites `/c/` paths in TypeScript and the bash hook exports the native root it was given. |
 | Empty profiles, nothing shared | skipped | The reason claudep exists. |
 | Shadowing bare `claude` | skipped | Overlay decision in `design-decisions.md`. |
 | `create --init` settings skeleton with `ANTHROPIC_API_KEY` | skipped | Against the Never list. |
