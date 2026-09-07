@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-07
+
 ### Added
 
 - Windows support, from PowerShell 5.1, PowerShell 7 and Git Bash, with a native `claude.exe` or an npm-installed `claude.cmd`. Install with `bun add -g @bordoni/claudep`. cmd.exe is not a target. The README has a Windows section.
@@ -53,6 +55,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
-[Unreleased]: https://github.com/bordoni/claudep/compare/0.1.1...HEAD
+[Unreleased]: https://github.com/bordoni/claudep/compare/0.2.0...HEAD
+[0.2.0]: https://github.com/bordoni/claudep/compare/0.1.1...0.2.0
 [0.1.1]: https://github.com/bordoni/claudep/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/bordoni/claudep/releases/tag/0.1.0
