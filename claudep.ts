@@ -1084,7 +1084,9 @@ export function shellInit(shell: Shell, profilesRoot: string, platform: NodeJS.P
 /** The PowerShell hook, for Windows PowerShell 5.1 and PowerShell 7. Wraps
  *  `prompt` because there is no chpwd and LocationChangedAction is 7 only.
  *  Cmdlets and builtins only, ASCII only, and every value it manages lives
- *  in $global: because the profile dot-sources what Invoke-Expression ran. */
+ *  in $global: because the profile dot-sources what Invoke-Expression ran.
+ *  The parent step is .NET GetDirectoryName: Split-Path cannot combine
+ *  -LiteralPath with -Parent, and -Path would expand wildcards. */
 function powershellHook(profilesRoot: string): string {
   const q = profilesRoot.replace(/'/g, "''");
   return `# claudep shell hook. Load it from your $PROFILE:  ${hookHint("powershell")}
@@ -1110,7 +1112,7 @@ function global:_claudep_auto {
       }
       break
     }
-    $parent = Split-Path -LiteralPath $dir -Parent
+    $parent = [System.IO.Path]::GetDirectoryName($dir)
     if (-not $parent -or ($parent -ceq $dir)) { break }
     $dir = $parent
   }
