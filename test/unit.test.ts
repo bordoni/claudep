@@ -13,6 +13,8 @@ import {
   type Env,
   envFor,
   envScript,
+  envSyntaxOf,
+  fishQuote,
   formatTable,
   homeDir,
   hookHint,
@@ -580,6 +582,11 @@ describe("shellInit", () => {
       expect(body.match(/&\s*\S+/g)).toEqual(["& $global:_claudep_prompt_orig"]);
       expect(body).not.toMatch(/Start-Process|Invoke-Expression|cygpath/);
       expect([...out].every((ch) => ch.charCodeAt(0) < 128)).toBe(true);
+    } else if (shell === "fish") {
+      expect(out).toContain("function _claudep_auto --on-variable PWD");
+      expect(out).toContain("set -g _claudep_root '/home/me/.claudep'");
+      // Every command substitution is a `string` builtin; nothing else is spawned.
+      expect(body.match(/\((?!string )/g)).toBeNull();
     } else {
       expect(out).toContain(shell === "zsh" ? "add-zsh-hook chpwd _claudep_auto" : "PROMPT_COMMAND");
     }
@@ -602,6 +609,13 @@ describe("shellInit", () => {
     expect(shellInit("powershell", "C:\\Users\\o'brien\\.claudep")).toContain(
       "$global:_claudep_root = 'C:\\Users\\o''brien\\.claudep'",
     );
+    expect(shellInit("fish", "/home/o'brien/.claudep")).toContain("set -g _claudep_root '/home/o\\'brien/.claudep'");
+  });
+
+  test("fishQuote escapes only backslashes and apostrophes", () => {
+    expect(fishQuote("/p/work")).toBe("'/p/work'");
+    expect(fishQuote("a\\b'c")).toBe("'a\\\\b\\'c'");
+    expect(fishQuote("$PWD")).toBe("'$PWD'");
   });
 });
 
@@ -609,22 +623,49 @@ describe("shell selection", () => {
   test("defaultShell follows $SHELL on POSIX and MSYSTEM on Windows", () => {
     expect(defaultShell({ SHELL: "/bin/zsh" }, "linux")).toBe("zsh");
     expect(defaultShell({ SHELL: "/usr/local/bin/bash" }, "darwin")).toBe("bash");
-    expect(defaultShell({ SHELL: "/usr/bin/fish" }, "darwin")).toBe("zsh");
+    expect(defaultShell({ SHELL: "/usr/bin/fish" }, "darwin")).toBe("fish");
+    expect(defaultShell({ SHELL: "/opt/homebrew/bin/fish" }, "linux")).toBe("fish");
+    expect(defaultShell({ SHELL: "/usr/bin/tcsh" }, "darwin")).toBe("zsh");
     expect(defaultShell({}, "linux")).toBe("bash");
     expect(defaultShell({}, "win32")).toBe("powershell");
+    expect(defaultShell({ SHELL: "/usr/bin/fish" }, "win32")).toBe("powershell");
     expect(defaultShell({ MSYSTEM: "MINGW64" }, "win32")).toBe("bash");
   });
 
   test("hookHint is the one rc-file line per shell", () => {
     expect(hookHint("zsh")).toBe('eval "$(claudep shell-init zsh)"');
     expect(hookHint("bash")).toBe('eval "$(claudep shell-init bash)"');
+    expect(hookHint("fish")).toBe("claudep shell-init fish | source");
     expect(hookHint("powershell")).toBe("claudep shell-init powershell | Out-String | Invoke-Expression");
   });
 
-  test("shellSyntax is PowerShell only on Windows outside Git Bash", () => {
+  test("shellSyntax: PowerShell on Windows outside Git Bash, fish when $SHELL is fish, sh otherwise", () => {
     expect(shellSyntax({}, "darwin")).toBe("sh");
+    expect(shellSyntax({ SHELL: "/bin/zsh" }, "linux")).toBe("sh");
+    expect(shellSyntax({ SHELL: "/usr/local/bin/fish" }, "darwin")).toBe("fish");
     expect(shellSyntax({}, "win32")).toBe("powershell");
+    expect(shellSyntax({ SHELL: "/usr/bin/fish" }, "win32")).toBe("powershell");
     expect(shellSyntax({ MSYSTEM: "MINGW64" }, "win32")).toBe("sh");
+    expect(shellSyntax({ SHELL: "/usr/bin/fish", MSYSTEM: "MINGW64" }, "win32")).toBe("fish");
+  });
+
+  test("envSyntaxOf maps --shell values to a syntax", () => {
+    expect(envSyntaxOf("sh")).toBe("sh");
+    expect(envSyntaxOf("zsh")).toBe("sh");
+    expect(envSyntaxOf("bash")).toBe("sh");
+    expect(envSyntaxOf("fish")).toBe("fish");
+    expect(envSyntaxOf("powershell")).toBe("powershell");
+    expect(envSyntaxOf("tcsh")).toBeUndefined();
+  });
+
+  test("envScript in fish syntax keeps $status at 0 and quotes for fish", () => {
+    expect(envScript("/p/work", "fish")).toBe(
+      "set -gx CLAUDE_CONFIG_DIR '/p/work'\nnot set -q CLAUDEP_AUTO; or set -e CLAUDEP_AUTO\n",
+    );
+    expect(envScript("/o'brien", "fish")).toContain("'/o\\'brien'");
+    expect(envScript(undefined, "fish")).toBe(
+      "not set -q CLAUDE_CONFIG_DIR; or set -e CLAUDE_CONFIG_DIR\nnot set -q CLAUDEP_AUTO; or set -e CLAUDEP_AUTO\n",
+    );
   });
 
   test("envScript in both syntaxes, with the value quoted for that shell", () => {

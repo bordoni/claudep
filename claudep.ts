@@ -1027,19 +1027,31 @@ async function cmdStatus(L: Layout, args: string[]): Promise<void> {
   else printTable([row], L.home, L.platform);
 }
 
+function envUsage(syntax: EnvSyntax): string {
+  if (syntax === "powershell")
+    return "usage: claudep env <name> | Invoke-Expression   or   claudep env --unset | Invoke-Expression";
+  if (syntax === "fish") return "usage: claudep env <name> | source   or   claudep env --unset | source";
+  return 'usage: eval "$(claudep env <name>)"   or   eval "$(claudep env --unset)"   (add --shell fish|powershell|sh when that is not your login shell)';
+}
+
+/** The line that clears a pin, in the syntax of the shell the user is in. */
+export function envUnsetHint(syntax: EnvSyntax): string {
+  if (syntax === "powershell") return "claudep env --unset | Invoke-Expression";
+  if (syntax === "fish") return "claudep env --unset | source";
+  return 'eval "$(claudep env --unset)"';
+}
+
 function cmdEnv(L: Layout, args: string[]): void {
-  const name = args[0];
-  const syntax = shellSyntax(process.env, L.platform);
-  if (!name)
-    die(
-      syntax === "powershell"
-        ? "usage: claudep env <name> | Invoke-Expression   or   claudep env --unset | Invoke-Expression"
-        : 'usage: eval "$(claudep env <name>)"   or   eval "$(claudep env --unset)"',
-    );
-  if (name === "--unset") {
+  const f = parseFlags(args, ["--unset"], ["--shell"]);
+  const forced = f.strs.get("--shell");
+  const syntax = forced === undefined ? shellSyntax(process.env, L.platform) : envSyntaxOf(forced);
+  if (!syntax) die(`unsupported shell "${forced}". Use sh, zsh, bash, fish or powershell`);
+  if (f.bools.has("--unset")) {
     process.stdout.write(envScript(undefined, syntax));
     return;
   }
+  const name = f.rest[0];
+  if (!name) die(envUsage(syntax));
   const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist`);
   process.stdout.write(envScript(dir, syntax));
@@ -1128,28 +1140,44 @@ function cmdLocal(L: Layout, args: string[]): void {
 /** The shell hook. Pure parameter expansion and builtins: it runs on every
  *  directory change (zsh chpwd) or prompt (bash PROMPT_COMMAND), so no
  *  subprocess is allowed here. Logic mirrors resolvePin(). */
-export type Shell = "zsh" | "bash" | "powershell";
-export const SHELLS: readonly Shell[] = ["zsh", "bash", "powershell"];
+export type Shell = "zsh" | "bash" | "fish" | "powershell";
+export const SHELLS: readonly Shell[] = ["zsh", "bash", "fish", "powershell"];
 
 /** The shell to name in hints and to default `shell-init` to. */
 export function defaultShell(env: Env = process.env, platform: NodeJS.Platform = process.platform): Shell {
   if (platform === "win32") return env.MSYSTEM ? "bash" : "powershell";
   const name = env.SHELL ? posix.basename(env.SHELL) : "";
-  if (name === "zsh" || name === "bash") return name;
+  if (name === "zsh" || name === "bash" || name === "fish") return name;
   return platform === "darwin" ? "zsh" : "bash";
 }
 
 /** The one line that loads the hook in a shell's rc file. */
 export function hookHint(shell: Shell): string {
   if (shell === "powershell") return "claudep shell-init powershell | Out-String | Invoke-Expression";
+  if (shell === "fish") return "claudep shell-init fish | source";
   return `eval "$(claudep shell-init ${shell})"`;
 }
 
-export type EnvSyntax = "sh" | "powershell";
+export type EnvSyntax = "sh" | "fish" | "powershell";
 
-/** What `claudep env` prints. PowerShell syntax only on Windows outside Git Bash. */
+/** What `claudep env` prints: PowerShell on Windows outside Git Bash, fish
+ *  when the login shell is fish, sh otherwise. fish exports no marker a
+ *  child could see, so $SHELL is the only signal; `--shell` overrides it. */
 export function shellSyntax(env: Env = process.env, platform: NodeJS.Platform = process.platform): EnvSyntax {
-  return platform === "win32" && !env.MSYSTEM ? "powershell" : "sh";
+  if (platform === "win32" && !env.MSYSTEM) return "powershell";
+  return env.SHELL && posix.basename(env.SHELL) === "fish" ? "fish" : "sh";
+}
+
+/** The syntax for a `--shell` value: the shell-init names plus `sh`. */
+export function envSyntaxOf(name: string): EnvSyntax | undefined {
+  if (name === "sh" || name === "zsh" || name === "bash") return "sh";
+  if (name === "fish" || name === "powershell") return name;
+  return undefined;
+}
+
+/** fish single-quoting: only \ and ' are special inside single quotes. */
+export function fishQuote(s: string): string {
+  return `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
 }
 
 /** The `claudep env` script: pin the shell to `dir`, or clear the pin. */
@@ -1159,12 +1187,81 @@ export function envScript(dir: string | undefined, syntax: EnvSyntax): string {
     // Clearing CLAUDEP_AUTO turns this into a manual pin the shell hook will not touch.
     return `$env:CLAUDE_CONFIG_DIR = '${dir.replace(/'/g, "''")}'\nRemove-Item Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue\n`;
   }
+  if (syntax === "fish") {
+    // A bare `set -e` on a missing name returns 1 and `source` reports its
+    // last status, which prompt themes paint red; the guard keeps it at 0.
+    if (dir === undefined)
+      return "not set -q CLAUDE_CONFIG_DIR; or set -e CLAUDE_CONFIG_DIR\nnot set -q CLAUDEP_AUTO; or set -e CLAUDEP_AUTO\n";
+    return `set -gx CLAUDE_CONFIG_DIR ${fishQuote(dir)}\nnot set -q CLAUDEP_AUTO; or set -e CLAUDEP_AUTO\n`;
+  }
   if (dir === undefined) return "unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO\n";
   return `export CLAUDE_CONFIG_DIR='${dir.replace(/'/g, `'\\''`)}'\nunset CLAUDEP_AUTO\n`;
 }
 
 export function shellInit(shell: Shell, profilesRoot: string, platform: NodeJS.Platform = process.platform): string {
-  return shell === "powershell" ? powershellHook(profilesRoot) : shHook(shell, profilesRoot, platform);
+  if (shell === "powershell") return powershellHook(profilesRoot);
+  if (shell === "fish") return fishHook(profilesRoot);
+  return shHook(shell, profilesRoot, platform);
+}
+
+/** The fish hook. Builtins only (set, test, read, printf, string); every
+ *  `(...)` is a `string` builtin, which runs in-process. Needs fish 3.0:
+ *  `path dirname` would need 3.5 and `$(...)` 3.4, and Ubuntu 22.04 ships
+ *  3.3. fish fires --on-variable on every `set` of PWD, `cd .` included, so
+ *  the last-pwd dedupe stays. Not a Windows target; joins with `/`. */
+function fishHook(profilesRoot: string): string {
+  return `# claudep shell hook. Load it from ~/.config/fish/config.fish:  ${hookHint("fish")}
+set -g _claudep_root ${fishQuote(profilesRoot)}
+function _claudep_auto --on-variable PWD
+  test "$PWD" = "$_claudep_last_pwd"; and return 0
+  set -g _claudep_last_pwd $PWD
+  # Only manage a CLAUDE_CONFIG_DIR this hook set itself. A manual pin wins.
+  if test -n "$CLAUDE_CONFIG_DIR"; and test "$CLAUDE_CONFIG_DIR" != "$CLAUDEP_AUTO"
+    return 0
+  end
+  set -l dir $PWD
+  set -l name ''
+  set -l found ''
+  while true
+    if test -f "$dir/${PIN_FILE}"
+      set found $dir
+      test -n "$found"; or set found /
+      while read -l line
+        set line (string trim -- $line)
+        if test -z "$line"; or string match -q -- '#*' $line
+          continue
+        end
+        set name $line
+        break
+      end < "$dir/${PIN_FILE}"
+      break
+    end
+    if test -z "$dir"; or test "$dir" = /
+      break
+    end
+    set dir (string replace -r -- '/[^/]*$' '' $dir)
+  end
+  if test -z "$name"
+    # No pin here: hand the shell back to the base account.
+    if test -n "$CLAUDEP_AUTO"
+      set -e CLAUDE_CONFIG_DIR
+      set -e CLAUDEP_AUTO
+    end
+    return 0
+  end
+  if not test -d "$_claudep_root/$name"
+    if test -n "$CLAUDEP_AUTO"
+      set -e CLAUDE_CONFIG_DIR
+      set -e CLAUDEP_AUTO
+    end
+    printf 'claudep: %s/${PIN_FILE} names profile "%s", which does not exist. Run: claudep init %s\\n' "$found" "$name" "$name" >&2
+    return 0
+  end
+  set -gx CLAUDE_CONFIG_DIR "$_claudep_root/$name"
+  set -gx CLAUDEP_AUTO "$_claudep_root/$name"
+end
+_claudep_auto
+`;
 }
 
 /** The PowerShell hook, for Windows PowerShell 5.1 and PowerShell 7. Wraps
@@ -1282,7 +1379,7 @@ _claudep_auto
 
 function cmdShellInit(L: Layout, args: string[]): void {
   const shell = args[0] ?? defaultShell(process.env, L.platform);
-  if (!SHELLS.includes(shell as Shell)) die(`unsupported shell "${shell}". Use zsh, bash or powershell`);
+  if (!SHELLS.includes(shell as Shell)) die(`unsupported shell "${shell}". Use ${SHELLS.join(", ")}`);
   process.stdout.write(shellInit(shell as Shell, L.profilesRoot, L.platform));
 }
 
@@ -1400,10 +1497,7 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
     die(`refusing to remove ${real}: not inside ${L.profilesRoot}`);
   const cur = currentProfile(L);
   if (cur.kind === "profile" && cur.name === name) {
-    const unset =
-      shellSyntax(process.env, L.platform) === "powershell"
-        ? "claudep env --unset | Invoke-Expression"
-        : 'eval "$(claudep env --unset)"';
+    const unset = envUnsetHint(shellSyntax(process.env, L.platform));
     warn(
       `this shell is on ${name} (${cur.setBy === "hook" ? "shell hook" : "manual pin"}). After removal run: ${unset}`,
     );
@@ -1457,7 +1551,8 @@ ${c.bold("USAGE")}
   claudep list [--json]                show every profile and who it is logged in as
   claudep status <name> [--json]       login state for one profile ("default" = ~/.claude)
   claudep current [--json|--name]      which profile this shell is on, and why; --name prints only the name
-  claudep env <name> | --unset         print the CLAUDE_CONFIG_DIR export (or the unset) for eval / Invoke-Expression
+  claudep env <name> | --unset         print the CLAUDE_CONFIG_DIR pin (or the unset) for eval, source or Invoke-Expression;
+                                       --shell sh|fish|powershell picks the syntax when it is not your login shell
   claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
   claudep doctor [name]                verify symlinks, keychain entry, unclassified files
   claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
@@ -1467,7 +1562,7 @@ ${c.bold("DIRECTORY PINS")}
   claudep local <name> [--force]       write ./${PIN_FILE} so this tree uses <name>; --remove deletes it
   claudep local                        show the pin that applies to the current directory
   claudep resolve [dir] [--json]       print the profile pinned for a directory (exit 1 when none)
-  claudep shell-init [zsh|bash|powershell]   print the hook that applies pins on cd; load it from your rc file
+  claudep shell-init [zsh|bash|fish|powershell]   print the hook that applies pins on cd; load it from your rc file
 
 ${c.bold("INIT OPTIONS")}
   --sso               force the SSO login flow (Enterprise orgs)
@@ -1484,9 +1579,11 @@ ${c.bold("EXAMPLES")}
   claude                                        # Claude Code as whatever ~/.claude is logged in as
   claudep enterprise -p "summarize this repo"
   eval "$(claudep env enterprise)"              # pin the whole shell to a profile
+  claudep env enterprise | source               # the same from fish
   claudep env enterprise | Invoke-Expression    # the same from PowerShell
   claudep local enterprise                      # pin this repo; commit the ${PIN_FILE} file for the team
   eval "$(claudep shell-init zsh)"              # in .zshrc: shells follow ${PIN_FILE} pins on cd
+  ${hookHint("fish")}              # the same line for config.fish
   ${hookHint("powershell")}   # the same line for $PROFILE
 
 ${c.bold("HOW IT WORKS")}

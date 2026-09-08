@@ -206,10 +206,10 @@ describe("env", () => {
     using h = fakeHome();
     await runCli(["init", "smoke", "--no-login"], { home: h.home });
     const dir = join(h.profilesRoot, "smoke");
-    const native = await runCli(["env", "smoke"], { home: h.home, env: { MSYSTEM: undefined } });
+    const native = await runCli(["env", "smoke"], { home: h.home, env: { MSYSTEM: undefined, SHELL: "/bin/zsh" } });
     expect(native.exitCode).toBe(0);
     expect(native.stdout).toBe(envScript(dir, WIN ? "powershell" : "sh"));
-    const gitBash = await runCli(["env", "smoke"], { home: h.home, env: { MSYSTEM: "MINGW64" } });
+    const gitBash = await runCli(["env", "smoke"], { home: h.home, env: { MSYSTEM: "MINGW64", SHELL: "/bin/zsh" } });
     expect(gitBash.stdout).toBe(`export CLAUDE_CONFIG_DIR='${dir}'\nunset CLAUDEP_AUTO\n`);
   });
 });
@@ -517,9 +517,9 @@ describe("version", () => {
 describe("env --unset", () => {
   test("prints the unset for both variables", async () => {
     using h = fakeHome();
-    const r = await runCli(["env", "--unset"], { home: h.home, env: { MSYSTEM: undefined } });
+    const r = await runCli(["env", "--unset"], { home: h.home, env: { MSYSTEM: undefined, SHELL: "/bin/zsh" } });
     expect(r.stdout).toBe(envScript(undefined, WIN ? "powershell" : "sh"));
-    const gitBash = await runCli(["env", "--unset"], { home: h.home, env: { MSYSTEM: "MINGW64" } });
+    const gitBash = await runCli(["env", "--unset"], { home: h.home, env: { MSYSTEM: "MINGW64", SHELL: "/bin/zsh" } });
     expect(gitBash.stdout).toBe("unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO\n");
   });
 });
@@ -669,7 +669,7 @@ describe("local and resolve", () => {
 
   test("shell-init rejects unknown shells", async () => {
     using h = fakeHome();
-    const r = await runCli(["shell-init", "fish"], { home: h.home });
+    const r = await runCli(["shell-init", "tcsh"], { home: h.home });
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("unsupported shell");
   });
@@ -684,5 +684,35 @@ describe("local and resolve", () => {
     }
     const ps = await runCli(["shell-init", "powershell"], { home: h.home });
     expect(ps.stdout).toContain("function global:prompt");
+    const fish = await runCli(["shell-init", "fish"], { home: h.home });
+    expect(fish.stdout).toContain("--on-variable PWD");
+  });
+});
+
+describe("env --shell", () => {
+  test("fish syntax from $SHELL, from --shell, and --shell=fish with --unset", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    const forced = await runCli(["env", "smoke", "--shell", "fish"], { home: h.home });
+    expect(forced.exitCode).toBe(0);
+    expect(forced.stdout).toBe(envScript(dir, "fish"));
+    // MSYSTEM makes this hold on Windows too, where PowerShell would otherwise win.
+    const login = await runCli(["env", "smoke"], { home: h.home, env: { SHELL: "/usr/bin/fish", MSYSTEM: "MINGW64" } });
+    expect(login.stdout).toBe(envScript(dir, "fish"));
+    const unset = await runCli(["env", "--shell=fish", "--unset"], { home: h.home });
+    expect(unset.stdout).toBe(envScript(undefined, "fish"));
+    const sh = await runCli(["env", "smoke", "--shell", "sh"], { home: h.home, env: { SHELL: "/usr/bin/fish" } });
+    expect(sh.stdout).toBe(envScript(dir, "sh"));
+  });
+
+  test("rejects an unknown shell and explains the fish form in the usage", async () => {
+    using h = fakeHome();
+    const bad = await runCli(["env", "smoke", "--shell", "tcsh"], { home: h.home });
+    expect(bad.exitCode).toBe(1);
+    expect(bad.stderr).toContain('unsupported shell "tcsh"');
+    const usage = await runCli(["env"], { home: h.home, env: { SHELL: "/usr/bin/fish", MSYSTEM: "MINGW64" } });
+    expect(usage.exitCode).toBe(1);
+    expect(usage.stderr).toContain("claudep env <name> | source");
   });
 });

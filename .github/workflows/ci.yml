@@ -38,6 +38,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
+      - name: Install fish (the hook runs in it; not a Windows target)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends fish && fish --version
+      - name: Install fish
+        if: runner.os == 'macOS'
+        run: brew install fish && fish --version
       - run: bun install --frozen-lockfile
       - run: bun run test
 

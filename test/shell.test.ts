@@ -1,8 +1,9 @@
 /**
  * Drives the emitted hook in real shells against a fake home and checks it
  * agrees with resolvePin() and the pin rules. Dialects: bash and zsh where
- * present (Git for Windows' bash on Windows), pwsh wherever it is installed
- * (every GitHub runner image has it), and Windows PowerShell 5.1 on Windows.
+ * present (Git for Windows' bash on Windows), fish where present (CI installs
+ * it on macOS and Linux), pwsh wherever it is installed (every GitHub runner
+ * image has it), and Windows PowerShell 5.1 on Windows.
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -52,6 +53,27 @@ function sh(name: "bash" | "zsh", exe: string): Dialect {
   };
 }
 
+function fish(exe: string): Dialect {
+  // fish single quotes: only \ and ' are special.
+  const q = (p: string) => `'${p.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+  return {
+    name: "fish",
+    exe,
+    args: (script) => ["-c", script],
+    prelude: [
+      `${q(BUN)} ${q(SCRIPT)} shell-init fish | source`,
+      // --on-variable PWD already ran the hook on cd; tick re-runs it and the dedupe makes that a no-op.
+      "function tick; _claudep_auto; end",
+      `function show; set -l a $CLAUDE_CONFIG_DIR; set -l b $CLAUDEP_AUTO; test -n "$a"; or set a '<unset>'; test -n "$b"; or set b '<unset>'; echo "$a|$b"; end`,
+    ].join("\n"),
+    cd: (dir) => `cd ${q(dir)}`,
+    unset: (v) => `set -e ${v}`,
+    echoVar: (v) => `echo $${v}`,
+    resolve: `${q(BUN)} ${q(SCRIPT)} resolve`,
+    foundDir: (dir) => `${dir}/.claudep`,
+  };
+}
+
 function powershell(name: string, exe: string): Dialect {
   const q = (p: string) => `'${p.replace(/'/g, "''")}'`;
   return {
@@ -89,6 +111,8 @@ function dialects(): Dialect[] {
   } else {
     out.push(sh("bash", "bash"));
     if (Bun.which("zsh")) out.push(sh("zsh", "zsh"));
+    const f = Bun.which("fish");
+    if (f) out.push(fish(f));
   }
   const pwsh = Bun.which("pwsh");
   if (pwsh) out.push(powershell("pwsh", pwsh));
@@ -194,6 +218,15 @@ describe.each(all)("$name hook", (d) => {
     using h = fakeHome();
     const { repo, nested, work } = pinnedTree(h.home, h.profilesRoot);
     writeFileSync(join(repo, ".claudep"), "# from Windows\r\nwork\r\n");
+    const r = await run(h.home, [d.cd(nested), "tick", "show"]);
+    expect(r.stderr).toBe("");
+    expect(lines(r)).toEqual([`${work}|${work}`]);
+  });
+
+  test("reads a pin file without a trailing newline", async () => {
+    using h = fakeHome();
+    const { repo, nested, work } = pinnedTree(h.home, h.profilesRoot);
+    writeFileSync(join(repo, ".claudep"), "work");
     const r = await run(h.home, [d.cd(nested), "tick", "show"]);
     expect(r.stderr).toBe("");
     expect(lines(r)).toEqual([`${work}|${work}`]);
