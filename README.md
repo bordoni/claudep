@@ -106,8 +106,8 @@ From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile 
 |---|---|
 | `CLAUDE.md` and other top-level `*.md` | `.claude.json` (login identity, user-scope MCP servers, folder trust) |
 | `settings.json`, `keybindings.json`, `statusline-command.sh` | org-pushed `remote-settings.json`, `policy-limits.json` |
-| `hooks/`, `skills/`, `commands/`, `agents/`, `plugins/`, `plans/` | `history.jsonl`, `todos/`, `sessions/`, caches, telemetry |
-| `projects/` (session transcripts and auto-memory) | credentials |
+| `hooks/`, `skills/`, `commands/`, `agents/`, `rules/`, `output-styles/`, `themes/`, `workflows/` | `history.jsonl`, `todos/`, `sessions/`, `teams/`, caches, telemetry |
+| `plugins/`, `plans/`, `projects/` (session transcripts and auto-memory) | credentials |
 
 On macOS, credentials never touch the profile directory: Claude Code stores them in the Keychain under `Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[0:8]>`, so every profile has its own login and refresh token and they cannot overwrite each other. I verified this against Claude Code 2.1.259. An older bug where every config dir shared one Keychain entry no longer applies. On Linux and Windows the login is `<profile>/.credentials.json`, a real file inside the profile that is never shared.
 
@@ -117,6 +117,7 @@ The shared list is an allowlist, so an account-specific file cannot leak across 
 
 - The first time you open a repository under a new profile you will re-accept folder trust, and claude.ai connectors need their OAuth redone in that profile.
 - Two profiles running at the same time write the same `settings.json` and `plugins/`. That is the same situation as two terminals today.
+- Background sessions and the daemon are tied to `~/.claude`. As of Claude Code 2.1.263, `claude daemon install` refuses to run with `CLAUDE_CONFIG_DIR` set, and `claude --bg` under a profile runs without the daemon.
 - Set `CLAUDE_PROFILES_DIR` to move the profiles root. Keep it out of iCloud or Dropbox; `.claude.json` is rewritten constantly and sync tools create conflict copies.
 - Never put `CLAUDE_CONFIG_DIR` in a `settings.json` `env` block. Claude Code detects that mismatch and disables features.
 

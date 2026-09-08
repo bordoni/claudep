@@ -43,6 +43,23 @@ A 1,586-line POSIX shell library with PowerShell and cmd ports, 91 stars, no tes
 
 Their auto-updater still points at the previous owner's URLs (`pegasusheavy/`), which works only through GitHub's rename redirect. Do not copy any of their URLs.
 
+## Four more switchers (2026-09-07)
+
+Read for the releases after 0.2.0: realiti4/claude-swap (Python, rate-limit rotation), uwuclxdy/clauth (Go, TUI and MCP plugin), JakubKontra/claude-profile-manager (Go, `cpm`), hamzarehmandeveloper/claude-account (Rust). All four set `CLAUDE_CONFIG_DIR`; none supports fish.
+
+| Their feature | Who | Verdict | Why |
+|---|---|---|---|
+| Live 5-hour and 7-day usage per account, auto-rotation at a threshold | claude-swap, clauth | rejected | Both call Anthropic's usage API with the account's OAuth token. Reading the token is against Never 3, and Claude Code has no non-interactive usage command to shell out to. |
+| Strip `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` from the child | claude-account | 0.3.0, as a warning | They silently override the profile's login, always in `-p` mode. claudep warns and names the variable; it does not edit what the user exported. |
+| Refuse Claude Code older than 2.1.144 on macOS | claude-account | 0.3.0, in `doctor` | Before that build every config dir shared one Keychain item. |
+| Both `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` | claude-account | not needed | The hash is over `CLAUDE_CONFIG_DIR` already; the second variable only matters when the two should differ. |
+| `prompt` segment for the shell prompt | claude-profile-manager | 0.3.0 as `current --name` | Plus a README note that `${CLAUDE_CONFIG_DIR##*/}` costs nothing in a prompt. |
+| `--json` on the list command | claude-swap, clauth | 0.3.0 | `status` already had it. |
+| Shell completions | clauth | 0.4.0 | Generated from one command table; profile names from a glob, never a subprocess. |
+| Per-profile `env` block (Bedrock, Vertex profiles) | claude-profile-manager | deferred | See `design-decisions.md`. The hook could not apply it. |
+| `clone`, cloud sync of settings through git, self-update, TUI, Windows tray, MCP plugin that switches accounts mid-session | various | skipped | Against "one file", "no network in the launch path", or solving a problem `bun add -g` and symlinks already solve. |
+| Copied `settings.json` and `CLAUDE.md` per profile with a `--sync` | claude-profile-manager | skipped | claudep symlinks them; a copy forks silently. |
+
 ## Release and publishing research (2026-09-02)
 
 Sources: docs.npmjs.com (trusted publishers, provenance, staged publishing), GitHub changelog posts on OIDC and token deprecation, `actions/setup-node` advanced usage, `actions/starter-workflows`, ljharb/actions and antfu/ni release workflows, oven-sh/bun issues #22423 and #15601, Keep a Changelog 1.1.0. What was taken is in `releasing.md`; the reasoning is in `design-decisions.md`.

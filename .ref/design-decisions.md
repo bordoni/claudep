@@ -66,6 +66,14 @@ Deleting a profile directory does not remove its Keychain item. `rm` runs `claud
 
 `NAME_RE = /^[a-z0-9][a-z0-9_-]*$/` keeps directory names shell-safe and lets a bare `claudep <name>` be sugar for `run`. Subcommand words (`init`, `list`, `rm`, …) plus `default` and `base` are reserved so the dispatcher stays unambiguous.
 
+## 2026-09-07: Usage windows are not shown
+
+claude-swap and clauth show each account's 5-hour and 7-day usage and rotate accounts near the limit. Rejected for claudep: the only source is Anthropic's usage endpoint, which needs the account's OAuth token, and reading that token is against Never 3. Claude Code's `/usage` is interactive only, so there is nothing to shell out to. Reopen if `claude auth status --json` or another non-interactive command ever reports usage.
+
+## 2026-09-07: Per-profile environment deferred
+
+A profile for Bedrock or Vertex would need `CLAUDE_CODE_USE_BEDROCK=1` and friends every time it runs. The shape considered: `claudep init <name> --env KEY=VALUE` writing `<profile>/claudep.json`, applied by `run` and printed by `env`. Deferred because the shell hook cannot apply it (rule 10: no subprocess, and the values would have to be re-read on every `cd`), so a pinned directory would run with the login but without the environment, which is worse than not having the feature. Revisit for 0.5.0 with an answer for the hook.
+
 ## Not built, on purpose
 
 - **Per-profile `settings.json` overrides.** Would need a merge layer; `--settings <file>` on the command line already covers the rare case.

@@ -8,10 +8,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export const BASE_FILES = ["CLAUDE.md", "RTK.md", "settings.json", "statusline-command.sh"] as const;
-export const BASE_DIRS = ["hooks", "skills", "commands", "agents", "plugins", "plans", "projects"] as const;
+export const BASE_DIRS = [
+  "hooks",
+  "skills",
+  "commands",
+  "agents",
+  "plugins",
+  "plans",
+  "projects",
+  "rules",
+  "themes",
+] as const;
 /** Present in the base, must never be linked into a profile. */
 export const PRIVATE_FILES = ["remote-settings.json", "history.jsonl", "policy-limits.json"] as const;
-export const PRIVATE_DIRS = ["statsig", "todos", "shell-snapshots"] as const;
+export const PRIVATE_DIRS = ["statsig", "todos", "shell-snapshots", "teams"] as const;
 
 export const SEEDABLE = {
   hasCompletedOnboarding: true,

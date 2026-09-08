@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Changed
+
+- `rules/`, `output-styles/`, `themes/` and `workflows/` are shared with every profile, matching what Claude Code 2.1.263 reads from the user config directory. A custom theme named in the shared `settings.json` now resolves inside a profile. Existing profiles pick the links up on their next `claudep init <name>`.
+- `teams/`, `uploads/`, `usage-data/`, `mcp-discovery-cache/`, `mcp-skill-archives/`, `daemon.json`, `launch.json`, `scheduled_tasks.json` and `seed-admin` are known-private, so `claudep doctor` no longer reports them as unclassified.
+- The README notes that `claude --bg` sessions and `claude daemon install` do not work under a profile in Claude Code 2.1.263.
+
 ## [0.2.0] - 2026-09-07
 
 ### Added

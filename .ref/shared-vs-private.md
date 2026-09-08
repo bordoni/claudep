@@ -14,6 +14,10 @@ Sharing is opt-in per item. Anything not listed stays inside the profile directo
 | `settings.json` | Hooks, permissions, statusline, `enabledPlugins`, model, effort. User preferences, not identity. Both profiles write it; same as two terminals. |
 | `keybindings.json`, `statusline-command.sh` | Pure preference. Hook and statusline commands reference absolute paths under `~/.claude`, so they keep working. |
 | `hooks/`, `skills/`, `commands/`, `agents/` | Content the user authored. Nothing account-specific. |
+| `rules/` | User-level rules (`~/.claude/rules/*.md`), loaded before project rules. Instructions the user wrote. Added 2026-09-07 against Claude Code 2.1.263. |
+| `output-styles/` | User-level output styles, markdown the user wrote. Same date. |
+| `themes/` | Custom theme JSON. The shared `settings.json` names one as `theme: custom:<slug>`, so a profile without this directory has a preference that points nowhere. Same date. |
+| `workflows/` | Workflow scripts for the Workflow tool, authored by the user. Same date. |
 | `plugins/` | ~200 MB of marketplaces and caches keyed by `enabledPlugins` in the shared `settings.json`; must stay in sync with it. |
 | `plans/` | Plan-mode files; harmless, useful across accounts. |
 | `projects/` | Session transcripts **and auto-memory** (`projects/<slug>/memory/MEMORY.md`). ~600 MB on the author's machine. Claude Code lists it as runtime state, but nothing inside carries identity, and sharing keeps `--resume` and memory working from either account. Decided with the user on 2026-09-02. |
@@ -25,7 +29,8 @@ Sharing is opt-in per item. Anything not listed stays inside the profile directo
 | `.claude.json`, `.claude.json.backup` | `oauthAccount`, `userID`, user-scope `mcpServers`, per-cwd `projects[...]` trust and `allowedTools`. This *is* the account. |
 | `.credentials.json` | The credential store on Linux and Windows, plain JSON. `doctor` checks that it exists there and never reads it. |
 | `remote-settings.json`, `policy-limits.json` | Pushed by the org. Leaking these applies one org's policy to another's session. |
-| `history.jsonl`, `sessions/`, `todos/`, `tasks/`, `jobs/`, `scheduled-tasks/` | Prompt history and task state tied to one login. |
+| `history.jsonl`, `sessions/`, `todos/`, `tasks/`, `jobs/`, `scheduled-tasks/`, `scheduled_tasks.json`, `teams/` | Prompt history, task and agent-team state tied to one login. Claude Code reads `teams/` as `join(configDir, "teams")`. |
+| `uploads/`, `usage-data/`, `mcp-discovery-cache/`, `mcp-skill-archives/`, `daemon.json`, `launch.json`, `seed-admin` | Runtime state seen in the 2.1.263 binary's config-dir namespace list and daemon code. Regenerated per instance. |
 | `shell-snapshots/`, `file-history/`, `statsig/`, `telemetry/`, `cache/`, `debug/`, `backups/`, `logs/`, `ide/`, `daemon*`, `session-env/`, `paste-cache/`, `chrome/`, `feedback/`, `local/`, `stats-cache.json`, `mcp-needs-auth-cache.json`, `.last-cleanup`, `.last-update-result.json`, `daemon-auth-*` | Caches and runtime scratch. Cheap to regenerate, pointless to share. |
 | `settings.local.json`, `.config.json`, `.DS_Store`, `Thumbs.db`, `desktop.ini` | Machine-local or noise. The last two are Windows Explorer's. |
 
@@ -44,7 +49,9 @@ When `doctor` reports an unclassified base item, ask in order:
 3. Is it something the user authored and would expect in every account? → `SHARED_FILES` / `SHARED_DIRS`, and add a row above.
 4. Unsure → leave it unclassified. Private-by-default is the safe failure.
 
-iCloud conflict copies such as `settings 2.json` are noise from the author's synced `~/.claude`; do not add them to any list.
+iCloud conflict copies such as `settings 2.json` are noise from the author's synced `~/.claude`; do not add them to any list. `settings.json.bak` in the author's base is not written by Claude Code (the 2.1.263 binary never mentions it) and stays unclassified for the same reason.
+
+`routines/` appears in the 2.1.263 binary's list of config-dir subdirectories next to `workflows` and `rules`. Its purpose was not verified, so it is deliberately in neither list. Classify it when someone can say what Claude Code writes there.
 
 ## The pin file is not a profile item
 

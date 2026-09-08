@@ -288,6 +288,8 @@ describe("doctor", () => {
     const r = await runCli(["doctor"], { home: h.home });
     expect(r.stdout).toContain("neither shared nor known-private");
     expect(r.stdout).toContain("mystery.json");
+    // Known runtime state from Claude Code 2.1.263 is classified, never reported.
+    expect(r.stdout).not.toContain("teams");
     expect(existsSync(join(h.profilesRoot, "smoke", "mystery.json"))).toBe(false);
   });
 });

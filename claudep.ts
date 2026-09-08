@@ -236,7 +236,19 @@ export function version(): string {
 
 /** Top-level base items symlinked into every profile (only if they exist). */
 export const SHARED_FILES = ["CLAUDE.md", "settings.json", "keybindings.json", "statusline-command.sh"] as const;
-export const SHARED_DIRS = ["hooks", "skills", "commands", "agents", "plugins", "plans", "projects"] as const;
+export const SHARED_DIRS = [
+  "hooks",
+  "skills",
+  "commands",
+  "agents",
+  "plugins",
+  "plans",
+  "projects",
+  "rules",
+  "output-styles",
+  "themes",
+  "workflows",
+] as const;
 
 /** Per-profile state. First block is Claude Code's own runtime-state list;
  *  the rest are observed extras. Never shared. */
@@ -280,6 +292,15 @@ export const KNOWN_PRIVATE = new Set<string>([
   ".last-update-result.json",
   "daemon-auth-cooldown",
   "daemon-auth-status.json",
+  "teams",
+  "uploads",
+  "usage-data",
+  "mcp-discovery-cache",
+  "mcp-skill-archives",
+  "daemon.json",
+  "launch.json",
+  "scheduled_tasks.json",
+  "seed-admin",
 ]);
 
 /** Keys copied from the base .claude.json into a fresh profile so first-run
