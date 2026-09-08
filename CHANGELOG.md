@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-08
+
 ### Changed
 
 - `rules/`, `output-styles/`, `themes/` and `workflows/` are shared with every profile, matching what Claude Code 2.1.263 reads from the user config directory. A custom theme named in the shared `settings.json` now resolves inside a profile. Existing profiles pick the links up on their next `claudep init <name>`.
@@ -61,7 +63,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
-[Unreleased]: https://github.com/bordoni/claudep/compare/0.2.0...HEAD
+[Unreleased]: https://github.com/bordoni/claudep/compare/0.2.1...HEAD
+[0.2.1]: https://github.com/bordoni/claudep/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/bordoni/claudep/compare/0.1.1...0.2.0
 [0.1.1]: https://github.com/bordoni/claudep/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/bordoni/claudep/releases/tag/0.1.0
