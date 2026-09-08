@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- fish support: `claudep shell-init fish` prints a hook for `config.fish` that follows `.claudep` pins on `cd` using builtins only, and `claudep env` prints `set -gx` and `set -e` lines when run from fish. Load both with `| source`. Needs fish 3.0 or later.
+- `claudep env` looks at the shell it runs in (fish, pwsh, or an sh-like shell) before falling back to `$SHELL`, and `--shell sh|zsh|bash|fish|powershell` overrides both. `claudep env <name> | Invoke-Expression` works in pwsh on macOS and Linux as a result.
+- `claudep current --name` prints only the profile name (`default` for `~/.claude`, `custom` for a config dir outside the profiles root), for prompts, scripts and the statusline.
+- `claudep list --json` prints the same flat objects as `claudep status --json`, one per profile.
+- `claudep doctor` fails when the shared `settings.json` sets `env.CLAUDE_CONFIG_DIR`, and on macOS when Claude Code is older than 2.1.144, the first build whose Keychain item is namespaced per config dir.
+- `claudep doctor` and `claudep <name>` warn when `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` is set, because Claude Code uses it instead of the profile's login. The variable is left alone.
+- `claudep rm` says when the shell is on the profile being removed or the current directory pins it, and names the command that clears each.
+- CI runs the shell hook in fish on macOS and Linux.
+
 ## [0.2.1] - 2026-09-08
 
 ### Changed
