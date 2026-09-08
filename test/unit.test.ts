@@ -3,8 +3,10 @@ import { createHash } from "node:crypto";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import {
+  authEnvOverrides,
   baseEnv,
   canon,
+  currentLabel,
   currentProfile,
   defaultShell,
   deleteEnv,
@@ -18,23 +20,27 @@ import {
   isMsysPath,
   keychainService,
   layout,
+  MIN_CLAUDE_VERSION,
   NAME_RE,
   onPath,
   PIN_FILE,
   parseAuthStatus,
   parseFlags,
+  parseVersion,
   pathKey,
   RESERVED,
   resolvePin,
   SHELLS,
   type Shell,
   samePath,
+  settingsEnvConfigDir,
   shellInit,
   shellSyntax,
   shortHome,
   splitPathVar,
   toNativePath,
   version,
+  versionBelow,
 } from "../claudep.ts";
 import { fakeHome } from "./lib/home.ts";
 
@@ -632,5 +638,55 @@ describe("shell selection", () => {
     expect(envScript(undefined, "powershell")).toBe(
       "Remove-Item Env:CLAUDE_CONFIG_DIR, Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue\n",
     );
+  });
+});
+
+describe("doctor and run hardening helpers", () => {
+  test("parseVersion takes the first x.y.z and ignores the rest", () => {
+    expect(parseVersion("2.1.263 (Claude Code)")).toEqual([2, 1, 263]);
+    expect(parseVersion("9.9.9 (fake claude)")).toEqual([9, 9, 9]);
+    expect(parseVersion("version unknown")).toBeUndefined();
+    expect(parseVersion(MIN_CLAUDE_VERSION)).toEqual([2, 1, 144]);
+  });
+
+  test("versionBelow compares numerically, not lexically", () => {
+    expect(versionBelow([2, 1, 100], [2, 1, 144])).toBe(true);
+    expect(versionBelow([2, 1, 144], [2, 1, 144])).toBe(false);
+    expect(versionBelow([2, 1, 263], [2, 1, 144])).toBe(false);
+    expect(versionBelow([2, 0, 999], [2, 1, 0])).toBe(true);
+    expect(versionBelow([10, 0, 0], [9, 9, 9])).toBe(false);
+  });
+
+  test("authEnvOverrides lists set, non-empty credential variables", () => {
+    expect(authEnvOverrides({}, "linux")).toEqual([]);
+    expect(authEnvOverrides({ ANTHROPIC_API_KEY: "" }, "linux")).toEqual([]);
+    expect(authEnvOverrides({ ANTHROPIC_API_KEY: "k", CLAUDE_CODE_OAUTH_TOKEN: "t" }, "linux")).toEqual([
+      "ANTHROPIC_API_KEY",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+    ]);
+    // Names are case-sensitive on POSIX and folded on Windows.
+    expect(authEnvOverrides({ anthropic_api_key: "k" }, "linux")).toEqual([]);
+    expect(authEnvOverrides({ anthropic_api_key: "k" }, "win32")).toEqual(["ANTHROPIC_API_KEY"]);
+  });
+
+  test("settingsEnvConfigDir reads only a string env.CLAUDE_CONFIG_DIR", async () => {
+    using h = fakeHome();
+    const file = join(h.base, "settings.json");
+    expect(await settingsEnvConfigDir(file)).toBeUndefined();
+    writeFileSync(file, JSON.stringify({ env: { CLAUDE_CONFIG_DIR: "/x" } }));
+    expect(await settingsEnvConfigDir(file)).toBe("/x");
+    writeFileSync(file, JSON.stringify({ env: { CLAUDE_CONFIG_DIR: 1 } }));
+    expect(await settingsEnvConfigDir(file)).toBeUndefined();
+    writeFileSync(file, JSON.stringify({ env: [] }));
+    expect(await settingsEnvConfigDir(file)).toBeUndefined();
+    writeFileSync(file, "not json");
+    expect(await settingsEnvConfigDir(file)).toBeUndefined();
+    expect(await settingsEnvConfigDir(join(h.base, "missing.json"))).toBeUndefined();
+  });
+
+  test("currentLabel is the profile name, default or custom", () => {
+    expect(currentLabel({ kind: "base", name: undefined, dir: "/h/.claude", setBy: "none" })).toBe("default");
+    expect(currentLabel({ kind: "profile", name: "work", dir: "/h/.claudep/work", setBy: "hook" })).toBe("work");
+    expect(currentLabel({ kind: "custom", name: undefined, dir: "/elsewhere", setBy: "manual" })).toBe("custom");
   });
 });

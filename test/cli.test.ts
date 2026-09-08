@@ -179,6 +179,26 @@ describe("list and status", () => {
     const r = await runCli(["status", "ghost"], { home: h.home });
     expect(r.exitCode).toBe(1);
   });
+
+  test("list --json prints one flat object per row, the base first", async () => {
+    using h = fakeHome({ loggedIn: true });
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const r = await runCli(["list", "--json"], { home: h.home });
+    expect(r.exitCode).toBe(0);
+    const rows = JSON.parse(r.stdout);
+    expect(rows.map((x: { name: string }) => x.name)).toEqual(["default", "smoke"]);
+    expect(rows[0]).toEqual({
+      name: "default",
+      dir: h.base,
+      loggedIn: true,
+      email: "base@example.com",
+      orgName: "base@example.com's Org",
+      subscriptionType: "max",
+      authMethod: "claude.ai",
+    });
+    expect(rows[1]).toEqual({ name: "smoke", dir: join(h.profilesRoot, "smoke"), loggedIn: false, authMethod: "none" });
+    expect(r.stdout).not.toContain("active in this shell");
+  });
 });
 
 describe("env", () => {
@@ -225,6 +245,24 @@ describe("run", () => {
     await runCli(["init", "smoke", "--no-login"], { home: h.home });
     const r = await runCli(["smoke"], { home: h.home, env: { FAKE_CLAUDE_EXIT: "3" } });
     expect(r.exitCode).toBe(3);
+  });
+
+  test("warns when a credential variable overrides the profile login, and still runs", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const log = join(h.home, "claude.log");
+    // The preload strips these from the ambient environment; set one on purpose.
+    const r = await runCli(["smoke", "x"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_LOG: log, ANTHROPIC_API_KEY: "sk-test" },
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr.trim()).toBe(
+      'claudep: ANTHROPIC_API_KEY is set; Claude Code will use it instead of the "smoke" login',
+    );
+    expect(JSON.parse(readFileSync(log, "utf8")).configDir).toBe(join(h.profilesRoot, "smoke"));
+    const quiet = await runCli(["smoke", "x"], { home: h.home, env: { FAKE_CLAUDE_LOG: log } });
+    expect(quiet.stderr).toBe("");
   });
 });
 
@@ -291,6 +329,45 @@ describe("doctor", () => {
     // Known runtime state from Claude Code 2.1.263 is classified, never reported.
     expect(r.stdout).not.toContain("teams");
     expect(existsSync(join(h.profilesRoot, "smoke", "mystery.json"))).toBe(false);
+  });
+
+  test("flags a Claude Code older than the keychain floor on macOS only", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const old = await runCli(["doctor", "smoke"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_VERSION: "2.1.100 (Claude Code)" },
+    });
+    if (process.platform === "darwin") {
+      expect(old.exitCode).toBe(1);
+      expect(old.stdout).toContain("Claude Code 2.1.100 is older than 2.1.144");
+    } else {
+      expect(old.stdout).not.toContain("older than");
+    }
+    const fine = await runCli(["doctor", "smoke"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_VERSION: "2.1.144 (Claude Code)" },
+    });
+    expect(fine.stdout).not.toContain("older than");
+    expect(fine.exitCode).toBe(0);
+  });
+
+  test("flags env.CLAUDE_CONFIG_DIR in the shared settings.json", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    writeFileSync(join(h.base, "settings.json"), JSON.stringify({ env: { CLAUDE_CONFIG_DIR: "/somewhere" } }));
+    const r = await runCli(["doctor", "smoke"], { home: h.home });
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("sets env.CLAUDE_CONFIG_DIR (/somewhere)");
+    expect(r.stdout).toContain("1 problem(s)");
+  });
+
+  test("warns about credential variables without counting them as problems", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const r = await runCli(["doctor", "smoke"], { home: h.home, env: { CLAUDE_CODE_OAUTH_TOKEN: "t" } });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("CLAUDE_CODE_OAUTH_TOKEN is set in this shell");
   });
 });
 
@@ -403,6 +480,26 @@ describe("rm", () => {
     const r = await runCli(["rm", "ghost", "--yes"], { home: h.home });
     expect(r.exitCode).toBe(1);
   });
+
+  test("warns when the shell is on the profile or the directory pins it, then removes anyway", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    const repo = join(h.home, "repo");
+    mkdirSync(repo);
+    writeFileSync(join(repo, ".claudep"), "smoke\n");
+    const r = await runCli(["rm", "smoke", "--yes", "--keep-login"], {
+      home: h.home,
+      cwd: repo,
+      env: { CLAUDE_CONFIG_DIR: dir, CLAUDEP_AUTO: dir },
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("this shell is on smoke (shell hook)");
+    expect(r.stdout).toContain("claudep env --unset");
+    expect(r.stdout).toContain(`${tilde("repo", ".claudep")} pins this directory tree to smoke`);
+    expect(r.stdout).toContain("claudep local --remove");
+    expect(existsSync(dir)).toBe(false);
+  });
 });
 
 describe("version", () => {
@@ -460,6 +557,20 @@ describe("current", () => {
     expect(r.stdout).toContain("set by: manual pin");
     expect(r.stdout).toContain("pinned here: work");
     expect(r.stdout).toContain("but this shell is on smoke");
+  });
+
+  test("--name prints only the label in every state", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    expect((await runCli(["current", "--name"], { home: h.home })).stdout).toBe("default\n");
+    expect((await runCli(["current", "--name"], { home: h.home, env: { CLAUDE_CONFIG_DIR: dir } })).stdout).toBe(
+      "smoke\n",
+    );
+    const cfg = join(dirname(h.home), "cfg");
+    expect((await runCli(["current", "--name"], { home: h.home, env: { CLAUDE_CONFIG_DIR: cfg } })).stdout).toBe(
+      "custom\n",
+    );
   });
 
   test("custom dir outside the root", async () => {

@@ -21,7 +21,7 @@ function out(text: string): void {
 }
 
 if (argv[0] === "--version") {
-  out("9.9.9 (fake claude)");
+  out(process.env.FAKE_CLAUDE_VERSION ?? "9.9.9 (fake claude)");
   process.exit(0);
 }
 

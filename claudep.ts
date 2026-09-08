@@ -521,6 +521,49 @@ export async function readJson(path: string): Promise<JsonObject | undefined> {
   }
 }
 
+/** Variables Claude Code uses instead of the login in its config dir when
+ *  they are set (always in -p mode). They make a profile's login moot. */
+export const AUTH_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
+
+/** The AUTH_ENV names that are set and non-empty. Windows environments are
+ *  case-insensitive, so any spelling counts there. */
+export function authEnvOverrides(env: Env = process.env, platform: NodeJS.Platform = process.platform): string[] {
+  return AUTH_ENV.filter((name) => {
+    if (platform !== "win32") return Boolean(env[name]);
+    return Object.keys(env).some((k) => k.toUpperCase() === name && Boolean(env[k]));
+  });
+}
+
+/** The oldest Claude Code whose macOS Keychain item is namespaced per config
+ *  dir. Before it every config dir shared one login. */
+export const MIN_CLAUDE_VERSION = "2.1.144";
+
+export type Version = [number, number, number];
+
+/** The first x.y.z in `claude --version` output. */
+export function parseVersion(text: string): Version | undefined {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(text);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : undefined;
+}
+
+export function versionBelow(a: Version, b: Version): boolean {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return (a[i] as number) < (b[i] as number);
+  }
+  return false;
+}
+
+/** `env.CLAUDE_CONFIG_DIR` from a settings file, when present and a string.
+ *  Claude Code disables features when it finds one that differs from the
+ *  active dir, and under claudep it always differs for some profile. */
+export async function settingsEnvConfigDir(settingsPath: string): Promise<string | undefined> {
+  const settings = await readJson(settingsPath);
+  const env = settings?.env;
+  if (!env || typeof env !== "object" || Array.isArray(env)) return undefined;
+  const value = (env as JsonObject).CLAUDE_CONFIG_DIR;
+  return typeof value === "string" ? value : undefined;
+}
+
 export type SeedResult = "seeded" | "exists" | "no-base";
 
 export async function seedGlobalJson(baseGlobalJson: string, dir: string, copyMcp: boolean): Promise<SeedResult> {
@@ -915,6 +958,8 @@ async function cmdRun(L: Layout, args: string[]): Promise<never> {
   if (name === "default" || name === "base") return execClaude(L, undefined, rest);
   const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
+  for (const v of authEnvOverrides(process.env, L.platform))
+    console.error(`claudep: ${v} is set; Claude Code will use it instead of the "${name}" login`);
   return execClaude(L, dir, rest);
 }
 
@@ -952,9 +997,20 @@ function printTable(rows: Row[], home: string, platform: NodeJS.Platform): void 
   });
 }
 
-async function cmdList(L: Layout): Promise<void> {
+/** The flat object `status --json` prints for one row; `list --json` prints an array of them. */
+function rowJson(row: Row): JsonObject {
+  return { name: row.name, dir: row.dir, ...row.status };
+}
+
+async function cmdList(L: Layout, args: string[]): Promise<void> {
+  const f = parseFlags(args, ["--json"], []);
   const names = ["default", ...listProfileNames(L)];
-  printTable(await collectRows(L, names), L.home, L.platform);
+  const rows = await collectRows(L, names);
+  if (f.bools.has("--json")) {
+    console.log(JSON.stringify(rows.map(rowJson), null, 2));
+    return;
+  }
+  printTable(rows, L.home, L.platform);
   if (names.length === 1) console.log(c.dim("\nNo profiles yet. Create one: claudep init <name>"));
   const cur = currentProfile(L);
   if (cur.kind !== "base") console.log(c.dim(`\nactive in this shell: ${describeCurrent(cur)}`));
@@ -967,7 +1023,7 @@ async function cmdStatus(L: Layout, args: string[]): Promise<void> {
   if (name !== "default" && !profileExists(L, name)) die(`profile "${name}" does not exist`);
   const [row] = await collectRows(L, [name]);
   if (!row) return;
-  if (f.bools.has("--json")) console.log(JSON.stringify({ name: row.name, dir: row.dir, ...row.status }, null, 2));
+  if (f.bools.has("--json")) console.log(JSON.stringify(rowJson(row), null, 2));
   else printTable([row], L.home, L.platform);
 }
 
@@ -990,20 +1046,29 @@ function cmdEnv(L: Layout, args: string[]): void {
 }
 
 function describeCurrent(cur: Current): string {
-  const label = cur.kind === "profile" ? (cur.name ?? "?") : cur.kind === "custom" ? "custom" : "default";
+  const label = currentLabel(cur);
   const how = cur.setBy === "hook" ? "shell hook" : cur.setBy === "manual" ? "manual pin" : "nothing pinned";
   return `${label} (${how})`;
 }
 
+/** The one-word answer: the profile name, `default` for the base, `custom` otherwise. */
+export function currentLabel(cur: Current): string {
+  return cur.kind === "profile" ? (cur.name ?? "?") : cur.kind === "custom" ? "custom" : "default";
+}
+
 function cmdCurrent(L: Layout, args: string[]): void {
-  const f = parseFlags(args, ["--json"], []);
+  const f = parseFlags(args, ["--json", "--name"], []);
   const cur = currentProfile(L);
+  const label = currentLabel(cur);
+  if (f.bools.has("--name")) {
+    console.log(label);
+    return;
+  }
   const pin = resolvePin(process.cwd());
   if (f.bools.has("--json")) {
     console.log(JSON.stringify({ ...cur, pin: pin ?? null }, null, 2));
     return;
   }
-  const label = cur.kind === "profile" ? (cur.name ?? "?") : cur.kind === "custom" ? "custom" : "default";
   console.log(`${c.bold(label)}  ${c.dim(shortHome(cur.dir, L.home, L.platform))}`);
   if (cur.setBy === "hook")
     console.log(`set by: shell hook${pin ? ` (${PIN_FILE} in ${shortHome(pin.dir, L.home, L.platform)})` : ""}`);
@@ -1230,6 +1295,7 @@ function msysConfigDirWarning(L: Layout, env: Env = process.env): string | undef
 
 async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
   const names = args[0] ? [args[0]] : listProfileNames(L);
+  let problems = 0;
   const launch = findClaude();
   if (launch && launch.kind !== "ps1") {
     const { out } = await captureClaude(L, undefined, ["--version"]);
@@ -1238,11 +1304,29 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       console.log(
         `${c.dim("·")} claude is the npm cmd shim and runs through cmd.exe; the native installer's claude.exe avoids that hop`,
       );
+    const v = parseVersion(out);
+    const floor = parseVersion(MIN_CLAUDE_VERSION);
+    if (L.platform === "darwin" && v && floor && versionBelow(v, floor)) {
+      bad(
+        `Claude Code ${v.join(".")} is older than ${MIN_CLAUDE_VERSION}; every config dir shares one Keychain item there, so profiles cannot hold separate logins. Update Claude Code`,
+      );
+      problems++;
+    }
   } else if (launch) bad(`only ${launch.bin} found; claudep needs claude.exe or claude.cmd`);
   else bad("claude binary not found on PATH");
   ok(`base: ${L.base}${L.callerConfigDir && !L.managed ? c.yellow("  (from CLAUDE_CONFIG_DIR in your shell)") : ""}`);
   const msysWarning = msysConfigDirWarning(L);
   if (msysWarning) warn(msysWarning);
+  const settingsFile = join(L.base, "settings.json");
+  const pinnedInSettings = await settingsEnvConfigDir(settingsFile);
+  if (pinnedInSettings !== undefined) {
+    bad(
+      `${settingsFile} sets env.CLAUDE_CONFIG_DIR (${pinnedInSettings}). Claude Code disables features when that differs from the active dir, which it does in every profile. Remove it; pin shells with claudep env or a ${PIN_FILE} file instead`,
+    );
+    problems++;
+  }
+  for (const v of authEnvOverrides(process.env, L.platform))
+    warn(`${v} is set in this shell; Claude Code uses it instead of the profile login, always in -p mode`);
   ok(`profiles root: ${L.profilesRoot}`);
 
   const shared = sharedItems(L.base);
@@ -1256,7 +1340,6 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
     warn(`base items neither shared nor known-private (they stay per-profile): ${unclassified.join(", ")}`);
   }
 
-  let problems = 0;
   for (const name of names) {
     const dir = profileDir(L, name);
     console.log(`\n${c.bold(name)}  ${c.dim(dir)}`);
@@ -1315,6 +1398,21 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
     samePath(real, L.home, L.platform)
   )
     die(`refusing to remove ${real}: not inside ${L.profilesRoot}`);
+  const cur = currentProfile(L);
+  if (cur.kind === "profile" && cur.name === name) {
+    const unset =
+      shellSyntax(process.env, L.platform) === "powershell"
+        ? "claudep env --unset | Invoke-Expression"
+        : 'eval "$(claudep env --unset)"';
+    warn(
+      `this shell is on ${name} (${cur.setBy === "hook" ? "shell hook" : "manual pin"}). After removal run: ${unset}`,
+    );
+  }
+  const pin = resolvePin(process.cwd());
+  if (pin && pin.name === name)
+    warn(
+      `${shortHome(pin.file, L.home, L.platform)} pins this directory tree to ${name}. Remove it with: claudep local --remove`,
+    );
   if (!f.bools.has("--yes")) {
     const yes = confirm(`Remove profile "${name}" (${dir})? Shared items are only unlinked; ${L.base} is untouched.`);
     if (!yes) {
@@ -1356,9 +1454,9 @@ function help(L: Layout): void {
 ${c.bold("USAGE")}
   claudep <name> [claude args…]        run claude with profile <name>  (alias for "run")
   claudep init <name> [options]        create/update a profile and log in
-  claudep list                         show every profile and who it is logged in as
+  claudep list [--json]                show every profile and who it is logged in as
   claudep status <name> [--json]       login state for one profile ("default" = ~/.claude)
-  claudep current [--json]             which profile this shell is on, and why
+  claudep current [--json|--name]      which profile this shell is on, and why; --name prints only the name
   claudep env <name> | --unset         print the CLAUDE_CONFIG_DIR export (or the unset) for eval / Invoke-Expression
   claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
   claudep doctor [name]                verify symlinks, keychain entry, unclassified files
@@ -1437,7 +1535,7 @@ export async function main(argv: string[]): Promise<void> {
       return cmdRun(L, args);
     case "list":
     case "ls":
-      return cmdList(L);
+      return cmdList(L, args);
     case "status":
       return cmdStatus(L, args);
     case "env":
