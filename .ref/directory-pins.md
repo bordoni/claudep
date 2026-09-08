@@ -2,13 +2,14 @@
 
 A `.claudep` file names the profile every hooked shell should use inside that directory tree. This file explains the mechanics so a change to one half is mirrored in the other.
 
-## Three implementations that must agree
+## Four implementations that must agree
 
 - `resolvePin(startDir)` in `claudep.ts` is the TypeScript version. `claudep resolve`, `claudep local` and `claudep current` use it.
 - The hook printed by `claudep shell-init zsh|bash` is the sh version. It runs on every directory change (zsh `chpwd`) or prompt (bash `PROMPT_COMMAND`), so it uses parameter expansion and builtins only. No subprocess, ever.
+- The hook printed by `claudep shell-init fish` is the fish version. `function _claudep_auto --on-variable PWD` runs it on every `cd`, `pushd` and `popd`, plus once at load. It uses `set`, `test`, `read`, `printf` and `string` only; every `(...)` in it is a `string` builtin, which fish runs in-process. `string trim` drops the `\r`, `string replace -r '/[^/]*$' ''` is the parent step and turns `/foo` into the empty string exactly like `${dir%/*}`, and `read` returns 0 on an unterminated last line so no `|| [ -n ]` twin is needed. The floor is fish 3.0: `path dirname` would need 3.5, `$(...)` 3.4, and Ubuntu 22.04 ships 3.3. The `_claudep_last_pwd` dedupe stays because fish fires the event on every `set` of `PWD`, `cd .` included. Not a Windows target; it joins with `/`.
 - The hook printed by `claudep shell-init powershell` is the PowerShell version, for Windows PowerShell 5.1 and PowerShell 7. It wraps the `prompt` function (there is no `chpwd`, and `LocationChangedAction` is 7 only) and uses cmdlets only: `Join-Path`, `Test-Path`, `Get-Content`, `Remove-Item`, plus `[System.IO.Path]::GetDirectoryName` for the parent step, because `Split-Path` cannot combine `-LiteralPath` with `-Parent` and `-Path` expands wildcards. The only `&` is the saved original prompt. It is ASCII only so PowerShell 5.1's OEM console encoding cannot mangle it, and its state lives in `$global:` because the profile dot-sources what `Invoke-Expression` ran.
 
-`test/shell.test.ts` runs every hook in the real shells through one dialect table: bash and zsh where present, Git for Windows' bash on Windows, `pwsh` wherever it is installed (every GitHub runner image has it, so the PowerShell hook is exercised on macOS and Linux too), and Windows PowerShell 5.1 on Windows. Each case checks it lands on the same answer as `claudep resolve`.
+`test/shell.test.ts` runs every hook in the real shells through one dialect table: bash and zsh where present, Git for Windows' bash on Windows, fish where present (CI installs it on macOS and Linux), `pwsh` wherever it is installed (every GitHub runner image has it, so the PowerShell hook is exercised on macOS and Linux too), and Windows PowerShell 5.1 on Windows. Each case checks it lands on the same answer as `claudep resolve`.
 
 ## Native paths under Git Bash
 
@@ -25,7 +26,9 @@ Git Bash gives the hook a POSIX `$PWD` such as `/c/Users/me/repo`. The walk uses
 
 The hook exports `CLAUDEP_AUTO` next to `CLAUDE_CONFIG_DIR` with the same value. Before touching anything it checks: if `CLAUDE_CONFIG_DIR` is set and differs from `CLAUDEP_AUTO`, someone else set it and the hook returns. That covers `eval "$(claudep env work)"`, a plain `export`, and a parent shell.
 
-`claudep env <name>` prints `unset CLAUDEP_AUTO` after the export so the pin it creates is manual even when the hook had set the same directory a moment earlier. `claudep env --unset` clears both variables and hands the shell back to the hook. From PowerShell the same two commands print `$env:` and `Remove-Item Env:` syntax; `shellSyntax()` decides from `MSYSTEM`, which Git Bash sets and PowerShell does not.
+`claudep env <name>` prints `unset CLAUDEP_AUTO` after the export so the pin it creates is manual even when the hook had set the same directory a moment earlier. `claudep env --unset` clears both variables and hands the shell back to the hook. From PowerShell the same two commands print `$env:` and `Remove-Item Env:` syntax; from fish they print `set -gx` and `not set -q X; or set -e X`, guarded because a bare `set -e` on a missing name returns 1 and `source` reports its last status, which prompt themes paint red. Fish loads them with `claudep env work | source`, never `eval (...)`: fish's `eval` joins its arguments with spaces and a command substitution splits on newlines, so two lines would collapse into one.
+
+`shellSyntax()` decides: PowerShell on Windows unless `MSYSTEM` is set (Git Bash sets it, PowerShell does not). Elsewhere the parent process is consulted first (`parentProcessName()`: `/proc/<ppid>/comm` on Linux, one `ps -o comm=` on macOS), because `eval "$(claudep env x)"` forks the calling shell and a fish pipeline runs claudep as fish's child: fish gives fish, `pwsh` gives PowerShell, an sh-like name gives sh. An unrecognised parent (a test runner, `make`) falls back to `basename($SHELL)`: fish when that is fish, else sh. fish exports no marker a child could see (`FISH_VERSION` and `fish_pid` are unexported), which is why the parent is consulted at all, and `--shell sh|zsh|bash|fish|powershell` overrides everything for scripts. The hook never does any of this; it is `claudep env` that spawns `ps`, once, when the user types it.
 
 Leaving every pinned tree unsets both variables, so the shell returns to `~/.claude`. A stale profile that silently followed you out of a repo was judged worse than a visible fall back to the default.
 
@@ -48,6 +51,10 @@ It also runs `resolvePin` on the current directory and, when the pinned name dif
 
 ```bash
 zsh -c 'eval "$(claudep shell-init zsh)"; cd /path/to/pinned/tree; claudep current; cd ~; claudep current'
+```
+
+```fish
+fish -c 'claudep shell-init fish | source; cd /path/to/pinned/tree; claudep current; cd ~; claudep current'
 ```
 
 ```powershell

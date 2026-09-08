@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { aliasFiles, envScript, keychainService, SHELLS } from "../claudep.ts";
-import { fakeBin, REPO, runCli } from "./lib/cli.ts";
+import { fakeBin, REPO, runCli, SCRIPT } from "./lib/cli.ts";
 import { BASE_DIRS, BASE_FILES, fakeHome, PRIVATE_DIRS, PRIVATE_FILES, writeLogin } from "./lib/home.ts";
 import { norm, rx, tilde } from "./lib/paths.ts";
 
@@ -714,5 +714,46 @@ describe("env --shell", () => {
     const usage = await runCli(["env"], { home: h.home, env: { SHELL: "/usr/bin/fish", MSYSTEM: "MINGW64" } });
     expect(usage.exitCode).toBe(1);
     expect(usage.stderr).toContain("claudep env <name> | source");
+  });
+});
+
+describe("env detects the shell it runs in", () => {
+  /** Runs `claudep env smoke` as a child of a real shell, with $SHELL pointing elsewhere. */
+  async function fromShell(h: { home: string }, exe: string, login: string): Promise<string> {
+    // PowerShell needs the call operator in front of a quoted command name.
+    const amp = exe.endsWith("pwsh") ? "& " : "";
+    // bash -c execs a lone command in place of itself; a trailing no-op forces the fork eval "$(...)" does.
+    const tail = exe === "bash" ? "; :" : "";
+    const cmd = `${amp}${JSON.stringify(process.execPath)} ${JSON.stringify(SCRIPT)} env smoke${tail}`;
+    const proc = Bun.spawn([exe, "-c", cmd], {
+      env: { PATH: process.env.PATH ?? "", HOME: h.home, USERPROFILE: h.home, SHELL: login, NO_COLOR: "1" },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return out;
+  }
+
+  test.if(!WIN && Bun.which("fish") !== null)("a fish parent gets fish syntax even when $SHELL is zsh", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const out = await fromShell(h, Bun.which("fish") as string, "/bin/zsh");
+    expect(out).toBe(envScript(join(h.profilesRoot, "smoke"), "fish"));
+  });
+
+  test.if(!WIN)("a bash parent gets sh syntax even when $SHELL is fish", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const out = await fromShell(h, "bash", "/usr/bin/fish");
+    expect(out).toBe(envScript(join(h.profilesRoot, "smoke"), "sh"));
+  });
+
+  test.if(!WIN && Bun.which("pwsh") !== null)("a pwsh parent gets PowerShell syntax off Windows too", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const out = await fromShell(h, Bun.which("pwsh") as string, "/bin/zsh");
+    expect(out).toBe(envScript(join(h.profilesRoot, "smoke"), "powershell"));
   });
 });

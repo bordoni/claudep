@@ -1031,7 +1031,7 @@ function envUsage(syntax: EnvSyntax): string {
   if (syntax === "powershell")
     return "usage: claudep env <name> | Invoke-Expression   or   claudep env --unset | Invoke-Expression";
   if (syntax === "fish") return "usage: claudep env <name> | source   or   claudep env --unset | source";
-  return 'usage: eval "$(claudep env <name>)"   or   eval "$(claudep env --unset)"   (add --shell fish|powershell|sh when that is not your login shell)';
+  return 'usage: eval "$(claudep env <name>)"   or   eval "$(claudep env --unset)"   (add --shell fish|powershell|sh when the shell was not detected)';
 }
 
 /** The line that clears a pin, in the syntax of the shell the user is in. */
@@ -1044,7 +1044,8 @@ export function envUnsetHint(syntax: EnvSyntax): string {
 function cmdEnv(L: Layout, args: string[]): void {
   const f = parseFlags(args, ["--unset"], ["--shell"]);
   const forced = f.strs.get("--shell");
-  const syntax = forced === undefined ? shellSyntax(process.env, L.platform) : envSyntaxOf(forced);
+  const syntax =
+    forced === undefined ? shellSyntax(process.env, L.platform, parentProcessName(L.platform)) : envSyntaxOf(forced);
   if (!syntax) die(`unsupported shell "${forced}". Use sh, zsh, bash, fish or powershell`);
   if (f.bools.has("--unset")) {
     process.stdout.write(envScript(undefined, syntax));
@@ -1160,11 +1161,50 @@ export function hookHint(shell: Shell): string {
 
 export type EnvSyntax = "sh" | "fish" | "powershell";
 
-/** What `claudep env` prints: PowerShell on Windows outside Git Bash, fish
- *  when the login shell is fish, sh otherwise. fish exports no marker a
- *  child could see, so $SHELL is the only signal; `--shell` overrides it. */
-export function shellSyntax(env: Env = process.env, platform: NodeJS.Platform = process.platform): EnvSyntax {
+/** The executable name of the parent process, which for `claudep env` is
+ *  the shell the user typed it in: `eval "$(...)"` forks the shell and a
+ *  fish pipeline runs claudep as a child of fish. Read from /proc on Linux
+ *  and from `ps` on macOS; undefined elsewhere or when it cannot be read.
+ *  This is `claudep env`, not the hook, so one `ps` is fine. */
+export function parentProcessName(
+  platform: NodeJS.Platform = process.platform,
+  ppid: number = process.ppid,
+): string | undefined {
+  try {
+    if (platform === "linux") return readFileSync(`/proc/${ppid}/comm`, "utf8").trim() || undefined;
+    if (platform === "darwin") {
+      const r = Bun.spawnSync(["ps", "-o", "comm=", "-p", String(ppid)], { stdout: "pipe", stderr: "ignore" });
+      const name = r.exitCode === 0 ? r.stdout.toString().trim() : "";
+      return name || undefined;
+    }
+  } catch {
+    /* fall through */
+  }
+  return undefined;
+}
+
+/** `fish` from `fish`, `-fish` (a login shell) or `/usr/local/bin/fish`. */
+export function shellNameOf(comm: string): string {
+  return posix.basename(comm.trim()).replace(/^-/, "");
+}
+
+const SH_LIKE = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash"]);
+
+/** What `claudep env` prints. PowerShell on Windows outside Git Bash. Then the
+ *  parent process decides when it is a shell claudep knows (fish, pwsh, or an
+ *  sh-like shell); otherwise the login shell in $SHELL: fish when that is
+ *  fish, sh for anything else. fish exports no marker a child could see,
+ *  which is why the parent is consulted at all. `--shell` overrides all of it. */
+export function shellSyntax(
+  env: Env = process.env,
+  platform: NodeJS.Platform = process.platform,
+  parent: string | undefined = undefined,
+): EnvSyntax {
   if (platform === "win32" && !env.MSYSTEM) return "powershell";
+  const p = parent !== undefined ? shellNameOf(parent) : "";
+  if (p === "fish") return "fish";
+  if (p === "pwsh" || p === "powershell") return "powershell";
+  if (SH_LIKE.has(p)) return "sh";
   return env.SHELL && posix.basename(env.SHELL) === "fish" ? "fish" : "sh";
 }
 
@@ -1497,7 +1537,7 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
     die(`refusing to remove ${real}: not inside ${L.profilesRoot}`);
   const cur = currentProfile(L);
   if (cur.kind === "profile" && cur.name === name) {
-    const unset = envUnsetHint(shellSyntax(process.env, L.platform));
+    const unset = envUnsetHint(shellSyntax(process.env, L.platform, parentProcessName(L.platform)));
     warn(
       `this shell is on ${name} (${cur.setBy === "hook" ? "shell hook" : "manual pin"}). After removal run: ${unset}`,
     );

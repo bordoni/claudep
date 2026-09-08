@@ -54,16 +54,16 @@ Two things differ from macOS:
 ```
 claudep <name> [claude args…]        run claude with profile <name>
 claudep init <name> [options]        create/update a profile and log in
-claudep list                         every profile and who it is logged in as
+claudep list [--json]                every profile and who it is logged in as
 claudep status <name> [--json]       login state for one profile ("default" = ~/.claude)
-claudep env <name>                   print "export CLAUDE_CONFIG_DIR=…" for eval
+claudep env <name> [--shell <sh>]    print the CLAUDE_CONFIG_DIR pin for eval, source or Invoke-Expression
 claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
-claudep current [--json]             which profile this shell is on, and why
-claudep doctor [name]                verify symlinks, keychain entry, unclassified files
+claudep current [--json|--name]      which profile this shell is on, and why
+claudep doctor [name]                verify symlinks, keychain entry, unclassified files, Claude Code version
 claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
 claudep local <name> | --remove      pin the current directory tree to a profile (see below)
 claudep resolve [dir]                print the profile pinned for a directory
-claudep shell-init [zsh|bash|powershell]   print the hook that applies pins on cd
+claudep shell-init [zsh|bash|fish|powershell]   print the hook that applies pins on cd
 claudep --version
 ```
 
@@ -84,19 +84,41 @@ Shells apply pins through a hook. Add one line to `~/.zshrc` (or `~/.bashrc` wit
 eval "$(claudep shell-init zsh)"
 ```
 
-In PowerShell the line goes in `$PROFILE`:
+In fish the line goes in `~/.config/fish/config.fish`, and in PowerShell in `$PROFILE`:
+
+```fish
+claudep shell-init fish | source
+```
 
 ```powershell
 claudep shell-init powershell | Out-String | Invoke-Expression
 ```
 
-From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile and `cd` out of it returns the shell to `~/.claude`. The hook is pure shell with no subprocess (cmdlets only in PowerShell), so it costs nothing at the prompt. The rules:
+From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile and `cd` out of it returns the shell to `~/.claude`. The hook is pure shell with no subprocess (builtins in fish, cmdlets only in PowerShell), so it costs nothing at the prompt. The rules:
 
 - The nearest `.claudep` file upward from the current directory wins. An empty one cancels a parent pin.
-- The hook only changes a `CLAUDE_CONFIG_DIR` it set itself. It tracks that in `CLAUDEP_AUTO`, so a manual pin from `eval "$(claudep env work)"` (`claudep env work | Invoke-Expression` in PowerShell) or a plain `export` stays put until you `eval "$(claudep env --unset)"`.
+- The hook only changes a `CLAUDE_CONFIG_DIR` it set itself. It tracks that in `CLAUDEP_AUTO`, so a manual pin from `eval "$(claudep env work)"` (`claudep env work | source` in fish, `claudep env work | Invoke-Expression` in PowerShell) or a plain `export` stays put until you `eval "$(claudep env --unset)"`.
 - A pin that names a profile you have not created prints one warning per directory change and sets nothing.
 
+`claudep env` prints the syntax of the shell it runs in: it looks at its parent process (fish, pwsh, or an sh-like shell) and falls back to your login shell. Pass `--shell sh|fish|powershell` when neither answer fits, for example from a script or a Makefile.
+
 `claudep current` tells you which profile the shell is on and how it got there (hook, manual pin, or nothing). `claudep list` adds the same line at the bottom.
+
+## Show the profile in your prompt or statusline
+
+In a shell prompt use the variable itself; no command runs:
+
+```sh
+# zsh or bash: the last path segment is the profile name when a profile is active
+PROMPT='${CLAUDE_CONFIG_DIR:+[${CLAUDE_CONFIG_DIR##*/}] }'"$PROMPT"
+```
+
+```fish
+# fish
+function fish_prompt; set -q CLAUDE_CONFIG_DIR; and echo -n "[$(string replace -r '.*/' '' -- $CLAUDE_CONFIG_DIR)] "; ...; end
+```
+
+In scripts, and in the shared `statusline-command.sh`, `claudep current --name` prints exactly one word: the profile name, `default` for `~/.claude`, or `custom` for a `CLAUDE_CONFIG_DIR` outside the profiles root. The statusline script inherits Claude Code's environment, so it sees the profile the session was started with.
 
 ## How it works
 
@@ -119,7 +141,9 @@ The shared list is an allowlist, so an account-specific file cannot leak across 
 - Two profiles running at the same time write the same `settings.json` and `plugins/`. That is the same situation as two terminals today.
 - Background sessions and the daemon are tied to `~/.claude`. As of Claude Code 2.1.263, `claude daemon install` refuses to run with `CLAUDE_CONFIG_DIR` set, and `claude --bg` under a profile runs without the daemon.
 - Set `CLAUDE_PROFILES_DIR` to move the profiles root. Keep it out of iCloud or Dropbox; `.claude.json` is rewritten constantly and sync tools create conflict copies.
-- Never put `CLAUDE_CONFIG_DIR` in a `settings.json` `env` block. Claude Code detects that mismatch and disables features.
+- Never put `CLAUDE_CONFIG_DIR` in a `settings.json` `env` block. Claude Code detects that mismatch and disables features; `claudep doctor` reports it.
+- `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` override the login in any config dir, always in `-p` mode. `claudep <name>` and `claudep doctor` warn when one is set and leave it alone.
+- `claudep doctor` fails on macOS when Claude Code is older than 2.1.144, the first build whose Keychain item is namespaced per config dir.
 
 ## Releases
 

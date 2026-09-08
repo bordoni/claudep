@@ -26,6 +26,7 @@ import {
   NAME_RE,
   onPath,
   PIN_FILE,
+  parentProcessName,
   parseAuthStatus,
   parseFlags,
   parseVersion,
@@ -37,6 +38,7 @@ import {
   samePath,
   settingsEnvConfigDir,
   shellInit,
+  shellNameOf,
   shellSyntax,
   shortHome,
   splitPathVar,
@@ -729,5 +731,34 @@ describe("doctor and run hardening helpers", () => {
     expect(currentLabel({ kind: "base", name: undefined, dir: "/h/.claude", setBy: "none" })).toBe("default");
     expect(currentLabel({ kind: "profile", name: "work", dir: "/h/.claudep/work", setBy: "hook" })).toBe("work");
     expect(currentLabel({ kind: "custom", name: undefined, dir: "/elsewhere", setBy: "manual" })).toBe("custom");
+  });
+});
+
+describe("shell detection from the parent process", () => {
+  test("shellNameOf strips the path and the login dash", () => {
+    expect(shellNameOf("fish")).toBe("fish");
+    expect(shellNameOf("-zsh")).toBe("zsh");
+    expect(shellNameOf("/usr/local/bin/fish\n")).toBe("fish");
+    expect(shellNameOf("/bin/bash")).toBe("bash");
+  });
+
+  test("the parent wins when it is a known shell, $SHELL otherwise, Windows never looks", () => {
+    expect(shellSyntax({ SHELL: "/bin/zsh" }, "darwin", "fish")).toBe("fish");
+    expect(shellSyntax({ SHELL: "/bin/zsh" }, "darwin", "/usr/local/bin/fish")).toBe("fish");
+    expect(shellSyntax({ SHELL: "/usr/bin/fish" }, "linux", "zsh")).toBe("sh");
+    expect(shellSyntax({ SHELL: "/usr/bin/fish" }, "linux", "-bash")).toBe("sh");
+    expect(shellSyntax({ SHELL: "/bin/zsh" }, "linux", "pwsh")).toBe("powershell");
+    expect(shellSyntax({ SHELL: "/usr/bin/fish" }, "linux", "bun")).toBe("fish");
+    expect(shellSyntax({ SHELL: "/bin/zsh" }, "linux", "make")).toBe("sh");
+    expect(shellSyntax({}, "win32", "fish")).toBe("powershell");
+    expect(shellSyntax({ MSYSTEM: "MINGW64" }, "win32", "fish")).toBe("fish");
+  });
+
+  test("parentProcessName answers only on Linux and macOS and never throws", () => {
+    expect(parentProcessName("win32")).toBeUndefined();
+    expect(parentProcessName("linux", 999999999)).toBeUndefined();
+    const here = parentProcessName();
+    if (process.platform === "darwin" || process.platform === "linux") expect(typeof here).toBe("string");
+    else expect(here).toBeUndefined();
   });
 });

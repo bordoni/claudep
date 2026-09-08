@@ -19,7 +19,7 @@ bun run lint:fix         # let Biome format and fix what it can
 | `test/lib/home.ts` | `using h = fakeHome()` builds a realistic `~/.claude` (shared files, private files, a `.claude.json` with seedable keys and identity that must never be copied) and removes it when the block ends. |
 | `test/lib/cli.ts` | `runCli(args, { home })` spawns the real `claudep.ts` with a fake `$HOME` and a bin dir prepended to PATH, and returns `{ exitCode, stdout, stderr }`. The fake `claude` is an sh shim on POSIX and a `claude.cmd` on Windows, so the Windows job goes through claudep's cmd.exe launcher the way an npm install does. |
 | `test/lib/paths.ts` | `norm()` for readlink results, `tilde()` for `~` output with the native separator, `rx()` for regexes, `msys()` for the `/c/` spelling Git Bash prints. |
-| `test/lib/fake-claude.ts` | Stands in for `claude`. Reads and writes `<config dir>/.fake-login.json` for `auth status/login/logout`, prints a fake `--version`, and logs any other invocation to `$FAKE_CLAUDE_LOG` with the `CLAUDE_CONFIG_DIR` it saw. `FAKE_CLAUDE_EXIT` sets its exit code. |
+| `test/lib/fake-claude.ts` | Stands in for `claude`. Reads and writes `<config dir>/.fake-login.json` for `auth status/login/logout`, prints a fake `--version` (`FAKE_CLAUDE_VERSION` overrides it, which is how the doctor version floor is tested), and logs any other invocation to `$FAKE_CLAUDE_LOG` with the `CLAUDE_CONFIG_DIR` it saw. `FAKE_CLAUDE_EXIT` sets its exit code. |
 | `test/lib/fake-security.ts` | Stands in for macOS `security`. Exits 0 when the requested service is listed in `$FAKE_KEYCHAIN`. |
 
 Test files:
@@ -30,7 +30,7 @@ Test files:
 - `test/keychain.test.ts`: `keychainHas` with an injected spawner, plus one real `security` call gated on macOS.
 - `test/cli.test.ts`: every command as a subprocess. This is where behaviour lives; add a case here when you change a command.
 - `test/changelog.test.ts`: the Keep a Changelog helpers in `scripts/changelog.ts` (`extract`, `promote`, link rewriting) plus one run of the CLI, and a check that the real `CHANGELOG.md` parses.
-- `test/shell.test.ts`: runs the hook printed by `shell-init` in a real `bash`, and in `zsh` when `Bun.which("zsh")` finds one (macOS runners have it, Ubuntu runners do not). On Windows the bash is Git for Windows' `bash.exe`, found under `%ProgramFiles%\Git`, never `Bun.which("bash")`, which can answer the WSL stub in System32. Checks entering and leaving pinned trees, the manual-pin rule, the empty-pin cancel, CRLF pin files, the missing-profile warning, and that the hook and `claudep resolve` agree.
+- `test/shell.test.ts`: runs the hook printed by `shell-init` in a real `bash`, in `zsh` when `Bun.which("zsh")` finds one (macOS runners have it, Ubuntu runners do not), in `fish` when it is installed (`ci.yml` installs it with apt on Ubuntu and Homebrew on macOS; not a Windows target), and in `pwsh` and Windows PowerShell where present. On Windows the bash is Git for Windows' `bash.exe`, found under `%ProgramFiles%\Git`, never `Bun.which("bash")`, which can answer the WSL stub in System32. Checks entering and leaving pinned trees, the manual-pin rule, the empty-pin cancel, CRLF pin files, a pin file with no trailing newline, the missing-profile warning, and that the hook and `claudep resolve` agree.
 
 A `.gitattributes` with `* text=auto eol=lf` keeps the Windows checkout on LF; `test/changelog.test.ts` parses the real `CHANGELOG.md` by `\n`.
 

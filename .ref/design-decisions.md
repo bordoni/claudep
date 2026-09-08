@@ -52,7 +52,7 @@ PowerShell and cmd resolve `esmoke` to `esmoke.cmd` through `PATHEXT`; Git Bash 
 
 The PowerShell hook is generated from `claudep.ts` next to the sh one, so it is not a third hand-ported implementation; the three share `test/shell.test.ts` through a dialect table. It wraps the `prompt` function because that works on Windows PowerShell 5.1 as well as 7. Rejected: `$ExecutionContext.InvokeCommand.LocationChangedAction`, which is cleaner but 7 only, and 5.1 is still the default shell on a fresh Windows install.
 
-`claudep env` has no `--shell` flag. On Windows it prints PowerShell syntax unless `MSYSTEM` is set, which Git Bash does and PowerShell does not. Revisit if a PowerShell session with `MSYSTEM` inherited from a parent Git Bash is reported.
+`claudep env` has no `--shell` flag. On Windows it prints PowerShell syntax unless `MSYSTEM` is set, which Git Bash does and PowerShell does not. Revisit if a PowerShell session with `MSYSTEM` inherited from a parent Git Bash is reported. (Reopened 2026-09-07 for fish; the flag exists now, the `MSYSTEM` rule stays.)
 
 ## 2026-09-02: Alias shims live next to the `claudep` on PATH
 
@@ -65,6 +65,14 @@ Deleting a profile directory does not remove its Keychain item. `rm` runs `claud
 ## 2026-09-02: Reserved names and name regex
 
 `NAME_RE = /^[a-z0-9][a-z0-9_-]*$/` keeps directory names shell-safe and lets a bare `claudep <name>` be sugar for `run`. Subcommand words (`init`, `list`, `rm`, …) plus `default` and `base` are reserved so the dispatcher stays unambiguous.
+
+## 2026-09-07: Credential variables are warned about, never stripped
+
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` make Claude Code ignore the login in the config dir, always in `-p` mode, so a profile run with one of them set is not that profile's account. claude-account deletes them from the child environment. claudep prints one stderr line from `run` and a warning from `doctor` and passes the environment through unchanged: a user who exported a key did so on purpose, and a wrapper that silently edits the environment is the kind of surprise `CLAUDEP_AUTO` exists to avoid. Rejected: an opt-out flag for stripping; it would be a second thing to explain for a case the warning already names.
+
+## 2026-09-07: `claudep env` gets `--shell` after all (reopens 2026-09-06)
+
+The 2026-09-06 decision said `claudep env` has no `--shell` flag because `MSYSTEM` tells PowerShell from Git Bash. fish has no such marker: `FISH_VERSION`, `fish_pid` and `__fish_bin_dir` are all unexported. Two things were added. `shellSyntax()` now asks the parent process first (`/proc/<ppid>/comm` on Linux, `ps -o comm=` on macOS), which is the calling shell for both `eval "$(...)"` and a fish pipeline; the first by-hand run showed why, when a fish started from zsh got sh syntax from `$SHELL`. The subprocess rule (Never 10) is about the hook, which runs on every prompt; `claudep env` runs when typed, and one `ps` there is nothing. `$SHELL` remains the fallback for an unrecognised parent, and `--shell sh|zsh|bash|fish|powershell` overrides both for scripts. A side effect is that `claudep env x | Invoke-Expression` works in `pwsh` on macOS and Linux. `defaultShell()` learned fish at the same time so the hints name the right rc line.
 
 ## 2026-09-07: Usage windows are not shown
 
