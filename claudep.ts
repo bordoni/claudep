@@ -1592,9 +1592,9 @@ ${c.bold("USAGE")}
   claudep status <name> [--json]       login state for one profile ("default" = ~/.claude)
   claudep current [--json|--name]      which profile this shell is on, and why; --name prints only the name
   claudep env <name> | --unset         print the CLAUDE_CONFIG_DIR pin (or the unset) for eval, source or Invoke-Expression;
-                                       --shell sh|fish|powershell picks the syntax when it is not your login shell
+                                       --shell sh|fish|powershell picks the syntax when the shell was not detected
   claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
-  claudep doctor [name]                verify symlinks, keychain entry, unclassified files
+  claudep doctor [name]                verify symlinks, keychain entry, unclassified files, Claude Code version
   claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
   claudep --version                    print the version
 
