@@ -762,3 +762,11 @@ describe("shell detection from the parent process", () => {
     else expect(here).toBeUndefined();
   });
 });
+
+describe("fish hook on a Windows path", () => {
+  test("doubles the backslashes inside the single-quoted root, which fish unquotes back", () => {
+    expect(shellInit("fish", "C:\\Users\\me\\.claudep", "win32")).toContain(
+      "set -g _claudep_root 'C:\\\\Users\\\\me\\\\.claudep'",
+    );
+  });
+});

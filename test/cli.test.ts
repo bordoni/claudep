@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { aliasFiles, envScript, keychainService, SHELLS } from "../claudep.ts";
+import { aliasFiles, envScript, fishQuote, keychainService, SHELLS } from "../claudep.ts";
 import { fakeBin, REPO, runCli, SCRIPT } from "./lib/cli.ts";
 import { BASE_DIRS, BASE_FILES, fakeHome, PRIVATE_DIRS, PRIVATE_FILES, writeLogin } from "./lib/home.ts";
 import { norm, rx, tilde } from "./lib/paths.ts";
@@ -680,7 +680,8 @@ describe("local and resolve", () => {
       const r = await runCli(["shell-init", shell], { home: h.home });
       expect(r.exitCode).toBe(0);
       expect(r.stdout).toContain("_claudep_auto");
-      expect(r.stdout).toContain(h.profilesRoot);
+      // fish single-quotes the root, which doubles the backslashes of a Windows path.
+      expect(r.stdout).toContain(shell === "fish" ? fishQuote(h.profilesRoot) : h.profilesRoot);
     }
     const ps = await runCli(["shell-init", "powershell"], { home: h.home });
     expect(ps.stdout).toContain("function global:prompt");
