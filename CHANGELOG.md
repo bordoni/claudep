@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- `claudep completion zsh|bash|fish` prints tab completions for every subcommand, its flags, the values `--shell`, `shell-init` and `completion` take, and your profile names. Load it with `eval "$(claudep completion zsh)"` after `compinit`, `eval "$(claudep completion bash)"`, or `claudep completion fish | source`. Profile names are read from `~/.claudep` when you press Tab, so the script never runs claudep.
+
+### Changed
+
+- **Breaking:** `completion` is now a reserved word. A profile named `completion` stops resolving; recreate it under another name. Reserved words, flag parsing and the completion scripts now come from one command table, so they cannot drift apart.
+
 ## [0.3.0] - 2026-09-10
 
 ### Added

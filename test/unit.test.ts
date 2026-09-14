@@ -5,17 +5,25 @@ import { delimiter, join, resolve } from "node:path";
 import {
   authEnvOverrides,
   baseEnv,
+  COMMANDS,
+  COMPLETION_SHELLS,
   canon,
+  commandWords,
+  completionHint,
+  completionScript,
   currentLabel,
   currentProfile,
   defaultShell,
   deleteEnv,
+  ENV_SHELLS,
   type Env,
   envFor,
   envScript,
   envSyntaxOf,
   fishQuote,
+  flagSpec,
   formatTable,
+  helpText,
   homeDir,
   hookHint,
   isInside,
@@ -768,5 +776,106 @@ describe("fish hook on a Windows path", () => {
     expect(shellInit("fish", "C:\\Users\\me\\.claudep", "win32")).toContain(
       "set -g _claudep_root 'C:\\\\Users\\\\me\\\\.claudep'",
     );
+  });
+});
+
+describe("the command table", () => {
+  test("every command word that could be a profile name is reserved, plus the two base names", () => {
+    for (const c of COMMANDS)
+      for (const w of [c.name, ...(c.aliases ?? [])]) if (NAME_RE.test(w)) expect(RESERVED.has(w)).toBe(true);
+    expect(RESERVED.has("default")).toBe(true);
+    expect(RESERVED.has("base")).toBe(true);
+    expect(RESERVED.has("completion")).toBe(true);
+    expect(RESERVED.has("--version")).toBe(false);
+  });
+
+  test("commandWords drops flag-shaped aliases", () => {
+    const version = COMMANDS.find((c) => c.name === "version");
+    if (!version) throw new Error("no version command");
+    expect(commandWords(version)).toEqual(["version"]);
+    const rm = COMMANDS.find((c) => c.name === "rm");
+    if (!rm) throw new Error("no rm command");
+    expect(commandWords(rm)).toEqual(["rm", "remove"]);
+  });
+
+  test("flagSpec returns the booleans and the value flags, or nothing for an unknown name", () => {
+    expect(flagSpec("init")).toEqual([
+      ["--sso", "--console", "--copy-mcp", "--no-login", "--force"],
+      ["--email", "--alias"],
+    ]);
+    expect(flagSpec("env")).toEqual([["--unset"], ["--shell"]]);
+    expect(flagSpec("nope")).toEqual([[], []]);
+  });
+
+  test("descriptions carry no colon, which zsh _describe would read as a separator", () => {
+    for (const c of COMMANDS) expect(c.desc).not.toContain(":");
+  });
+
+  test("helpText names every visible command", () => {
+    const text = helpText(layout({ HOME: "/home/me" }, "linux"));
+    for (const c of COMMANDS) {
+      if (c.hidden) continue;
+      const shown = [c.name, ...(c.aliases ?? [])].some((w) => text.includes(`claudep ${w}`));
+      expect(shown).toBe(true);
+    }
+    expect(text).toContain("claudep completion [zsh|bash|fish]");
+  });
+});
+
+describe("completionScript", () => {
+  const root = "/home/me/.claudep";
+  const every = (script: string) => {
+    for (const c of COMMANDS) {
+      for (const w of commandWords(c)) if (!c.hidden) expect(script).toContain(w);
+      // fish spells a long flag as `-l name`; the others keep the dashes.
+      for (const f of c.flags ?? []) expect(script.includes(f) || script.includes(`-l ${f.slice(2)}`)).toBe(true);
+      for (const v of c.valueFlags ?? []) {
+        expect(script.includes(v.name) || script.includes(`-l ${v.name.slice(2)}`)).toBe(true);
+        for (const val of v.values ?? []) expect(script).toContain(val);
+      }
+    }
+    for (const s of SHELLS) expect(script).toContain(s);
+    for (const s of COMPLETION_SHELLS) expect(script).toContain(s);
+    for (const s of ENV_SHELLS) expect(script).toContain(s);
+    // Names come from a glob at completion time; the script never runs claudep.
+    const body = script
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("#"))
+      .join("\n");
+    expect(body).not.toMatch(/claudep\s+(list|ls|resolve|status)/);
+  };
+
+  test("zsh", () => {
+    const s = completionScript("zsh", root);
+    expect(s.startsWith("#compdef claudep\n")).toBe(true);
+    expect(s).toContain("names=(default '/home/me/.claudep'/*(N/:t))");
+    expect(s).toContain("compdef _claudep claudep");
+    expect(s).toContain("'--shell=-:shell:(sh zsh bash fish powershell)'");
+    every(s);
+    expect(completionScript("zsh", "/o'brien")).toContain(`'/o'\\''brien'/*(N/:t)`);
+  });
+
+  test("bash", () => {
+    const s = completionScript("bash", root);
+    expect(s).toContain("local root='/home/me/.claudep' d");
+    expect(s).toContain("complete -F _claudep claudep");
+    expect(s).toContain('[ "$prev" = "--shell" ]');
+    expect(s).not.toMatch(/mapfile|compopt/);
+    every(s);
+  });
+
+  test("fish", () => {
+    const s = completionScript("fish", root);
+    expect(s).toContain("complete -c claudep -f");
+    expect(s).toContain("for d in '/home/me/.claudep'/*/");
+    expect(s).toContain("-l shell -x -a 'sh zsh bash fish powershell'");
+    every(s);
+    expect(completionScript("fish", "/o'brien")).toContain("for d in '/o\\'brien'/*/");
+  });
+
+  test("completionHint is the rc-file line per shell", () => {
+    expect(completionHint("zsh")).toBe('eval "$(claudep completion zsh)"');
+    expect(completionHint("bash")).toBe('eval "$(claudep completion bash)"');
+    expect(completionHint("fish")).toBe("claudep completion fish | source");
   });
 });

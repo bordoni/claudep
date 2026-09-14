@@ -41,10 +41,10 @@ claudep doctor                      # symlink, keychain and classification check
 
 1. Keep the tool one file. New behaviour goes into `claudep.ts`, tests into `test/`, documentation into `.ref/`.
 2. Every shared item is an explicit allowlist entry with a reason recorded in `.ref/shared-vs-private.md`. Unknown files stay private by default.
-3. A profile name must match `NAME_RE` and must not be in `RESERVED`; both live near the top of `claudep.ts`.
+3. A profile name must match `NAME_RE` and must not be in `RESERVED`; both live near the top of `claudep.ts`. `RESERVED` is derived from the `COMMANDS` table, which also feeds every `parseFlags` call through `flagSpec()` and generates the completion scripts. Add a command or flag to the table first.
 4. The string handed to `CLAUDE_CONFIG_DIR` must be canonical (absolute, no trailing slash, NFC) because Claude Code hashes it for the Keychain service name. Always go through `profileDir()` / `canon()`.
 5. Any change to what `init` links or seeds must be reflected in `doctor`, which is the user's only way to see drift. `link()` and `linkState()` are the two halves; keep them agreeing.
-6. Update `README.md` (user-facing), the `help()` text and `test/cli.test.ts` together when a command or flag changes. A change to the shell hook also updates `resolvePin()` and `test/shell.test.ts`; the sh hook, the fish hook, the PowerShell hook and the TypeScript must agree.
+6. Update `README.md` (user-facing), the `COMMANDS` table, the `helpText()` text and `test/cli.test.ts` together when a command or flag changes; the completion scripts follow from the table and `test/completion.test.ts` loads them in real shells. A change to the shell hook also updates `resolvePin()` and `test/shell.test.ts`; the sh hook, the fish hook, the PowerShell hook and the TypeScript must agree.
 7. Every change a user could notice gets a line under `[Unreleased]` in `CHANGELOG.md` in the same change. CI enforces it for pull requests that touch `claudep.ts`.
 8. Helpers take their inputs as parameters and are exported; commands get a `Layout` from `layout()`. Without that the tests cannot redirect paths and the `$HOME` sandbox does nothing.
 9. Compare paths with `samePath()` and `isInside()`, never with `startsWith` or `===`, and split `PATH` with `splitPathVar()`. Every helper that builds or compares a path takes `platform` as its last parameter and goes through `pathApi(platform)`, so the tests can run the win32 branch on any host. Commands read `L.platform`.

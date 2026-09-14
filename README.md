@@ -64,6 +64,7 @@ claudep rm <name> [--keep-login]     log out and delete a profile (base is never
 claudep local <name> | --remove      pin the current directory tree to a profile (see below)
 claudep resolve [dir]                print the profile pinned for a directory
 claudep shell-init [zsh|bash|fish|powershell]   print the hook that applies pins on cd
+claudep completion [zsh|bash|fish]   print tab completions for commands, flags and profile names
 claudep --version
 ```
 
@@ -103,6 +104,21 @@ From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile 
 `claudep env` prints the syntax of the shell it runs in: it looks at its parent process (fish, pwsh, or an sh-like shell) and falls back to your login shell. Pass `--shell sh|fish|powershell` when neither answer fits, for example from a script or a Makefile.
 
 `claudep current` tells you which profile the shell is on and how it got there (hook, manual pin, or nothing). `claudep list` adds the same line at the bottom.
+
+## Tab completion
+
+One line in your rc file completes subcommands, their flags, the values `--shell` and `shell-init` take, and your profile names:
+
+```sh
+eval "$(claudep completion zsh)"      # ~/.zshrc, after compinit
+eval "$(claudep completion bash)"     # ~/.bashrc
+```
+
+```fish
+claudep completion fish | source      # ~/.config/fish/config.fish
+```
+
+Profile names come from a directory listing of `~/.claudep` at the moment you press Tab, so the script never runs claudep and a new profile shows up without reloading anything. In zsh the same output also works as a file: `claudep completion zsh > ~/.zfunc/_claudep` with `~/.zfunc` on `fpath` before `compinit`, if you prefer autoloading over `eval`.
 
 ## Show the profile in your prompt or statusline
 

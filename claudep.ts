@@ -317,26 +317,86 @@ export const SEED_KEYS = [
 ] as const;
 
 export const NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
+
+/** Shells with a directory-pin hook, and the subset with tab completions. */
+export type Shell = "zsh" | "bash" | "fish" | "powershell";
+export const SHELLS: readonly Shell[] = ["zsh", "bash", "fish", "powershell"];
+export const COMPLETION_SHELLS = ["zsh", "bash", "fish"] as const;
+export type CompletionShell = (typeof COMPLETION_SHELLS)[number];
+/** What `claudep env --shell` accepts. */
+export const ENV_SHELLS = ["sh", "zsh", "bash", "fish", "powershell"] as const;
+
+export type ValueFlag = { name: string; values?: readonly string[] };
+export type Command = {
+  name: string;
+  /** One line, no colons: it becomes the zsh _describe and fish -d text. */
+  desc: string;
+  aliases?: readonly string[];
+  /** What the first positional completes to. */
+  arg?: "profile" | "dir" | readonly string[];
+  flags?: readonly string[];
+  valueFlags?: readonly ValueFlag[];
+  /** A real command that the top-level completion does not offer. */
+  hidden?: boolean;
+};
+
+/** One table for the dispatcher's reserved words, every parseFlags call and
+ *  the completion scripts, so none of them can drift from the others. */
+export const COMMANDS: readonly Command[] = [
+  {
+    name: "init",
+    desc: "create or update a profile and log in",
+    arg: "profile",
+    flags: ["--sso", "--console", "--copy-mcp", "--no-login", "--force"],
+    valueFlags: [{ name: "--email" }, { name: "--alias" }],
+  },
+  { name: "run", desc: "run claude with a profile", arg: "profile", hidden: true },
+  { name: "list", desc: "show every profile and who it is logged in as", aliases: ["ls"], flags: ["--json"] },
+  { name: "status", desc: "login state for one profile", arg: "profile", flags: ["--json"] },
+  { name: "current", desc: "which profile this shell is on, and why", flags: ["--json", "--name"] },
+  {
+    name: "env",
+    desc: "print the CLAUDE_CONFIG_DIR pin, or the unset, for your shell",
+    arg: "profile",
+    flags: ["--unset"],
+    valueFlags: [{ name: "--shell", values: ENV_SHELLS }],
+  },
+  { name: "alias", desc: "write a shim command that runs claudep with a profile", arg: "profile" },
+  { name: "doctor", desc: "verify symlinks, keychain entry, unclassified files, Claude Code version", arg: "profile" },
+  {
+    name: "rm",
+    desc: "log out and delete a profile",
+    aliases: ["remove"],
+    arg: "profile",
+    flags: ["--keep-login", "--yes"],
+  },
+  { name: "local", desc: "pin this directory tree to a profile", arg: "profile", flags: ["--remove", "--force"] },
+  { name: "resolve", desc: "print the profile pinned for a directory", arg: "dir", flags: ["--json"] },
+  { name: "shell-init", desc: "print the hook that applies pins on cd", arg: SHELLS },
+  { name: "completion", desc: "print tab completions for a shell", arg: COMPLETION_SHELLS },
+  { name: "help", desc: "show the help" },
+  { name: "version", desc: "print the version", aliases: ["--version"] },
+];
+
+/** The words a completion offers for a command: its name and the aliases
+ *  that are words (a `--version` alias is a flag, not a word). */
+export function commandWords(c: Command): string[] {
+  return [c.name, ...(c.aliases ?? [])].filter((w) => !w.startsWith("-"));
+}
+
+/** Profile names that would collide with the dispatcher. Derived from the
+ *  table plus the two names for the base. */
 export const RESERVED = new Set([
   "default",
   "base",
-  "init",
-  "run",
-  "list",
-  "ls",
-  "status",
-  "env",
-  "doctor",
-  "rm",
-  "remove",
-  "alias",
-  "help",
-  "current",
-  "local",
-  "resolve",
-  "shell-init",
-  "version",
+  ...COMMANDS.flatMap((c) => [c.name, ...(c.aliases ?? [])]).filter((w) => NAME_RE.test(w)),
 ]);
+
+/** The boolean and value flag names a command accepts, for parseFlags. */
+export function flagSpec(name: string): [readonly string[], readonly string[]] {
+  const c = COMMANDS.find((x) => x.name === name);
+  return [c?.flags ?? [], (c?.valueFlags ?? []).map((v) => v.name)];
+}
 
 // ---------------------------------------------------------------------------
 // Output helpers
@@ -817,7 +877,7 @@ export function parseFlags(args: string[], boolNames: readonly string[], strName
 // ---------------------------------------------------------------------------
 
 async function cmdInit(L: Layout, args: string[]): Promise<void> {
-  const f = parseFlags(args, ["--copy-mcp", "--no-login", "--sso", "--console", "--force"], ["--email", "--alias"]);
+  const f = parseFlags(args, ...flagSpec("init"));
   const name = f.rest[0];
   if (!name)
     die(
@@ -1003,7 +1063,7 @@ function rowJson(row: Row): JsonObject {
 }
 
 async function cmdList(L: Layout, args: string[]): Promise<void> {
-  const f = parseFlags(args, ["--json"], []);
+  const f = parseFlags(args, ...flagSpec("list"));
   const names = ["default", ...listProfileNames(L)];
   const rows = await collectRows(L, names);
   if (f.bools.has("--json")) {
@@ -1017,7 +1077,7 @@ async function cmdList(L: Layout, args: string[]): Promise<void> {
 }
 
 async function cmdStatus(L: Layout, args: string[]): Promise<void> {
-  const f = parseFlags(args, ["--json"], []);
+  const f = parseFlags(args, ...flagSpec("status"));
   const name = f.rest[0];
   if (!name) die("usage: claudep status <name> [--json]");
   if (name !== "default" && !profileExists(L, name)) die(`profile "${name}" does not exist`);
@@ -1042,7 +1102,7 @@ export function envUnsetHint(syntax: EnvSyntax): string {
 }
 
 function cmdEnv(L: Layout, args: string[]): void {
-  const f = parseFlags(args, ["--unset"], ["--shell"]);
+  const f = parseFlags(args, ...flagSpec("env"));
   const forced = f.strs.get("--shell");
   const syntax =
     forced === undefined ? shellSyntax(process.env, L.platform, parentProcessName(L.platform)) : envSyntaxOf(forced);
@@ -1070,7 +1130,7 @@ export function currentLabel(cur: Current): string {
 }
 
 function cmdCurrent(L: Layout, args: string[]): void {
-  const f = parseFlags(args, ["--json", "--name"], []);
+  const f = parseFlags(args, ...flagSpec("current"));
   const cur = currentProfile(L);
   const label = currentLabel(cur);
   if (f.bools.has("--name")) {
@@ -1100,7 +1160,7 @@ function cmdCurrent(L: Layout, args: string[]): void {
 }
 
 function cmdResolve(L: Layout, args: string[]): void {
-  const f = parseFlags(args, ["--json"], []);
+  const f = parseFlags(args, ...flagSpec("resolve"));
   const start = f.rest[0] ?? process.cwd();
   const pin = resolvePin(start);
   if (!pin || pin.name === "") process.exit(1);
@@ -1111,7 +1171,7 @@ function cmdResolve(L: Layout, args: string[]): void {
 }
 
 function cmdLocal(L: Layout, args: string[]): void {
-  const f = parseFlags(args, ["--remove", "--force"], []);
+  const f = parseFlags(args, ...flagSpec("local"));
   const file = join(process.cwd(), PIN_FILE);
   if (f.bools.has("--remove")) {
     if (!existsSync(file)) die(`no ${PIN_FILE} in ${process.cwd()}`);
@@ -1140,9 +1200,8 @@ function cmdLocal(L: Layout, args: string[]): void {
 
 /** The shell hook. Pure parameter expansion and builtins: it runs on every
  *  directory change (zsh chpwd) or prompt (bash PROMPT_COMMAND), so no
- *  subprocess is allowed here. Logic mirrors resolvePin(). */
-export type Shell = "zsh" | "bash" | "fish" | "powershell";
-export const SHELLS: readonly Shell[] = ["zsh", "bash", "fish", "powershell"];
+ *  subprocess is allowed here. Logic mirrors resolvePin(). `Shell` and
+ *  `SHELLS` live next to the command table. */
 
 /** The shell to name in hints and to default `shell-init` to. */
 export function defaultShell(env: Env = process.env, platform: NodeJS.Platform = process.platform): Shell {
@@ -1423,6 +1482,186 @@ function cmdShellInit(L: Layout, args: string[]): void {
   process.stdout.write(shellInit(shell as Shell, L.profilesRoot, L.platform));
 }
 
+// ---------------------------------------------------------------------------
+// Tab completions, generated from COMMANDS. Profile names come from a glob
+// over the profiles root at completion time; no script ever runs claudep.
+// ---------------------------------------------------------------------------
+
+/** The one rc-file line that loads the completions. */
+export function completionHint(shell: CompletionShell): string {
+  return shell === "fish" ? "claudep completion fish | source" : `eval "$(claudep completion ${shell})"`;
+}
+
+const visibleCommands = () => COMMANDS.filter((c) => !c.hidden);
+const isList = (arg: Command["arg"]): arg is readonly string[] => arg !== undefined && typeof arg !== "string";
+
+export function completionScript(shell: CompletionShell, profilesRoot: string): string {
+  if (shell === "zsh") return zshCompletion(profilesRoot);
+  if (shell === "bash") return bashCompletion(profilesRoot);
+  return fishCompletion(profilesRoot);
+}
+
+/** Dual-mode: `eval "$(claudep completion zsh)"` after compinit registers it
+ *  with compdef; saved as `_claudep` on fpath, the #compdef line and the
+ *  funcstack check make it autoload. Names come from a glob with (N/:t):
+ *  nothing on an empty root, directories only, basename. */
+function zshCompletion(profilesRoot: string): string {
+  const q = `'${profilesRoot.replace(/'/g, `'\\''`)}'`;
+  const noColon = (s: string) => s.replace(/:/g, "\\:");
+  const cmds = visibleCommands().flatMap((c) => commandWords(c).map((w) => `    '${w}:${noColon(c.desc)}'`));
+  const cases = COMMANDS.filter((c) => c.arg || c.flags || c.valueFlags).map((c) => {
+    const specs: string[] = [];
+    if (c.arg === "profile") specs.push("'1:profile:_claudep_profiles'");
+    else if (c.arg === "dir") specs.push("'1:directory:_files -/'");
+    else if (isList(c.arg)) specs.push(`'1:shell:(${c.arg.join(" ")})'`);
+    if (c.name === "run") specs.push("'*:claude arguments:'");
+    for (const f of c.flags ?? []) specs.push(`'${f}'`);
+    for (const v of c.valueFlags ?? [])
+      specs.push(`'${v.name}=-:${v.name.slice(2)}:${v.values ? `(${v.values.join(" ")})` : ""}'`);
+    return `        ${commandWords(c).join("|")}) _arguments ${specs.join(" ")} ;;`;
+  });
+  return `#compdef claudep
+# claudep completions. Load them after compinit in ~/.zshrc:  ${completionHint("zsh")}
+_claudep_profiles() {
+  local -a names
+  names=(default ${q}/*(N/:t))
+  _describe -t profiles 'profile' names
+}
+_claudep() {
+  local -a cmds
+  cmds=(
+${cmds.join("\n")}
+  )
+  _arguments -C '1:command:->cmd' '*::arg:->args'
+  case $state in
+    cmd)
+      _describe -t commands 'claudep command' cmds
+      _claudep_profiles
+      ;;
+    args)
+      case $words[1] in
+${cases.join("\n")}
+      esac
+      ;;
+  esac
+}
+if [ "\${funcstack[1]}" = "_claudep" ]; then _claudep "$@"; else compdef _claudep claudep; fi
+`;
+}
+
+/** bash 3.2 safe: no mapfile, no compopt. The root's backslashes become
+ *  slashes so a Git Bash user with a C:\\ root still globs. */
+function bashCompletion(profilesRoot: string): string {
+  const q = `'${profilesRoot.replace(/'/g, `'\\''`)}'`;
+  const top = [...visibleCommands().flatMap(commandWords), "default"].join(" ");
+  const flagCases = COMMANDS.filter((c) => c.flags || c.valueFlags).map(
+    (c) =>
+      `        ${commandWords(c).join("|")}) words="${[...(c.flags ?? []), ...(c.valueFlags ?? []).map((v) => v.name)].join(" ")}" ;;`,
+  );
+  const valued = COMMANDS.flatMap((c) => (c.valueFlags ?? []).filter((v) => v.values));
+  const valueBranches = valued.map(
+    (v, i) => `      ${i === 0 ? "if" : "elif"} [ "$prev" = "${v.name}" ]; then words="${(v.values ?? []).join(" ")}"`,
+  );
+  const argCases = COMMANDS.filter((c) => c.arg).map((c) => {
+    const names = commandWords(c).join("|");
+    if (c.arg === "profile") return `          ${names}) words="default $(_claudep_profiles)" ;;`;
+    if (c.arg === "dir") return `          ${names}) COMPREPLY=($(compgen -d -- "$cur")); return 0 ;;`;
+    return `          ${names}) words="${isList(c.arg) ? c.arg.join(" ") : ""}" ;;`;
+  });
+  return `# claudep completions. Load them from ~/.bashrc:  ${completionHint("bash")}
+_claudep_profiles() {
+  local root=${q} d
+  root=\${root//\\\\//}
+  for d in "$root"/*/; do
+    d=\${d%/}
+    [ -d "$d" ] && printf '%s\\n' "\${d##*/}"
+  done
+}
+_claudep() {
+  local cur prev cmd words=""
+  cur=\${COMP_WORDS[COMP_CWORD]}
+  prev=\${COMP_WORDS[COMP_CWORD-1]}
+  cmd=\${COMP_WORDS[1]}
+  COMPREPLY=()
+  if [ "$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=($(compgen -W "${top} $(_claudep_profiles)" -- "$cur"))
+    return 0
+  fi
+  case $cur in
+    -*)
+      case $cmd in
+${flagCases.join("\n")}
+      esac
+      ;;
+    *)
+${valueBranches.join("\n")}
+      ${valueBranches.length ? "elif" : "if"} [ "$COMP_CWORD" -eq 2 ]; then
+        case $cmd in
+${argCases.join("\n")}
+        esac
+      fi
+      ;;
+  esac
+  COMPREPLY=($(compgen -W "$words" -- "$cur"))
+}
+complete -F _claudep claudep
+`;
+}
+
+/** The two conditions are written out over `commandline -opc` instead of
+ *  fish's __fish_use_subcommand and __fish_seen_subcommand_from, whose
+ *  names moved between versions. `for` over an unmatched glob runs zero
+ *  times, so an empty root offers only `default`. */
+function fishCompletion(profilesRoot: string): string {
+  const lines: string[] = [];
+  for (const c of visibleCommands())
+    for (const w of commandWords(c))
+      lines.push(`complete -c claudep -n '__claudep_at 1' -a ${w} -d ${fishQuote(c.desc)}`);
+  lines.push("complete -c claudep -n '__claudep_at 1' -a '(__claudep_profiles)' -d profile");
+  const profileCmds = COMMANDS.filter((c) => c.arg === "profile")
+    .flatMap(commandWords)
+    .join(" ");
+  lines.push(
+    `complete -c claudep -n '__claudep_cmd ${profileCmds}; and __claudep_at 2' -a '(__claudep_profiles)' -d profile`,
+  );
+  for (const c of COMMANDS) {
+    const ws = commandWords(c).join(" ");
+    if (isList(c.arg))
+      lines.push(`complete -c claudep -n '__claudep_cmd ${ws}; and __claudep_at 2' -a '${c.arg.join(" ")}'`);
+    if (c.arg === "dir")
+      lines.push(`complete -c claudep -n '__claudep_cmd ${ws}; and __claudep_at 2' -a '(__fish_complete_directories)'`);
+    for (const f of c.flags ?? []) lines.push(`complete -c claudep -n '__claudep_cmd ${ws}' -l ${f.slice(2)}`);
+    for (const v of c.valueFlags ?? [])
+      lines.push(
+        `complete -c claudep -n '__claudep_cmd ${ws}' -l ${v.name.slice(2)} -x${v.values ? ` -a '${v.values.join(" ")}'` : ""}`,
+      );
+  }
+  return `# claudep completions. Load them from ~/.config/fish/config.fish:  ${completionHint("fish")}
+function __claudep_profiles
+  echo default
+  for d in ${fishQuote(profilesRoot)}/*/
+    string replace -r -- '^.*/([^/]+)/$' '$1' $d
+  end
+end
+function __claudep_at -a n
+  test (count (commandline -opc)) -eq $n
+end
+function __claudep_cmd
+  set -l t (commandline -opc)
+  test (count $t) -ge 2; and contains -- $t[2] $argv
+end
+complete -c claudep -f
+${lines.join("\n")}
+`;
+}
+
+function cmdCompletion(L: Layout, args: string[]): void {
+  const shell = args[0] ?? defaultShell(process.env, L.platform);
+  if (!COMPLETION_SHELLS.includes(shell as CompletionShell))
+    die(`no completions for "${shell}". Use ${COMPLETION_SHELLS.join(", ")}`);
+  process.stdout.write(completionScript(shell as CompletionShell, L.profilesRoot));
+}
+
 /** A POSIX-style CLAUDE_CONFIG_DIR on Windows is one claude.exe cannot read. */
 function msysConfigDirWarning(L: Layout, env: Env = process.env): string | undefined {
   const cfg = env.CLAUDE_CONFIG_DIR;
@@ -1523,7 +1762,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
 }
 
 async function cmdRm(L: Layout, args: string[]): Promise<void> {
-  const f = parseFlags(args, ["--keep-login", "--yes"], []);
+  const f = parseFlags(args, ...flagSpec("rm"));
   const name = f.rest[0];
   if (!name) die("usage: claudep rm <name> [--keep-login] [--yes]");
   const dir = profileDir(L, name);
@@ -1582,8 +1821,14 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
 }
 
 function help(L: Layout): void {
+  console.log(helpText(L));
+}
+
+/** Hand-written on purpose: the layout says more than the table can. A test
+ *  checks that every command in COMMANDS appears in it. */
+export function helpText(L: Layout): string {
   const root = shortHome(L.profilesRoot, L.home, L.platform);
-  console.log(`${c.bold("claudep")} ${c.dim(version())}: run Claude Code under separate accounts on one machine
+  return `${c.bold("claudep")} ${c.dim(version())}: run Claude Code under separate accounts on one machine
 
 ${c.bold("USAGE")}
   claudep <name> [claude args…]        run claude with profile <name>  (alias for "run")
@@ -1596,13 +1841,18 @@ ${c.bold("USAGE")}
   claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
   claudep doctor [name]                verify symlinks, keychain entry, unclassified files, Claude Code version
   claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
+  claudep help                         show this text
   claudep --version                    print the version
 
 ${c.bold("DIRECTORY PINS")}
   claudep local <name> [--force]       write ./${PIN_FILE} so this tree uses <name>; --remove deletes it
   claudep local                        show the pin that applies to the current directory
   claudep resolve [dir] [--json]       print the profile pinned for a directory (exit 1 when none)
-  claudep shell-init [zsh|bash|fish|powershell]   print the hook that applies pins on cd; load it from your rc file
+  claudep shell-init [${SHELLS.join("|")}]   print the hook that applies pins on cd; load it from your rc file
+
+${c.bold("TAB COMPLETION")}
+  claudep completion [${COMPLETION_SHELLS.join("|")}]   print completions for commands, flags and profile names;
+                                       load them from your rc file (after compinit in zsh)
 
 ${c.bold("INIT OPTIONS")}
   --sso               force the SSO login flow (Enterprise orgs)
@@ -1625,6 +1875,7 @@ ${c.bold("EXAMPLES")}
   eval "$(claudep shell-init zsh)"              # in .zshrc: shells follow ${PIN_FILE} pins on cd
   ${hookHint("fish")}              # the same line for config.fish
   ${hookHint("powershell")}   # the same line for $PROFILE
+  ${completionHint("zsh")}             # in .zshrc after compinit: tab completion
 
 ${c.bold("HOW IT WORKS")}
   ~/.claude stays exactly as it is and remains the "default" profile. Each named profile is a
@@ -1649,7 +1900,7 @@ ${c.bold("ENVIRONMENT")}
   CLAUDEP_AUTO          set by the hook next to CLAUDE_CONFIG_DIR; marks the pin as hook-managed
 
 ${c.dim("claudep is an independent, unofficial tool. It is not affiliated with, endorsed by or supported by Anthropic.")}
-`);
+`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1685,6 +1936,8 @@ export async function main(argv: string[]): Promise<void> {
       return cmdResolve(L, args);
     case "shell-init":
       return cmdShellInit(L, args);
+    case "completion":
+      return cmdCompletion(L, args);
     case "version":
     case "--version":
     case "-v":

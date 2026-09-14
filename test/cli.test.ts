@@ -758,3 +758,34 @@ describe("env detects the shell it runs in", () => {
     expect(out).toBe(envScript(join(h.profilesRoot, "smoke"), "powershell"));
   });
 });
+
+describe("completion", () => {
+  test("prints a script for zsh, bash and fish that embeds the profiles root", async () => {
+    using h = fakeHome();
+    for (const shell of ["zsh", "bash", "fish"] as const) {
+      const r = await runCli(["completion", shell], { home: h.home });
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain(shell === "fish" ? fishQuote(h.profilesRoot) : `'${h.profilesRoot}'`);
+    }
+    const ps = await runCli(["completion", "powershell"], { home: h.home });
+    expect(ps.exitCode).toBe(1);
+    expect(ps.stderr).toContain("no completions");
+  });
+
+  test("bare completion follows $SHELL; the script never lists profiles itself", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const r = await runCli(["completion"], { home: h.home, env: { SHELL: "/usr/bin/fish", MSYSTEM: "MINGW64" } });
+    expect(r.stdout).toContain("complete -c claudep -f");
+    expect(r.stdout).not.toContain("-a work");
+  });
+
+  test("help mentions completion, and the word is a reserved profile name", async () => {
+    using h = fakeHome();
+    const help = await runCli(["help"], { home: h.home });
+    expect(help.stdout).toContain("claudep completion");
+    const r = await runCli(["init", "completion", "--no-login"], { home: h.home });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("reserved");
+  });
+});
