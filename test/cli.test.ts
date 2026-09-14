@@ -776,8 +776,9 @@ describe("completion", () => {
     using h = fakeHome();
     await runCli(["init", "work", "--no-login"], { home: h.home });
     const r = await runCli(["completion"], { home: h.home, env: { SHELL: "/usr/bin/fish", MSYSTEM: "MINGW64" } });
-    expect(r.stdout).toContain("complete -c claudep -f");
-    expect(r.stdout).not.toContain("-a work");
+    // On Windows the shell is Git Bash whenever MSYSTEM is set, whatever $SHELL says.
+    expect(r.stdout).toContain(WIN ? "complete -F _claudep claudep" : "complete -c claudep -f");
+    expect(r.stdout).not.toMatch(/\bwork\b/);
   });
 
   test("help mentions completion, and the word is a reserved profile name", async () => {
