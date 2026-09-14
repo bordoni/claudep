@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-14
+
 ### Added
 
 - `claudep completion zsh|bash|fish` prints tab completions for every subcommand, its flags, the values `--shell`, `shell-init` and `completion` take, and your profile names. Load it with `eval "$(claudep completion zsh)"` after `compinit`, `eval "$(claudep completion bash)"`, or `claudep completion fish | source`. Profile names are read from `~/.claudep` when you press Tab, so the script never runs claudep.
@@ -84,7 +86,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
-[Unreleased]: https://github.com/bordoni/claudep/compare/0.3.0...HEAD
+[Unreleased]: https://github.com/bordoni/claudep/compare/0.4.0...HEAD
+[0.4.0]: https://github.com/bordoni/claudep/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/bordoni/claudep/compare/0.2.1...0.3.0
 [0.2.1]: https://github.com/bordoni/claudep/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/bordoni/claudep/compare/0.1.1...0.2.0
