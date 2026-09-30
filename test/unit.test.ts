@@ -30,7 +30,9 @@ import {
   isMsysPath,
   keychainService,
   layout,
+  MEMORY_SYMLINK_PROMPT_FROM,
   MIN_CLAUDE_VERSION,
+  memoryWritesPrompt,
   NAME_RE,
   onPath,
   PIN_FILE,
@@ -706,6 +708,17 @@ describe("doctor and run hardening helpers", () => {
     expect(versionBelow([2, 1, 263], [2, 1, 144])).toBe(false);
     expect(versionBelow([2, 0, 999], [2, 1, 0])).toBe(true);
     expect(versionBelow([10, 0, 0], [9, 9, 9])).toBe(false);
+  });
+
+  test("memoryWritesPrompt needs 2.1.280 or later and a shared projects/", () => {
+    const projects = [{ name: "projects", kind: "dir" as const }];
+    const skills = [{ name: "skills", kind: "dir" as const }];
+    expect(parseVersion(MEMORY_SYMLINK_PROMPT_FROM)).toEqual([2, 1, 280]);
+    expect(memoryWritesPrompt([2, 1, 279], projects)).toBe(false);
+    expect(memoryWritesPrompt([2, 1, 280], projects)).toBe(true);
+    expect(memoryWritesPrompt([2, 1, 285], projects)).toBe(true);
+    expect(memoryWritesPrompt([2, 1, 285], skills)).toBe(false);
+    expect(memoryWritesPrompt(undefined, projects)).toBe(false);
   });
 
   test("authEnvOverrides lists set, non-empty credential variables", () => {

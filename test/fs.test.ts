@@ -10,6 +10,7 @@ import {
   type SharedItem,
   seedGlobalJson,
   sharedItems,
+  staleSharedLinks,
 } from "../claudep.ts";
 import {
   BASE_DIRS,
@@ -46,6 +47,32 @@ describe("sharedItems", () => {
   test("is empty when the base does not exist", () => {
     using h = fakeHome({ withoutBase: true });
     expect(sharedItems(h.base)).toEqual([]);
+  });
+
+  test("never shares a top-level *.md that Claude Code keeps per instance", () => {
+    using h = fakeHome();
+    writeFileSync(join(h.base, "loop.md"), "# loop\n");
+    const names = sharedItems(h.base).map((i) => i.name);
+    expect(names).not.toContain("loop.md");
+    expect(names).toContain("RTK.md");
+  });
+});
+
+describe("staleSharedLinks", () => {
+  test("names known-private symlinks into the base and nothing else", () => {
+    using h = fakeHome();
+    writeFileSync(join(h.base, "loop.md"), "# loop\n");
+    const dir = join(h.profilesRoot, "smoke");
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(join(h.base, "loop.md"), join(dir, "loop.md"), "file");
+    symlinkSync(join(h.base, "CLAUDE.md"), join(dir, "CLAUDE.md"), "file");
+    writeFileSync(join(dir, "history.jsonl"), "");
+    expect(staleSharedLinks(h.base, dir)).toEqual(["loop.md"]);
+  });
+
+  test("is empty for a missing profile dir", () => {
+    using h = fakeHome();
+    expect(staleSharedLinks(h.base, join(h.profilesRoot, "nope"))).toEqual([]);
   });
 });
 

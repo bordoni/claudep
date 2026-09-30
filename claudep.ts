@@ -250,8 +250,9 @@ export const SHARED_DIRS = [
   "workflows",
 ] as const;
 
-/** Per-profile state. First block is Claude Code's own runtime-state list;
- *  the rest are observed extras. Never shared. */
+/** Per-profile state. First block is Claude Code's own runtime-state list as of
+ *  2.1.263, then observed extras, then what 2.1.280 added to that list. Never
+ *  shared, and a name here is never shared by the top-level *.md rule either. */
 export const KNOWN_PRIVATE = new Set<string>([
   ".claude.json",
   ".claude.json.backup",
@@ -301,6 +302,42 @@ export const KNOWN_PRIVATE = new Set<string>([
   "launch.json",
   "scheduled_tasks.json",
   "seed-admin",
+  // Added to Claude Code's runtime-state list by 2.1.280 (checked 2026-09-30).
+  "state",
+  "policy-limits.json.stamp.json",
+  "policy-limits.json.signature.json",
+  "policy-limits.json.signature-iat.json",
+  "remote-settings.json.signature.json",
+  "remote-settings.json.signature-iat.json",
+  "remote-settings-consent.json",
+  "remote-settings-helper-consent",
+  "hfi-auth.json",
+  "shares",
+  "storage-v2",
+  "daemon.lock",
+  "gh-pr-status-cache.json",
+  "active-time.json",
+  "server-sessions.json",
+  "image-cache",
+  "file-transfers",
+  "computer-use.lock",
+  "server.lock",
+  "downloads",
+  "scratch",
+  "traces",
+  "startup-perf",
+  "feedback-bundles",
+  "ccr",
+  "bridge-spawn",
+  "local-settings",
+  "project-settings",
+  "remote",
+  "systemd",
+  "api-dumps",
+  "dump-prompts",
+  "antproto.json",
+  ".cc-writes",
+  "loop.md",
 ]);
 
 /** Keys copied from the base .claude.json into a fresh profile so first-run
@@ -462,7 +499,8 @@ export function sharedItems(base: string): SharedItem[] {
   for (const f of SHARED_FILES) push(f, "file");
   if (existsSync(base)) {
     for (const entry of readdirSync(base, { withFileTypes: true })) {
-      if (entry.name.endsWith(".md") && !entry.isDirectory()) push(entry.name, "file");
+      if (entry.name.endsWith(".md") && !entry.isDirectory() && !KNOWN_PRIVATE.has(entry.name))
+        push(entry.name, "file");
     }
   }
   for (const d of SHARED_DIRS) push(d, "dir");
@@ -557,6 +595,18 @@ export function linkState(
   return existsSync(dest) ? "ok" : "broken";
 }
 
+/** Known-private names in a profile that are still symlinks into the base.
+ *  An older claudep linked every top-level *.md, which once included loop.md;
+ *  link() never deletes, so doctor names them for the user to remove. */
+export function staleSharedLinks(base: string, dir: string, platform: NodeJS.Platform = process.platform): string[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isSymbolicLink() && KNOWN_PRIVATE.has(e.name))
+    .filter((e) => samePath(readlinkSync(join(dir, e.name)), join(base, e.name), platform))
+    .map((e) => e.name)
+    .sort();
+}
+
 /** What to tell the user when the OS refused to create a symlink. */
 export function symlinkDeniedHint(platform: NodeJS.Platform, name: string): string {
   if (platform === "win32")
@@ -598,7 +648,22 @@ export function authEnvOverrides(env: Env = process.env, platform: NodeJS.Platfo
  *  dir. Before it every config dir shared one login. */
 export const MIN_CLAUDE_VERSION = "2.1.144";
 
+/** From this Claude Code on, a write through a symlink is also judged at the
+ *  path it lands on. Auto memory in a profile whose projects/ is shared lands
+ *  in ~/.claude/projects and asks for approval on every write, which auto mode
+ *  cannot give (anthropics/claude-code#98044). No fixed version yet. */
+export const MEMORY_SYMLINK_PROMPT_FROM = "2.1.280";
+export const MEMORY_SYMLINK_ISSUE = "https://github.com/anthropics/claude-code/issues/98044";
+
 export type Version = [number, number, number];
+
+/** True when this Claude Code prompts on every auto-memory write through the
+ *  shared projects/ symlink. An unknown version is not reported. */
+export function memoryWritesPrompt(v: Version | undefined, shared: readonly SharedItem[]): boolean {
+  const from = parseVersion(MEMORY_SYMLINK_PROMPT_FROM);
+  if (!v || !from || versionBelow(v, from)) return false;
+  return shared.some((s) => s.name === "projects");
+}
 
 /** The first x.y.z in `claude --version` output. */
 export function parseVersion(text: string): Version | undefined {
@@ -1672,6 +1737,7 @@ function msysConfigDirWarning(L: Layout, env: Env = process.env): string | undef
 async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
   const names = args[0] ? [args[0]] : listProfileNames(L);
   let problems = 0;
+  let v: Version | undefined;
   const launch = findClaude();
   if (launch && launch.kind !== "ps1") {
     const { out } = await captureClaude(L, undefined, ["--version"]);
@@ -1680,7 +1746,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       console.log(
         `${c.dim("·")} claude is the npm cmd shim and runs through cmd.exe; the native installer's claude.exe avoids that hop`,
       );
-    const v = parseVersion(out);
+    v = parseVersion(out);
     const floor = parseVersion(MIN_CLAUDE_VERSION);
     if (L.platform === "darwin" && v && floor && versionBelow(v, floor)) {
       bad(
@@ -1715,6 +1781,10 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
   if (unclassified.length) {
     warn(`base items neither shared nor known-private (they stay per-profile): ${unclassified.join(", ")}`);
   }
+  if (memoryWritesPrompt(v, shared))
+    warn(
+      `Claude Code ${v?.join(".")} asks for approval on every auto-memory write in a profile, because projects/ is shared through a symlink; auto mode cannot approve it. Known upstream bug: ${MEMORY_SYMLINK_ISSUE}`,
+    );
 
   for (const name of names) {
     const dir = profileDir(L, name);
@@ -1744,13 +1814,23 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
     ok(`${shared.length} shared item(s) checked`);
     const strays = readdirSync(dir).filter((n) => !sharedNames.has(n) && !KNOWN_PRIVATE.has(n) && !n.endsWith(".md"));
     if (strays.length) warn(`unexpected private items: ${strays.join(", ")}`);
+    for (const n of staleSharedLinks(L.base, dir, L.platform)) {
+      bad(
+        `${n}: linked to the base by an older claudep, but it is per-profile state now. Remove the symlink: ${join(dir, n)}`,
+      );
+      problems++;
+    }
+    const s = await authStatus(L, dir);
     if (L.platform === "darwin") {
       const svc = keychainService(dir);
       if (await keychainHas(svc)) ok(`keychain item "${svc}" present`);
       else warn(`no keychain item "${svc}". Not logged in yet (claudep ${name} auth login)`);
     } else if (credentialsFileHas(dir)) ok(".credentials.json present");
+    else if (s.loggedIn)
+      console.log(
+        `${c.dim("·")} no .credentials.json in the profile; Claude Code keeps this login elsewhere (on Windows, possibly Credential Manager)`,
+      );
     else warn(`no .credentials.json in the profile. Not logged in yet (claudep ${name} auth login)`);
-    const s = await authStatus(L, dir);
     if (s.loggedIn) ok(`logged in as ${s.email ?? "?"} (${s.orgName ?? "?"}, ${s.subscriptionType ?? "?"})`);
     else warn("not logged in");
   }

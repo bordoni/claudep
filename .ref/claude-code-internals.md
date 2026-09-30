@@ -1,6 +1,6 @@
 # Claude Code internals that claudep depends on
 
-Verified against the native macOS binary **Claude Code 2.1.263** (`~/.local/share/claude/versions/2.1.263`, arm64, ~200 MB) on 2026-09-07 by extracting minified source around known strings. First verified against 2.1.259 on 2026-09-02; nothing below changed between the two except the additions marked with the later date. Re-verify after major updates; the "How to re-verify" section shows how.
+Verified against the native macOS binary **Claude Code 2.1.280** (`~/.local/share/claude/versions/2.1.280`, arm64) on 2026-09-30 by extracting minified source around known strings. Earlier passes: 2.1.259 on 2026-09-02, 2.1.263 on 2026-09-07. Minified names change between builds (`Se()` is `we()` in 2.1.280, the runtime-state set `Bi` is `ca`); the snippets below keep the 2.1.263 names unless a section says otherwise. Sections 3, 7 and 9 changed in 2.1.280; sections 10 to 12 are new. Re-verify after major updates; the "How to re-verify" section shows how.
 
 ## 1. `.claude.json` moves inside the config dir
 
@@ -38,6 +38,8 @@ shell-snapshots  statsig  file-history  history.jsonl  ide  logs  backups
 
 This is Anthropic's own boundary between config and per-instance state and is the backbone of `KNOWN_PRIVATE`. claudep deliberately shares `projects/` anyway; see `shared-vs-private.md`.
 
+**2.1.280 (2026-09-30).** The set is `ca` and has grown. It now also holds `policy-limits.json`, `remote-settings.json`, their `.signature.json` and `.signature-iat.json` companions, `policy-limits.json.stamp.json`, `remote-settings-helper-consent`, `remote-settings-consent.json`, `hfi-auth.json`, `daemon`, `jobs`, `teams`, `usage-data`, `shares`, `state`, `uploads`, `feedback`, `feedback-bundles`, `plans`, `telemetry`, `dump-prompts`, `debug`, `traces`, `startup-perf`, `cache`, `mcp-discovery-cache`, `mcp-needs-auth-cache.json`, `gh-pr-status-cache.json`, `tasks`, `local`, `antproto.json`, `ccr`, `session-env`, `bridge-spawn`, `active-time.json`, `loop.md`, `server-sessions.json`, `image-cache`, `paste-cache`, `file-transfers`, `mcp-skill-archives`, `stats-cache.json`, `computer-use.lock`, `server.lock`, `api-dumps`, `chrome`, `downloads`, `local-settings`, `project-settings`, `remote`, `scratch`, `seed-admin`, `storage-v2`, `systemd` and `.cc-writes` (`var DL=".cc-writes"`, the temporary directory of the atomic-write helper). `plans` and `loop.md` are the two that touch claudep's shared list; see `shared-vs-private.md`.
+
 ## 4. Subdirectories Claude Code knows inside the config dir (2026-09-07)
 
 The storage layer's `userConfigDir` namespace lists these directories:
@@ -67,6 +69,8 @@ The binary scans `projectSettings` and `localSettings` for an `env.CLAUDE_CONFIG
 
 `claude daemon install` exits with "service install only supports the default config dir" when `CLAUDE_CONFIG_DIR` is set, and the launcher's daemon check (`if(process.env.CLAUDE_CONFIG_DIR||!await ole())return!1`) makes `claude --bg` run unwrapped under a profile. Nothing for claudep to do beyond the README note.
 
+Both checks are unchanged in 2.1.280 (the install message now adds "the launchd/systemd unit is a per-user singleton"). Anthropic's agent-view docs now say a `CLAUDE_CONFIG_DIR` session gets its own supervisor, and upstream #97680 reports 2.1.280 writing `daemon.lock` into the profile but `daemon.json` and `daemon.log` into `~/.claude`, reportedly fixed in 2.1.281. Re-check this section on 2.1.285.
+
 ## 8. `CLAUDE_CODE_PROJECT_DIR_NAME` (2026-09-07)
 
 Read only when `CLAUDE_CONFIG_DIR` is set (`Wt()`: `t.CLAUDE_CONFIG_DIR ? ROn(t.CLAUDE_CODE_PROJECT_DIR_NAME) : void 0`). It must match `/^[A-Za-z0-9_-]{1,64}$/` and not be a Windows device name, and it pins the `projects/<name>` directory for transcripts and auto memory. claudep does not set it; users who want one memory directory for every repo opened under a profile can export it themselves.
@@ -80,6 +84,22 @@ claude auth status [--json|--text]
 ```
 
 `auth status --json` fields: `loggedIn, authMethod, apiProvider, analyticsDisabled, projectsDirectory, email, orgId, orgName, subscriptionType`. No secrets. Exit code is 1 when not logged in. claudep's `authStatus()` parses this.
+
+2.1.280 adds `configDirectory` (the resolved config dir, `we()`, since 2.1.268), and `forcedLoginMethod` and `apiKeySource` when they apply. `email`, `orgId`, `orgName` and `subscriptionType` appear only when `authMethod` is `claude.ai`; a gateway provider adds `email` alone. The subcommands are unchanged.
+
+## 10. The Anthropic profile store and `ANTHROPIC_PROFILE` (2026-09-30)
+
+Claude Code has a second credential location that does not follow `CLAUDE_CONFIG_DIR`: `$ANTHROPIC_CONFIG_DIR`, else `$XDG_CONFIG_HOME/anthropic`, else `~/.config/anthropic`. It holds `active_config`, `configs/<name>.json` and `credentials/<name>.json`, and `ANTHROPIC_PROFILE` picks the entry. Auth kinds are `user_oauth` and `oidc_federation`. Console sign-ins made without an API key (since 2.1.242) are stored here, so every claudep profile sees the same ones. Claude Code refuses to write the store from a tool call ("The Anthropic profile store holds the sign-in that decides which organization policy applies"). This is the reason per-profile variables were planned for 0.5.0: a profile that sets `ANTHROPIC_PROFILE` picks its own Console sign-in.
+
+## 11. Writes through a symlink are judged where they land (2026-09-30)
+
+Since 2.1.280 the write-permission check builds every spelling of a path, the requested one and the symlink landing, and all of them must pass. The auto-memory exception compares with `startsWith(<CLAUDE_CONFIG_DIR>/projects/<slug>/memory/)`, so in a claudep profile the landing `~/.claude/projects/...` fails it, and the sensitive-file check then flags the `.claude` segment. The prompt is marked not approvable by the auto-mode classifier, and allow rules and PreToolUse hooks run too late to help. Upstream: anthropics/claude-code#98044 and #97585, open through 2.1.285. `claudep doctor` warns from `MEMORY_SYMLINK_PROMPT_FROM`.
+
+The setting that might route around it is `autoMemoryDirectory` (`R_()` reads it from `policySettings`, `flagSettings`, `userSettings`, and project settings only when trusted). The default is `~/.claude/projects/<sanitized-cwd>/memory/`. `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` is a fixed override. Neither is set by claudep yet.
+
+## 12. Windows Credential Manager (2026-09-30)
+
+Credential stores come in three kinds, `keychain`, `plaintext` and `windows-credman`, and fallback pairs such as `windows-credman-with-plaintext-fallback`. Credential Manager is on when `CLAUDE_CODE_FORCE_WINDOWS_CREDMAN=1`, or when `cachedGrowthBookFeatures.tengu_windows_credman` is true in the config dir's `.claude.json` (`ivr()`), so a server-side flag can switch one profile and not another. The Windows-only code that names the Credential Manager entry is not in the macOS build, so whether it is namespaced per config dir like the Keychain item is not verified. `claudep doctor` on Windows no longer calls a profile without `.credentials.json` logged out when `auth status` says it is logged in. Verify the entry name on a Windows machine when the flag is seen in the wild.
 
 ## How to re-verify
 

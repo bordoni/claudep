@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- `claudep doctor` warns when your Claude Code asks for approval on every auto-memory write in a profile. Since 2.1.280 a write through the shared `projects/` symlink is judged at `~/.claude/projects`, which auto mode cannot approve ([anthropics/claude-code#98044](https://github.com/anthropics/claude-code/issues/98044)). The README explains it.
+
+### Changed
+
+- Caught up with Claude Code 2.1.280, whose list of per-instance files grew. `state/`, `policy-limits.json.stamp.json`, the `.signature.json` files next to `policy-limits.json` and `remote-settings.json`, `daemon.lock`, `shares/`, `storage-v2/` and about twenty-five caches and locks are known-private, so `doctor` stops calling them unclassified.
+
+### Fixed
+
+- `loop.md`, which Claude Code keeps per instance, is no longer shared by the rule that links every top-level `*.md`. `claudep doctor` names any `loop.md` symlink an older claudep left in a profile and tells you to remove it.
+- `claudep doctor` on Linux and Windows no longer calls a profile "not logged in yet" when it has no `.credentials.json` but Claude Code reports it logged in. Claude Code can keep the login elsewhere, such as Windows Credential Manager behind a feature flag.
+
 ## [0.4.0] - 2026-09-14
 
 ### Added

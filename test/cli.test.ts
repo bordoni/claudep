@@ -331,6 +331,61 @@ describe("doctor", () => {
     expect(existsSync(join(h.profilesRoot, "smoke", "mystery.json"))).toBe(false);
   });
 
+  test("classifies what Claude Code 2.1.280 writes into the base", async () => {
+    using h = fakeHome();
+    mkdirSync(join(h.base, "state"));
+    writeFileSync(join(h.base, "policy-limits.json.stamp.json"), "{}");
+    writeFileSync(join(h.base, "loop.md"), "# loop\n");
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const r = await runCli(["doctor"], { home: h.home });
+    expect(r.stdout).not.toContain("neither shared nor known-private");
+    expect(existsSync(join(h.profilesRoot, "smoke", "loop.md"))).toBe(false);
+    expect(existsSync(join(h.profilesRoot, "smoke", "state"))).toBe(false);
+  });
+
+  test("flags a loop.md an older claudep linked, as a problem", async () => {
+    using h = fakeHome();
+    writeFileSync(join(h.base, "loop.md"), "# loop\n");
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    symlinkSync(join(h.base, "loop.md"), join(dir, "loop.md"), "file");
+    const r = await runCli(["doctor", "smoke"], { home: h.home });
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("loop.md: linked to the base by an older claudep");
+    expect(r.stdout).toContain("1 problem(s)");
+  });
+
+  test("warns about auto-memory prompts from Claude Code 2.1.280 on, without failing", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const hit = await runCli(["doctor", "smoke"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_VERSION: "2.1.280 (Claude Code)" },
+    });
+    expect(hit.exitCode).toBe(0);
+    expect(hit.stdout).toContain("asks for approval on every auto-memory write");
+    expect(hit.stdout).toContain("anthropics/claude-code/issues/98044");
+    const before = await runCli(["doctor", "smoke"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_VERSION: "2.1.279 (Claude Code)" },
+    });
+    expect(before.stdout).not.toContain("auto-memory");
+  });
+
+  test.if(process.platform !== "darwin")(
+    "does not call a logged-in profile without .credentials.json logged out",
+    async () => {
+      using h = fakeHome();
+      await runCli(["init", "smoke", "--no-login"], { home: h.home });
+      writeLogin(join(h.profilesRoot, "smoke"), "cm@example.com");
+      const r = await runCli(["doctor", "smoke"], { home: h.home });
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("Claude Code keeps this login elsewhere");
+      expect(r.stdout).not.toContain("Not logged in yet");
+      expect(r.stdout).toContain("logged in as cm@example.com");
+    },
+  );
+
   test("flags a Claude Code older than the keychain floor on macOS only", async () => {
     using h = fakeHome();
     await runCli(["init", "smoke", "--no-login"], { home: h.home });

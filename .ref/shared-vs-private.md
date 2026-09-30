@@ -10,7 +10,7 @@ Sharing is opt-in per item. Anything not listed stays inside the profile directo
 
 | Item | Why it is safe to share |
 |---|---|
-| `CLAUDE.md` and every top-level `*.md` | Personal instructions; `@RTK.md`-style imports resolve relative to the file, so sibling `.md` files must travel together. |
+| `CLAUDE.md` and every top-level `*.md` | Personal instructions; `@RTK.md`-style imports resolve relative to the file, so sibling `.md` files must travel together. A name in `KNOWN_PRIVATE` is skipped: Claude Code 2.1.280 keeps `loop.md` per instance. |
 | `settings.json` | Hooks, permissions, statusline, `enabledPlugins`, model, effort. User preferences, not identity. Both profiles write it; same as two terminals. |
 | `keybindings.json`, `statusline-command.sh` | Pure preference. Hook and statusline commands reference absolute paths under `~/.claude`, so they keep working. |
 | `hooks/`, `skills/`, `commands/`, `agents/` | Content the user authored. Nothing account-specific. |
@@ -19,7 +19,7 @@ Sharing is opt-in per item. Anything not listed stays inside the profile directo
 | `themes/` | Custom theme JSON. The shared `settings.json` names one as `theme: custom:<slug>`, so a profile without this directory has a preference that points nowhere. Same date. |
 | `workflows/` | Workflow scripts for the Workflow tool, authored by the user. Same date. |
 | `plugins/` | ~200 MB of marketplaces and caches keyed by `enabledPlugins` in the shared `settings.json`; must stay in sync with it. |
-| `plans/` | Plan-mode files; harmless, useful across accounts. |
+| `plans/` | Plan-mode files; harmless, useful across accounts. Claude Code 2.1.280 added `plans` to its runtime-state list, which only governs what it copies into a sandbox. Kept shared on 2026-09-30 for the same reason as `projects/`: nothing inside carries identity. |
 | `projects/` | Session transcripts **and auto-memory** (`projects/<slug>/memory/MEMORY.md`). ~600 MB on the author's machine. Claude Code lists it as runtime state, but nothing inside carries identity, and sharing keeps `--resume` and memory working from either account. Decided with the user on 2026-09-02. |
 
 ## Private (real files inside each profile)
@@ -33,6 +33,8 @@ Sharing is opt-in per item. Anything not listed stays inside the profile directo
 | `uploads/`, `usage-data/`, `mcp-discovery-cache/`, `mcp-skill-archives/`, `daemon.json`, `launch.json`, `seed-admin` | Runtime state seen in the 2.1.263 binary's config-dir namespace list and daemon code. Regenerated per instance. |
 | `shell-snapshots/`, `file-history/`, `statsig/`, `telemetry/`, `cache/`, `debug/`, `backups/`, `logs/`, `ide/`, `daemon*`, `session-env/`, `paste-cache/`, `chrome/`, `feedback/`, `local/`, `stats-cache.json`, `mcp-needs-auth-cache.json`, `.last-cleanup`, `.last-update-result.json`, `daemon-auth-*` | Caches and runtime scratch. Cheap to regenerate, pointless to share. |
 | `settings.local.json`, `.config.json`, `.DS_Store`, `Thumbs.db`, `desktop.ini` | Machine-local or noise. The last two are Windows Explorer's. |
+| `state/`, `policy-limits.json.stamp.json`, `policy-limits.json.signature.json`, `policy-limits.json.signature-iat.json`, `remote-settings.json.signature.json`, `remote-settings.json.signature-iat.json`, `remote-settings-consent.json`, `remote-settings-helper-consent`, `hfi-auth.json` | Added to Claude Code's runtime-state list by 2.1.280. The stamp file records which account or key vouched for the cached org policy (`identity`, `kind`, `sha`) and is deleted on logout; the signature files sign the same caches. `state/` holds MCP discovery verdicts and device consent records. All identity- or org-scoped. |
+| `shares/`, `storage-v2/`, `daemon.lock`, `server.lock`, `computer-use.lock`, `server-sessions.json`, `active-time.json`, `gh-pr-status-cache.json`, `image-cache/`, `file-transfers/`, `downloads/`, `scratch/`, `traces/`, `startup-perf/`, `feedback-bundles/`, `ccr/`, `bridge-spawn/`, `local-settings/`, `project-settings/`, `remote/`, `systemd/`, `api-dumps/`, `dump-prompts/`, `antproto.json`, `.cc-writes/`, `loop.md` | The rest of the 2.1.280 additions: locks, caches, per-instance scratch and debug output. `.cc-writes` is the temporary directory behind Claude Code's atomic file writes. |
 
 ## Seeded into a new profile's `.claude.json`
 
@@ -51,7 +53,15 @@ When `doctor` reports an unclassified base item, ask in order:
 
 iCloud conflict copies such as `settings 2.json` are noise from the author's synced `~/.claude`; do not add them to any list. `settings.json.bak` in the author's base is not written by Claude Code (the 2.1.263 binary never mentions it) and stays unclassified for the same reason.
 
-`routines/` appears in the 2.1.263 binary's list of config-dir subdirectories next to `workflows` and `rules`. Its purpose was not verified, so it is deliberately in neither list. Classify it when someone can say what Claude Code writes there.
+`routines/` appears in the 2.1.263 binary's list of config-dir subdirectories next to `workflows` and `rules`. By 2.1.280 it is clear what it is: user-authored routine definitions, seeded into sandboxes like `commands/`, with run state kept in `routines/.state/`. Sharing the directory would share that run state across accounts, so it stays in neither list. Revisit if a user asks for routines in every profile; the answer is probably a per-item link that skips `.state/`.
+
+## Synced skills and plugins inside the shared directories
+
+Since Claude Code 2.1.273 a terminal session copies the skills and plugins enabled on the claude.ai account into `skills/synced/<orgUuid>_<accountUuid>/` and `plugins/synced/<orgUuid>_<accountUuid>/`, with a `manifest.json` and a `.bucket-<same id>` marker. Both parents are shared, and the per-account folder keeps two accounts' copies apart, so nothing is mixed. The switches that turn it off, `syncClaudeAiSkills` and `syncClaudeAiPlugins`, live in the shared `settings.json` and cannot differ per profile.
+
+A synced skill that is replaced or removed moves to `skills/.trash/<ms>-<pid>-<random>/` (`plugins/.trash/` likewise). On the author's machine eight `docs` and `google-workspace` copies landed there between 2026-09-22 and 09-28. Five share one pid within three hours, which is one long session re-syncing an updated skill, not two accounts pruning each other. Only one of the two accounts has `docs` in its synced folder. Checked 2026-09-30; no change to claudep.
+
+`plugins/known_marketplaces_claudeai.json` lists marketplaces hosted on claude.ai for the account that last wrote it. It sits inside the shared `plugins/`, so a second account sees the first one's list. It holds marketplace names, no credentials; accepted.
 
 ## The pin file is not a profile item
 
