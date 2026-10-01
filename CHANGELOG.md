@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-01
+
 ### Added
 
 - `claudep doctor` warns when your Claude Code asks for approval on every auto-memory write in a profile. Since 2.1.280 a write through the shared `projects/` symlink is judged at `~/.claude/projects`, which auto mode cannot approve ([anthropics/claude-code#98044](https://github.com/anthropics/claude-code/issues/98044)). The README explains it.
@@ -99,7 +101,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
-[Unreleased]: https://github.com/bordoni/claudep/compare/0.4.0...HEAD
+[Unreleased]: https://github.com/bordoni/claudep/compare/0.4.1...HEAD
+[0.4.1]: https://github.com/bordoni/claudep/compare/0.4.0...0.4.1
 [0.4.0]: https://github.com/bordoni/claudep/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/bordoni/claudep/compare/0.2.1...0.3.0
 [0.2.1]: https://github.com/bordoni/claudep/compare/0.2.0...0.2.1
