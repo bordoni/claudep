@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-02
+
 ### Fixed
 
 - `claudep <name>`, `claudep run` and alias commands no longer ask for approval on every auto-memory write ([anthropics/claude-code#98044](https://github.com/anthropics/claude-code/issues/98044)). They start Claude Code with `--settings '{"autoMemoryDirectory":"<path>"}'`, where the path is the profile's memory directory with the shared `projects/` symlink resolved. They leave the arguments alone when you pass your own `--settings`. Plain `claude` in a shell the hook set up still asks until the upstream fix.
@@ -105,7 +107,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
-[Unreleased]: https://github.com/bordoni/claudep/compare/0.4.1...HEAD
+[Unreleased]: https://github.com/bordoni/claudep/compare/0.4.2...HEAD
+[0.4.2]: https://github.com/bordoni/claudep/compare/0.4.1...0.4.2
 [0.4.1]: https://github.com/bordoni/claudep/compare/0.4.0...0.4.1
 [0.4.0]: https://github.com/bordoni/claudep/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/bordoni/claudep/compare/0.2.1...0.3.0
