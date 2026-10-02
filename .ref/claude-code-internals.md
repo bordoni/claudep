@@ -93,9 +93,17 @@ Claude Code has a second credential location that does not follow `CLAUDE_CONFIG
 
 ## 11. Writes through a symlink are judged where they land (2026-09-30)
 
-Since 2.1.280 the write-permission check builds every spelling of a path, the requested one and the symlink landing, and all of them must pass. The auto-memory exception compares with `startsWith(<CLAUDE_CONFIG_DIR>/projects/<slug>/memory/)`, so in a claudep profile the landing `~/.claude/projects/...` fails it, and the sensitive-file check then flags the `.claude` segment. The prompt is marked not approvable by the auto-mode classifier, and allow rules and PreToolUse hooks run too late to help. Upstream: anthropics/claude-code#98044 and #97585, open through 2.1.285. `claudep doctor` warns from `MEMORY_SYMLINK_PROMPT_FROM`.
+Since 2.1.280 the write-permission check builds every spelling of a path, the requested one and the symlink landing, and all of them must pass. The auto-memory exception compares with `startsWith(<CLAUDE_CONFIG_DIR>/projects/<slug>/memory/)`, so in a claudep profile the landing `~/.claude/projects/...` fails it, and the sensitive-file check then flags the `.claude` segment. The prompt is marked not approvable by the auto-mode classifier, and allow rules and PreToolUse hooks run too late to help. Upstream: anthropics/claude-code#98044 and #97585, open through 2.1.287. `claudep doctor` warns from `MEMORY_SYMLINK_PROMPT_FROM`.
 
-The setting that might route around it is `autoMemoryDirectory` (`R_()` reads it from `policySettings`, `flagSettings`, `userSettings`, and project settings only when trusted). The default is `~/.claude/projects/<sanitized-cwd>/memory/`. `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` is a fixed override. Neither is set by claudep yet.
+Re-verified on 2.1.286 (2026-10-02), where the functions are `pE()`, `Tc()`, `Z3()` and `PFt()`:
+
+- `autoMemoryDirectory` is read from `policySettings`, then `flagSettings`, then local and project settings only when trusted, then `userSettings`. `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` wins over all of them.
+- The value gets `~/` expansion, `path.normalize`, one trailing separator and NFC. It is not realpathed.
+- The exception `Z3()` is `normalize(path).startsWith(<memory dir>)` for a `.md` file, and `PFt()` runs it for each spelling.
+- The default dir is `<config dir>/projects/<slug>/memory/`. The slug is `CLAUDE_CODE_PROJECT_DIR_NAME` when valid (section 8). Otherwise it is the canonical git root, or the launch cwd outside a repo, with `[^a-zA-Z0-9]` replaced by `-`. A slug over 200 characters is cut and gets `-` plus the base-36 `Math.abs` of the Java string hash. The canonical root `en()` maps a linked worktree to its main checkout through `gitdir`, `commondir` and the `gitdir` back-pointer.
+- `CLAUDE_CODE_REMOTE_MEMORY_DIR` replaces the config dir in that path and also moves `agent-memory-local`.
+
+`claudep run` passes `--settings '{"autoMemoryDirectory":"<realpath>"}'`, which makes both spellings the same path. See `design-decisions.md`, 2026-10-02.
 
 ## 12. Windows Credential Manager (2026-09-30)
 

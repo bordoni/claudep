@@ -6,17 +6,25 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { aliasFiles, envScript, fishQuote, keychainService, SHELLS } from "../claudep.ts";
+import { aliasFiles, envScript, fishQuote, keychainService, projectSlug, SHELLS } from "../claudep.ts";
 import { fakeBin, REPO, runCli, SCRIPT } from "./lib/cli.ts";
 import { BASE_DIRS, BASE_FILES, fakeHome, PRIVATE_DIRS, PRIVATE_FILES, writeLogin } from "./lib/home.ts";
 import { norm, rx, tilde } from "./lib/paths.ts";
 
 const SHARED = [...BASE_FILES, ...BASE_DIRS] as readonly string[];
 const WIN = process.platform === "win32";
+
+/** The arguments `run` puts first in a profile whose projects/ is shared:
+ *  the real auto-memory dir for a session started in `root`. */
+function memoryArgs(base: string, root: string): string[] {
+  const dir = join(realpathSync.native(join(base, "projects")), projectSlug(root, {}), "memory");
+  return ["--settings", JSON.stringify({ autoMemoryDirectory: dir })];
+}
 
 describe("help and dispatch", () => {
   test("no args prints usage and exits 0", async () => {
@@ -222,7 +230,10 @@ describe("run", () => {
     const r = await runCli(["smoke", "-p", "say hi", "--model", "x"], { home: h.home, env: { FAKE_CLAUDE_LOG: log } });
     expect(r.exitCode).toBe(0);
     const entry = JSON.parse(readFileSync(log, "utf8").trim());
-    expect(entry).toEqual({ argv: ["-p", "say hi", "--model", "x"], configDir: join(h.profilesRoot, "smoke") });
+    expect(entry).toEqual({
+      argv: [...memoryArgs(h.base, h.home), "-p", "say hi", "--model", "x"],
+      configDir: join(h.profilesRoot, "smoke"),
+    });
   });
 
   test("`run <name> -- args` strips the separator", async () => {
@@ -230,14 +241,33 @@ describe("run", () => {
     await runCli(["init", "smoke", "--no-login"], { home: h.home });
     const log = join(h.home, "claude.log");
     await runCli(["run", "smoke", "--", "--version-ish"], { home: h.home, env: { FAKE_CLAUDE_LOG: log } });
-    expect(JSON.parse(readFileSync(log, "utf8")).argv).toEqual(["--version-ish"]);
+    expect(JSON.parse(readFileSync(log, "utf8")).argv).toEqual([...memoryArgs(h.base, h.home), "--version-ish"]);
+  });
+
+  test("names the memory dir of the repo root when started in a subdirectory", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const repo = join(h.home, "repo");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    mkdirSync(join(repo, "src", "deep"), { recursive: true });
+    const log = join(h.home, "claude.log");
+    await runCli(["smoke", "x"], { home: h.home, cwd: join(repo, "src", "deep"), env: { FAKE_CLAUDE_LOG: log } });
+    expect(JSON.parse(readFileSync(log, "utf8")).argv).toEqual([...memoryArgs(h.base, repo), "x"]);
+  });
+
+  test("leaves the arguments alone when the caller passes --settings", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const log = join(h.home, "claude.log");
+    await runCli(["smoke", "--settings", "{}", "x"], { home: h.home, env: { FAKE_CLAUDE_LOG: log } });
+    expect(JSON.parse(readFileSync(log, "utf8")).argv).toEqual(["--settings", "{}", "x"]);
   });
 
   test("`default` runs claude with the caller's environment untouched", async () => {
     using h = fakeHome();
     const log = join(h.home, "claude.log");
     await runCli(["default", "x"], { home: h.home, env: { FAKE_CLAUDE_LOG: log } });
-    expect(JSON.parse(readFileSync(log, "utf8")).configDir).toBeNull();
+    expect(JSON.parse(readFileSync(log, "utf8"))).toEqual({ argv: ["x"], configDir: null });
   });
 
   test("propagates claude's exit code", async () => {

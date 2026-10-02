@@ -665,6 +665,109 @@ export function memoryWritesPrompt(v: Version | undefined, shared: readonly Shar
   return shared.some((s) => s.name === "projects");
 }
 
+/** The first `.git` walking upward from `cwd`, a directory or a worktree's
+ *  file, the way Claude Code finds the root it keys project data by. */
+export function gitRoot(cwd: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  const P = pathApi(platform);
+  let dir = P.resolve(cwd);
+  for (;;) {
+    try {
+      const st = statSync(P.join(dir, ".git"));
+      if (st.isDirectory() || st.isFile()) return dir;
+    } catch {}
+    const up = P.dirname(dir);
+    if (up === dir) return undefined;
+    dir = up;
+  }
+}
+
+function readTrimmed(file: string): string | undefined {
+  try {
+    return readFileSync(file, "utf8").trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/** The main checkout for a linked worktree's root, otherwise `root`. Follows
+ *  `.git` (gitdir: X), X/commondir and the X/gitdir back-pointer, and gives up
+ *  on anything that does not check out, as Claude Code 2.1.286 does. */
+export function canonicalGitRoot(root: string, platform: NodeJS.Platform = process.platform): string {
+  const P = pathApi(platform);
+  const dotGit = readTrimmed(P.join(root, ".git"));
+  if (!dotGit?.startsWith("gitdir:")) return root;
+  const gitDir = P.resolve(root, dotGit.slice(7).trim());
+  const commonDir = readTrimmed(P.join(gitDir, "commondir"));
+  if (!commonDir) return root;
+  const common = P.resolve(gitDir, commonDir);
+  if (!samePath(P.dirname(gitDir), P.join(common, "worktrees"), platform)) return root;
+  const back = readTrimmed(P.join(gitDir, "gitdir"));
+  if (!back || !samePath(P.resolve(gitDir, back), P.join(root, ".git"), platform)) return root;
+  if (P.basename(common) === ".git") return P.dirname(common);
+  return existsSync(P.join(common, ".git")) ? root : common;
+}
+
+/** Java's String.hashCode, which Claude Code uses to shorten long folder names. */
+function javaHash(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+/** The folder Claude Code keeps a project's data in under `projects/`.
+ *  CLAUDE_CODE_PROJECT_DIR_NAME wins when CLAUDE_CONFIG_DIR is set and it is a
+ *  plain name. Otherwise every character outside [a-zA-Z0-9] becomes "-", and
+ *  a name over 200 characters is cut and gets the base-36 hash of the path. */
+export function projectSlug(root: string, env: Env = process.env): string {
+  const named = env.CLAUDE_CODE_PROJECT_DIR_NAME;
+  if (named && /^[A-Za-z0-9_-]{1,64}$/.test(named) && !/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/i.test(named))
+    return named;
+  const slug = root.replace(/[^a-zA-Z0-9]/g, "-");
+  return slug.length <= 200 ? slug : `${slug.slice(0, 200)}-${Math.abs(javaHash(root)).toString(36)}`;
+}
+
+/** `p` with its deepest existing ancestor resolved through symlinks and the
+ *  rest appended as spelled. */
+export function realpathPartial(p: string, platform: NodeJS.Platform = process.platform): string {
+  const P = pathApi(platform);
+  const tail: string[] = [];
+  let dir = P.resolve(p);
+  for (;;) {
+    try {
+      return P.join(toNativePath(realpathSync.native(dir), platform), ...tail);
+    } catch {}
+    const up = P.dirname(dir);
+    if (up === dir) return P.resolve(p);
+    tail.unshift(P.basename(dir));
+    dir = up;
+  }
+}
+
+/** The auto-memory directory `claudep run` hands Claude Code through
+ *  `--settings`, or undefined when there is nothing to fix. Since 2.1.280 a
+ *  memory write in a profile is also judged where the shared projects/
+ *  symlink lands, and prompts every time (anthropics/claude-code#98044).
+ *  Naming the landing path itself gives both spellings one answer. Skipped
+ *  when the caller passes their own --settings, which would replace this one,
+ *  or moves memory with CLAUDE_CODE_REMOTE_MEMORY_DIR. */
+export function memoryDirOverride(
+  dir: string,
+  cwd: string,
+  args: readonly string[],
+  env: Env = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (args.some((a) => a === "--settings" || a.startsWith("--settings="))) return undefined;
+  if (env.CLAUDE_CODE_REMOTE_MEMORY_DIR) return undefined;
+  const P = pathApi(platform);
+  const start = P.resolve(cwd).normalize("NFC");
+  const git = gitRoot(start, platform);
+  const root = git === undefined ? start : canonicalGitRoot(git, platform).normalize("NFC");
+  const spelled = P.join(dir, "projects", projectSlug(root, env), "memory");
+  const real = realpathPartial(spelled, platform);
+  return samePath(real, spelled, platform) ? undefined : real;
+}
+
 /** The first x.y.z in `claude --version` output. */
 export function parseVersion(text: string): Version | undefined {
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(text);
@@ -1085,6 +1188,8 @@ async function cmdRun(L: Layout, args: string[]): Promise<never> {
   if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
   for (const v of authEnvOverrides(process.env, L.platform))
     console.error(`claudep: ${v} is set; Claude Code will use it instead of the "${name}" login`);
+  const memoryDir = memoryDirOverride(dir, process.cwd(), rest, process.env, L.platform);
+  if (memoryDir !== undefined) rest.unshift("--settings", JSON.stringify({ autoMemoryDirectory: memoryDir }));
   return execClaude(L, dir, rest);
 }
 
@@ -1783,7 +1888,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
   }
   if (memoryWritesPrompt(v, shared))
     warn(
-      `Claude Code ${v?.join(".")} asks for approval on every auto-memory write in a profile, because projects/ is shared through a symlink; auto mode cannot approve it. Known upstream bug: ${MEMORY_SYMLINK_ISSUE}`,
+      `Claude Code ${v?.join(".")} asks for approval on every auto-memory write in a profile, because projects/ is shared through a symlink; auto mode cannot approve it. claudep run and alias commands pass the real memory path and avoid it; plain claude in a hooked shell still asks. Known upstream bug: ${MEMORY_SYMLINK_ISSUE}`,
     );
 
   for (const name of names) {

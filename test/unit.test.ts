@@ -41,6 +41,7 @@ import {
   parseFlags,
   parseVersion,
   pathKey,
+  projectSlug,
   RESERVED,
   resolvePin,
   SHELLS,
@@ -719,6 +720,30 @@ describe("doctor and run hardening helpers", () => {
     expect(memoryWritesPrompt([2, 1, 285], projects)).toBe(true);
     expect(memoryWritesPrompt([2, 1, 285], skills)).toBe(false);
     expect(memoryWritesPrompt(undefined, projects)).toBe(false);
+  });
+
+  test("projectSlug turns every character outside [a-zA-Z0-9] into a dash", () => {
+    expect(projectSlug("/Users/me/work/my_repo.v2", {})).toBe("-Users-me-work-my-repo-v2");
+    expect(projectSlug("C:\\Users\\me\\repo", {})).toBe("C--Users-me-repo");
+    expect(projectSlug("/tmp/café", {})).toBe("-tmp-caf-");
+  });
+
+  test("projectSlug cuts a long name at 200 and adds the base-36 Java hash of the path", () => {
+    const root = `/${"a".repeat(250)}`;
+    // The hash exactly as Claude Code 2.1.286 spells it.
+    let h = 0;
+    for (let i = 0; i < root.length; i++) h = ((h << 5) - h + root.charCodeAt(i)) | 0;
+    const slug = projectSlug(root, {});
+    expect(slug).toBe(`-${"a".repeat(199)}-${Math.abs(h).toString(36)}`);
+    expect(projectSlug(`/${"a".repeat(199)}`, {})).toBe(`-${"a".repeat(199)}`);
+  });
+
+  test("projectSlug takes CLAUDE_CODE_PROJECT_DIR_NAME only when it is a plain name", () => {
+    expect(projectSlug("/r", { CLAUDE_CODE_PROJECT_DIR_NAME: "my-proj_1" })).toBe("my-proj_1");
+    expect(projectSlug("/r", { CLAUDE_CODE_PROJECT_DIR_NAME: "a/b" })).toBe("-r");
+    expect(projectSlug("/r", { CLAUDE_CODE_PROJECT_DIR_NAME: "x".repeat(65) })).toBe("-r");
+    expect(projectSlug("/r", { CLAUDE_CODE_PROJECT_DIR_NAME: "NUL" })).toBe("-r");
+    expect(projectSlug("/r", { CLAUDE_CODE_PROJECT_DIR_NAME: "" })).toBe("-r");
   });
 
   test("authEnvOverrides lists set, non-empty credential variables", () => {

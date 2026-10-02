@@ -88,6 +88,15 @@ claude-swap and clauth show each account's 5-hour and 7-day usage and rotate acc
 
 A profile for Bedrock or Vertex would need `CLAUDE_CODE_USE_BEDROCK=1` and friends every time it runs. The shape considered: `claudep init <name> --env KEY=VALUE` writing `<profile>/claudep.json`, applied by `run` and printed by `env`. Deferred because the shell hook cannot apply it (rule 10: no subprocess, and the values would have to be re-read on every `cd`), so a pinned directory would run with the login but without the environment, which is worse than not having the feature. Revisit for 0.5.0 with an answer for the hook.
 
+## 2026-10-02: `run` names the real auto-memory dir through `--settings`
+
+Since Claude Code 2.1.280 every auto-memory write in a profile prompts (anthropics/claude-code#98044, `claude-code-internals.md` section 11). `claudep run`, and so every alias shim, now puts `--settings '{"autoMemoryDirectory":"<real path>"}'` first. The path is `<profile>/projects/<slug>/memory` with symlinks resolved. Both spellings of a write are then the same path and the auto-memory exception passes. Tried by hand on 2.1.286 under the `enterprise` profile: two denials and nothing written without the flag, no denials with it, and a later session read the memory back from a worktree subdirectory.
+
+- **No version gate.** `autoMemoryDirectory` predates the 2.1.144 floor, and the value names the folder Claude Code would pick anyway, so it stays harmless after an upstream fix and `run` does not spend a `claude --version` call on every start.
+- **The slug rule is copied from the binary** (`gitRoot`, `canonicalGitRoot`, `projectSlug`): first `.git` upward, a linked worktree maps to its main checkout, `[^a-zA-Z0-9]` becomes `-`, past 200 characters a base-36 Java hash is added, and `CLAUDE_CODE_PROJECT_DIR_NAME` wins. A wrong slug would split a project's memory, so re-check it at each catch-up.
+- **Skipped** when the caller passes `--settings` (the option takes one value; a second replaces the first), when `CLAUDE_CODE_REMOTE_MEMORY_DIR` moves memory, and when nothing on the path is a symlink.
+- **The hook and `claudep env` cannot help.** They set variables, and plain `claude` started afterwards still prompts until upstream fixes it. Rejected: exporting `CLAUDE_CODE_REMOTE_MEMORY_DIR=~/.claude`, which would fix those too without a slug. It is an internal remote-session switch and also moves project-local subagent memory (`agent-memory-local`) out of the repo's `.claude/`.
+
 ## Not built, on purpose
 
 - **Per-profile `settings.json` overrides.** Would need a merge layer; `--settings <file>` on the command line already covers the rare case.

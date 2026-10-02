@@ -1,11 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  canonicalGitRoot,
+  gitRoot,
   type LinkDeps,
   link,
   linkState,
+  memoryDirOverride,
+  projectSlug,
   readJson,
+  realpathPartial,
   SEED_KEYS,
   type SharedItem,
   seedGlobalJson,
@@ -246,5 +251,114 @@ describe("seedGlobalJson", () => {
     expect(existsSync(join(dir, ".claude.json"))).toBe(false);
     writeFileSync(h.globalJson, "[1,2]");
     expect(await seedGlobalJson(h.globalJson, dir, false)).toBe("no-base");
+  });
+});
+
+/** A repo at <home>/work/repo with a linked worktree at <home>/work/wt, laid
+ *  out the way `git worktree add` leaves the files Claude Code reads. */
+function fakeWorktree(home: string): { repo: string; wt: string; meta: string } {
+  const repo = join(home, "work", "repo");
+  const wt = join(home, "work", "wt");
+  const meta = join(repo, ".git", "worktrees", "wt");
+  mkdirSync(meta, { recursive: true });
+  mkdirSync(join(wt, "sub", "deep"), { recursive: true });
+  writeFileSync(join(meta, "commondir"), "../..\n");
+  writeFileSync(join(meta, "gitdir"), `${join(wt, ".git")}\n`);
+  writeFileSync(join(wt, ".git"), `gitdir: ${meta}\n`);
+  return { repo, wt, meta };
+}
+
+describe("project root for auto memory", () => {
+  test("gitRoot walks up to the first .git, a directory or a file", () => {
+    using h = fakeHome();
+    const { repo, wt } = fakeWorktree(h.home);
+    mkdirSync(join(repo, "a", "b"), { recursive: true });
+    expect(gitRoot(join(repo, "a", "b"))).toBe(repo);
+    expect(gitRoot(join(wt, "sub", "deep"))).toBe(wt);
+    expect(gitRoot(h.home)).toBeUndefined();
+  });
+
+  test("canonicalGitRoot maps a linked worktree to its main checkout", () => {
+    using h = fakeHome();
+    const { repo, wt } = fakeWorktree(h.home);
+    expect(canonicalGitRoot(wt)).toBe(repo);
+    expect(canonicalGitRoot(repo)).toBe(repo);
+  });
+
+  test("canonicalGitRoot keeps the root when the worktree files do not check out", () => {
+    using h = fakeHome();
+    const { wt, meta } = fakeWorktree(h.home);
+    writeFileSync(join(meta, "gitdir"), `${join(h.home, "elsewhere", ".git")}\n`);
+    expect(canonicalGitRoot(wt)).toBe(wt);
+    // A submodule's .git file points at a git dir with no commondir.
+    const sub = join(h.home, "sub");
+    mkdirSync(join(h.home, "modules", "sub"), { recursive: true });
+    mkdirSync(sub);
+    writeFileSync(join(sub, ".git"), `gitdir: ${join(h.home, "modules", "sub")}\n`);
+    expect(canonicalGitRoot(sub)).toBe(sub);
+  });
+
+  test("canonicalGitRoot answers the bare repo for a worktree of one", () => {
+    using h = fakeHome();
+    const bare = join(h.home, "bare.git");
+    const wt = join(h.home, "bwt");
+    const meta = join(bare, "worktrees", "bwt");
+    mkdirSync(meta, { recursive: true });
+    mkdirSync(wt);
+    writeFileSync(join(meta, "commondir"), "../..\n");
+    writeFileSync(join(meta, "gitdir"), `${join(wt, ".git")}\n`);
+    writeFileSync(join(wt, ".git"), `gitdir: ${meta}\n`);
+    expect(canonicalGitRoot(wt)).toBe(bare);
+  });
+
+  test("realpathPartial resolves the deepest existing part and keeps the rest", () => {
+    using h = fakeHome();
+    const link = join(h.home, "link");
+    symlinkSync(h.base, link, "dir");
+    expect(realpathPartial(join(link, "projects", "x", "memory"))).toBe(
+      join(realpathSync.native(h.base), "projects", "x", "memory"),
+    );
+    expect(realpathPartial(join(h.base, "missing"))).toBe(join(realpathSync.native(h.base), "missing"));
+  });
+});
+
+describe("memoryDirOverride", () => {
+  /** A profile dir whose projects/ links to the base, as `init` leaves it. */
+  function profileWithProjects(h: { home: string; base: string }): string {
+    const dir = join(h.home, ".claudep", "smoke");
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(join(h.base, "projects"), join(dir, "projects"), "dir");
+    return dir;
+  }
+
+  test("names the real memory dir of the main checkout when projects/ is a symlink", () => {
+    using h = fakeHome();
+    const dir = profileWithProjects(h);
+    const { repo, wt } = fakeWorktree(h.home);
+    const want = join(realpathSync.native(join(h.base, "projects")), projectSlug(repo, {}), "memory");
+    expect(memoryDirOverride(dir, join(wt, "sub", "deep"), [], {})).toBe(want);
+    expect(memoryDirOverride(dir, repo, ["-p", "hi"], {})).toBe(want);
+  });
+
+  test("uses the cwd itself outside a git repo", () => {
+    using h = fakeHome();
+    const dir = profileWithProjects(h);
+    const want = join(realpathSync.native(join(h.base, "projects")), projectSlug(h.home, {}), "memory");
+    expect(memoryDirOverride(dir, h.home, [], {})).toBe(want);
+  });
+
+  test("stays out of the way when the caller passes --settings or moves memory", () => {
+    using h = fakeHome();
+    const dir = profileWithProjects(h);
+    expect(memoryDirOverride(dir, h.home, ["--settings", "{}"], {})).toBeUndefined();
+    expect(memoryDirOverride(dir, h.home, ["--settings={}"], {})).toBeUndefined();
+    expect(memoryDirOverride(dir, h.home, [], { CLAUDE_CODE_REMOTE_MEMORY_DIR: "/m" })).toBeUndefined();
+  });
+
+  test("is not needed when no symlink sits on the memory path", () => {
+    using h = fakeHome();
+    const dir = join(h.home, ".claudep", "own");
+    mkdirSync(join(dir, "projects"), { recursive: true });
+    expect(memoryDirOverride(dir, h.home, [], {})).toBeUndefined();
   });
 });

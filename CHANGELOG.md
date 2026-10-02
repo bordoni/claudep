@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Fixed
+
+- `claudep <name>`, `claudep run` and alias commands no longer ask for approval on every auto-memory write ([anthropics/claude-code#98044](https://github.com/anthropics/claude-code/issues/98044)). They start Claude Code with `--settings '{"autoMemoryDirectory":"<path>"}'`, where the path is the profile's memory directory with the shared `projects/` symlink resolved. They leave the arguments alone when you pass your own `--settings`. Plain `claude` in a shell the hook set up still asks until the upstream fix.
+
 ## [0.4.1] - 2026-10-01
 
 ### Added
