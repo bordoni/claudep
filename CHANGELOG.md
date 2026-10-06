@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-06
+
 ### Added
 
 - Per-profile variables. `claudep vars <name> KEY=VALUE…` sets them, `claudep vars <name>` lists them (`--json` too), and `--unset KEY…` removes them; `claudep init --env KEY=VALUE` sets them at creation. They live in `~/.claudep/<name>/claudep.env`. `claudep <name>`, alias commands, `claudep env <name>` and the zsh, bash, fish and PowerShell hooks export them with the profile, and the hooks clear them when you leave a pinned tree. The file is read as data, never run. A variable you set yourself always wins. Use it for `CLAUDE_CODE_USE_BEDROCK`, `AWS_PROFILE`, or `ANTHROPIC_PROFILE` to give each profile its own Console sign-in. `CLAUDE_CONFIG_DIR`, `CLAUDEP_*` and credential variables are refused.
@@ -118,7 +120,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
-[Unreleased]: https://github.com/bordoni/claudep/compare/0.4.2...HEAD
+[Unreleased]: https://github.com/bordoni/claudep/compare/0.5.0...HEAD
+[0.5.0]: https://github.com/bordoni/claudep/compare/0.4.2...0.5.0
 [0.4.2]: https://github.com/bordoni/claudep/compare/0.4.1...0.4.2
 [0.4.1]: https://github.com/bordoni/claudep/compare/0.4.0...0.4.1
 [0.4.0]: https://github.com/bordoni/claudep/compare/0.3.0...0.4.0
