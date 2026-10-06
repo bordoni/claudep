@@ -57,6 +57,7 @@ claudep init <name> [options]        create/update a profile and log in
 claudep list [--json]                every profile and who it is logged in as
 claudep status <name> [--json]       login state for one profile ("default" = ~/.claude)
 claudep env <name> [--shell <sh>]    print the CLAUDE_CONFIG_DIR pin for eval, source or Invoke-Expression
+claudep vars <name> [KEY=VALUE…]     list or set the variables a profile exports (see below)
 claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
 claudep current [--json|--name]      which profile this shell is on, and why
 claudep doctor [name]                verify symlinks, keychain entry, unclassified files, Claude Code version
@@ -68,7 +69,7 @@ claudep completion [zsh|bash|fish]   print tab completions for commands, flags a
 claudep --version
 ```
 
-`init` options: `--sso`, `--email <addr>`, `--console`, `--copy-mcp`, `--alias <command>`, `--no-login`, `--force`. Run `claudep help` for the full text.
+`init` options: `--sso`, `--email <addr>`, `--console`, `--copy-mcp`, `--alias <command>`, `--env KEY=VALUE` (repeatable), `--no-login`, `--force`. Run `claudep help` for the full text.
 
 ## Pin a profile to a directory
 
@@ -95,7 +96,7 @@ claudep shell-init fish | source
 claudep shell-init powershell | Out-String | Invoke-Expression
 ```
 
-From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile and `cd` out of it returns the shell to `~/.claude`. The hook is pure shell with no subprocess (builtins in fish, cmdlets only in PowerShell), so it costs nothing at the prompt. The rules:
+From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile, plus the profile's own variables, and `cd` out of it returns the shell to `~/.claude`. The hook is pure shell with no subprocess (builtins in fish, cmdlets only in PowerShell), so it costs nothing at the prompt. The rules:
 
 - The nearest `.claudep` file upward from the current directory wins. An empty one cancels a parent pin.
 - The hook only changes a `CLAUDE_CONFIG_DIR` it set itself. It tracks that in `CLAUDEP_AUTO`, so a manual pin from `eval "$(claudep env work)"` (`claudep env work | source` in fish, `claudep env work | Invoke-Expression` in PowerShell) or a plain `export` stays put until you `eval "$(claudep env --unset)"`.
@@ -104,6 +105,26 @@ From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile 
 `claudep env` prints the syntax of the shell it runs in: it looks at its parent process (fish, pwsh, or an sh-like shell) and falls back to your login shell. Pass `--shell sh|fish|powershell` when neither answer fits, for example from a script or a Makefile.
 
 `claudep current` tells you which profile the shell is on and how it got there (hook, manual pin, or nothing). `claudep list` adds the same line at the bottom.
+
+## Per-profile variables
+
+A profile can carry environment variables that go with its account, such as a Bedrock or Vertex setup, or the Console sign-in Claude Code should use:
+
+```sh
+claudep vars bedrock CLAUDE_CODE_USE_BEDROCK=1 AWS_PROFILE=bedrock AWS_REGION=us-east-1
+claudep vars work ANTHROPIC_PROFILE=work      # pick a Console sign-in from ~/.config/anthropic
+claudep vars work                             # list them
+claudep vars work --unset ANTHROPIC_PROFILE   # remove one
+claudep init vertex --env CLAUDE_CODE_USE_VERTEX=1 --env CLOUD_ML_REGION=us-east5
+```
+
+They live in `~/.claudep/<name>/claudep.env`, one `KEY=VALUE` per line. `claudep <name>` and alias commands pass them to Claude Code, `claudep env <name>` prints them with the pin, and the shell hook exports them while you are inside a pinned tree and clears them when you leave. The file is read as data and never run, by claudep and by every hook.
+
+- A variable you set yourself always wins. The hook and `claudep env` leave it alone, and `claudep <name>` passes your value.
+- `CLAUDEP_ENV_KEYS` lists what a `claudep.env` put in the shell, so moving to another pinned profile or running `claudep env --unset` clears exactly those.
+- `CLAUDE_CONFIG_DIR`, `CLAUDEP_*`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` are refused. claudep never stores credentials.
+- Values are one line, not empty, with no spaces at either end. `claudep vars` edits the file in place and keeps your comments. `claudep doctor` lists each profile's variable names and reports lines nothing reads.
+- A shell that is already inside a pinned tree picks up a change on the next `cd`.
 
 ## Tab completion
 
@@ -158,11 +179,11 @@ The shared list is an allowlist, so an account-specific file cannot leak across 
 - Background sessions and the daemon are tied to `~/.claude`. As of Claude Code 2.1.280, `claude daemon install` refuses to run with `CLAUDE_CONFIG_DIR` set, and the launcher skips the daemon for `claude --bg` under a profile. Anthropic's docs describe a separate background supervisor per config dir; I have not verified that here.
 - Since Claude Code 2.1.280, every auto-memory write in a profile asks for approval, and auto mode cannot give it. The memory directory sits under the shared `projects/` symlink, and Claude Code now checks a write at the path it lands on, `~/.claude/projects/...`, which it treats as sensitive. This is [anthropics/claude-code#98044](https://github.com/anthropics/claude-code/issues/98044), open upstream. `claudep <name>`, `claudep run` and alias commands avoid it: they pass the real memory path with `--settings`, unless you pass your own `--settings`. Plain `claude` in a shell the hook or `claudep env` set up still asks. `claudep doctor` warns while your Claude Code is affected. The default profile is not.
 - Skills and plugins synced from claude.ai land in the shared `skills/synced/` and `plugins/synced/`, in one folder per account, so profiles do not mix them. The `syncClaudeAiSkills` and `syncClaudeAiPlugins` switches live in the shared `settings.json` and apply to every profile.
-- Console sign-ins made without an API key live in `~/.config/anthropic`, outside every config dir, so all profiles see the same ones. `ANTHROPIC_PROFILE` picks which one Claude Code uses.
+- Console sign-ins made without an API key live in `~/.config/anthropic`, outside every config dir, so all profiles see the same ones. `ANTHROPIC_PROFILE` picks which one Claude Code uses; set it per profile with `claudep vars <name> ANTHROPIC_PROFILE=<sign-in>`.
 - In VS Code, `CLAUDE_CONFIG_DIR` in `claudeCode.environmentVariables` must be an absolute path. The session list ignores it when `claudeProcessWrapper` is set.
 - Set `CLAUDE_PROFILES_DIR` to move the profiles root. Keep it out of iCloud or Dropbox; `.claude.json` is rewritten constantly and sync tools create conflict copies.
 - Never put `CLAUDE_CONFIG_DIR` in a `settings.json` `env` block. Claude Code detects that mismatch and disables features; `claudep doctor` reports it.
-- `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` override the login in any config dir, always in `-p` mode. `claudep <name>` and `claudep doctor` warn when one is set and leave it alone.
+- `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` override the login in any config dir, always in `-p` mode. `claudep <name>` and `claudep doctor` warn when one is set and leave it alone. `claudep doctor` also names the key source Claude Code reports, and fails when Claude Code reports a config dir other than the profile's.
 - `claudep doctor` fails on macOS when Claude Code is older than 2.1.144, the first build whose Keychain item is namespaced per config dir.
 
 ## Releases

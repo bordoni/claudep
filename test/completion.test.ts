@@ -64,10 +64,10 @@ describe("completion scripts in real shells", () => {
     expect(r.err).toBe("");
     const [top, rm, init, env, comp] = r.out.trim().split("\n");
     expect(top?.split(" ")).toEqual(
-      expect.arrayContaining(["init", "rm", "completion", "default", "work", "personal"]),
+      expect.arrayContaining(["init", "rm", "vars", "completion", "default", "work", "personal"]),
     );
     expect(rm).toBe("default personal work");
-    expect(init?.split(" ")).toEqual(expect.arrayContaining(["--sso", "--email"]));
+    expect(init?.split(" ")).toEqual(expect.arrayContaining(["--sso", "--email", "--env"]));
     expect(env).toBe("sh zsh bash fish powershell");
     expect(comp).toBe("zsh bash fish");
   });
@@ -88,8 +88,10 @@ describe("completion scripts in real shells", () => {
       const [top, rm, init, env] = r.out.trim().split("\n");
       expect(top).toContain("init\tcreate or update a profile and log in");
       expect(top).toContain("work\tprofile");
+      expect(top).toContain("vars\tlist, set or unset the variables a profile exports");
       expect(rm).toBe("default personal work");
       expect(init).toContain("--sso");
+      expect(init).toContain("--env");
       expect(env).toBe("bash fish powershell sh zsh");
     },
   );

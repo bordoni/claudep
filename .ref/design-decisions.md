@@ -84,9 +84,22 @@ Cost: `completion` became a reserved word, so a profile literally named `complet
 
 claude-swap and clauth show each account's 5-hour and 7-day usage and rotate accounts near the limit. Rejected for claudep: the only source is Anthropic's usage endpoint, which needs the account's OAuth token, and reading that token is against Never 3. Claude Code's `/usage` is interactive only, so there is nothing to shell out to. Reopen if `claude auth status --json` or another non-interactive command ever reports usage.
 
-## 2026-09-07: Per-profile environment deferred
+## 2026-09-07: Per-profile environment deferred (reopened 2026-10-05)
 
 A profile for Bedrock or Vertex would need `CLAUDE_CODE_USE_BEDROCK=1` and friends every time it runs. The shape considered: `claudep init <name> --env KEY=VALUE` writing `<profile>/claudep.json`, applied by `run` and printed by `env`. Deferred because the shell hook cannot apply it (rule 10: no subprocess, and the values would have to be re-read on every `cd`), so a pinned directory would run with the login but without the environment, which is worse than not having the feature. Revisit for 0.5.0 with an answer for the hook.
+
+## 2026-10-05: Per-profile variables in a data file the hooks read with builtins
+
+The answer the 2026-09-07 deferral asked for. `<profile>/claudep.env` holds `KEY=VALUE` lines and `#` comments. The hooks read it line by line with `read` and parameter expansion (sh), `read` and `string` (fish), and `Get-Content` (PowerShell), the same way they already read a `.claudep` pin file, and export each line as data. Nothing is ever sourced or evaluated, so a hand-edited file cannot run code in the user's shell. It is plain text rather than the `claudep.json` considered then, because JSON cannot be read with shell builtins.
+
+- **A variable the user set always wins**, in the hooks, in `claudep env` and in `run`. The file only fills variables that are unset. Without this, `PATH=` in a profile would be exported and then unset on leaving a pinned tree.
+- **`CLAUDEP_ENV_KEYS`** names what a `claudep.env` exported, the way `CLAUDEP_AUTO` marks a hook-set pin. It is how the hooks and `claudep env --unset` clear exactly those variables, and how `run` and `default` drop another profile's variables before applying their own.
+- **The hook re-reads the file on every directory change**, not only when the pin changes, so `claudep vars` edits apply on the next `cd`. The read is a builtin loop over a few lines.
+- **Refused keys**: `CLAUDE_CONFIG_DIR` (claudep sets it), `CLAUDEP_*` (claudep's markers) and the `AUTH_ENV` credential variables (Never 3), compared without case because Windows is case-insensitive. The hooks embed the same list, generated from `AUTH_ENV` (`refusedEnvCase()` for sh, `refusedEnvRegex()` for fish and PowerShell), so they skip a refused line in a hand-edited file too.
+- **Values** are one line, not empty and not padded with whitespace. Windows cannot hold an empty variable, and bash, fish and PowerShell trim differently, so anything else would read differently per shell. Lines are trimmed and the first occurrence of a key wins, in the TypeScript and in every hook.
+- **`claudep vars` edits the file in place**: comments and lines it skips stay, a key keeps its line. `--unset` takes the keys as plain arguments, matching `env --unset`.
+
+Cost: `vars` became a reserved word (a **Breaking** line in the changelog, as `completion` was in 0.4.0). A variable a user exports by hand after the hook set it is cleared on the next `cd`, because only names are tracked, not values.
 
 ## 2026-10-02: `run` names the real auto-memory dir through `--settings`
 

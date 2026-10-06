@@ -338,6 +338,8 @@ export const KNOWN_PRIVATE = new Set<string>([
   "antproto.json",
   ".cc-writes",
   "loop.md",
+  // claudep's own per-profile file.
+  "claudep.env",
 ]);
 
 /** Keys copied from the base .claude.json into a fresh profile so first-run
@@ -385,7 +387,7 @@ export const COMMANDS: readonly Command[] = [
     desc: "create or update a profile and log in",
     arg: "profile",
     flags: ["--sso", "--console", "--copy-mcp", "--no-login", "--force"],
-    valueFlags: [{ name: "--email" }, { name: "--alias" }],
+    valueFlags: [{ name: "--email" }, { name: "--alias" }, { name: "--env" }],
   },
   { name: "run", desc: "run claude with a profile", arg: "profile", hidden: true },
   { name: "list", desc: "show every profile and who it is logged in as", aliases: ["ls"], flags: ["--json"] },
@@ -397,6 +399,12 @@ export const COMMANDS: readonly Command[] = [
     arg: "profile",
     flags: ["--unset"],
     valueFlags: [{ name: "--shell", values: ENV_SHELLS }],
+  },
+  {
+    name: "vars",
+    desc: "list, set or unset the variables a profile exports",
+    arg: "profile",
+    flags: ["--unset", "--json"],
   },
   { name: "alias", desc: "write a shim command that runs claudep with a profile", arg: "profile" },
   { name: "doctor", desc: "verify symlinks, keychain entry, unclassified files, Claude Code version", arg: "profile" },
@@ -642,6 +650,136 @@ export function authEnvOverrides(env: Env = process.env, platform: NodeJS.Platfo
     if (platform !== "win32") return Boolean(env[name]);
     return Object.keys(env).some((k) => k.toUpperCase() === name && Boolean(env[k]));
   });
+}
+
+// ---------------------------------------------------------------------------
+// Per-profile variables: <profile>/claudep.env
+// ---------------------------------------------------------------------------
+
+/** The per-profile variables file. KEY=VALUE lines and # comments; data, never
+ *  sourced. `run`, `env` and every shell hook read it, and a variable the user
+ *  set themselves always wins over it. */
+export const ENV_FILE = "claudep.env";
+/** Space-separated names of the variables `claudep env` or the hook exported
+ *  from a claudep.env, so they can be cleared again and never mistaken for
+ *  variables the user set. */
+export const ENV_KEYS_VAR = "CLAUDEP_ENV_KEYS";
+export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export type EnvVar = [key: string, value: string];
+
+/** Why a key cannot go in claudep.env, or undefined when it can. The profile
+ *  dir and claudep's own markers are set by claudep, and credential material
+ *  never lives in a claudep file. Case-insensitive, as Windows is. */
+export function refusedEnvKey(key: string): string | undefined {
+  const k = key.toUpperCase();
+  if (k === "CLAUDE_CONFIG_DIR") return "claudep sets CLAUDE_CONFIG_DIR itself";
+  if (k.startsWith("CLAUDEP_")) return "CLAUDEP_ variables belong to claudep";
+  if ((AUTH_ENV as readonly string[]).includes(k)) return "claudep never stores credentials";
+  return undefined;
+}
+
+const REFUSED_ENV = ["CLAUDE_CONFIG_DIR", "CLAUDEP_*", ...AUTH_ENV];
+
+/** refusedEnvKey as a case-insensitive regex, for the fish and PowerShell hooks.
+ *  Anchored alternatives, no group: every ( in the fish hook is a string call. */
+export function refusedEnvRegex(): string {
+  return REFUSED_ENV.map((k) => (k.endsWith("*") ? `^${k.slice(0, -1)}` : `^${k}$`)).join("|");
+}
+
+/** refusedEnvKey as an sh case pattern; every letter matches either case. */
+export function refusedEnvCase(): string {
+  return REFUSED_ENV.map((k) => k.replace(/[A-Za-z]/g, (ch) => `[${ch.toUpperCase()}${ch.toLowerCase()}]`)).join(" | ");
+}
+
+/** One KEY=VALUE from the command line, or the reason it is refused. Values
+ *  are single-line, not empty (Windows cannot hold an empty variable) and
+ *  carry no surrounding whitespace, so every shell reads the file the same way. */
+export function validateEnvEntry(entry: string): EnvVar | string {
+  const eq = entry.indexOf("=");
+  if (eq === -1) return `"${entry}" is not KEY=VALUE`;
+  const key = entry.slice(0, eq);
+  const value = entry.slice(eq + 1);
+  if (!ENV_KEY_RE.test(key))
+    return `"${key}" is not a variable name (letters, digits and _, not starting with a digit)`;
+  const refused = refusedEnvKey(key);
+  if (refused) return `${key} is not allowed: ${refused}`;
+  if (value === "") return `${key}: the value is empty; remove it with: claudep vars <name> --unset ${key}`;
+  if (/[\r\n\0]/.test(value)) return `${key}: the value must be one line`;
+  if (value !== value.trim()) return `${key}: the value must not start or end with whitespace`;
+  return [key, value];
+}
+
+/** The variables in a claudep.env text, first occurrence of a key winning, and
+ *  the 1-based numbers of lines that were skipped. Lines are trimmed, and a
+ *  line with no value is skipped; the hooks read them the same way. */
+export function parseEnvFile(text: string): { vars: EnvVar[]; skipped: number[] } {
+  const vars: EnvVar[] = [];
+  const skipped: number[] = [];
+  const seen = new Set<string>();
+  text.split("\n").forEach((raw, i) => {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) return;
+    const eq = line.indexOf("=");
+    const key = eq === -1 ? "" : line.slice(0, eq);
+    if (!ENV_KEY_RE.test(key) || refusedEnvKey(key) || eq === line.length - 1) {
+      skipped.push(i + 1);
+      return;
+    }
+    if (seen.has(key)) return;
+    seen.add(key);
+    vars.push([key, line.slice(eq + 1)]);
+  });
+  return { vars, skipped };
+}
+
+export function readProfileEnv(dir: string): { vars: EnvVar[]; skipped: number[] } {
+  try {
+    return parseEnvFile(readFileSync(join(dir, ENV_FILE), "utf8"));
+  } catch {
+    return { vars: [], skipped: [] };
+  }
+}
+
+/** The claudep.env text for a set of variables. */
+export function envFileText(name: string, vars: readonly EnvVar[]): string {
+  const head = `# Variables for the claudep profile "${name}". Set them with: claudep vars ${name} KEY=VALUE\n`;
+  return head + vars.map(([k, v]) => `${k}=${v}\n`).join("");
+}
+
+function envHas(env: Env, key: string, platform: NodeJS.Platform): boolean {
+  if (platform !== "win32") return env[key] !== undefined;
+  const want = key.toUpperCase();
+  return Object.keys(env).some((k) => k.toUpperCase() === want && env[k] !== undefined);
+}
+
+/** The variable names in CLAUDEP_ENV_KEYS, i.e. what claudep exported earlier. */
+export function exportedEnvKeys(env: Env = process.env): string[] {
+  return (env[ENV_KEYS_VAR] ?? "").split(" ").filter((k) => ENV_KEY_RE.test(k) && !refusedEnvKey(k));
+}
+
+/** What to clear and what to set when a shell or a run moves to a profile with
+ *  `vars`. Variables claudep exported before are cleared first; then each file
+ *  variable is set only where the user has not set it. */
+export function envPlan(
+  vars: readonly EnvVar[],
+  env: Env = process.env,
+  platform: NodeJS.Platform = process.platform,
+): { clear: string[]; set: EnvVar[] } {
+  const clear = exportedEnvKeys(env);
+  const rest: Env = { ...env };
+  for (const k of clear) deleteEnv(rest, k, platform);
+  return { clear, set: vars.filter(([k]) => !envHas(rest, k, platform)) };
+}
+
+/** `env` with a profile's variables applied the way envPlan describes. */
+export function withProfileVars(vars: readonly EnvVar[], env: Env, platform: NodeJS.Platform = process.platform): Env {
+  const plan = envPlan(vars, env, platform);
+  const out: Env = { ...env };
+  for (const k of plan.clear) deleteEnv(out, k, platform);
+  deleteEnv(out, ENV_KEYS_VAR, platform);
+  for (const [k, v] of plan.set) out[k] = v;
+  return out;
 }
 
 /** The oldest Claude Code whose macOS Keychain item is namespaced per config
@@ -930,11 +1068,15 @@ export function baseEnv(L: Layout, env: Env = process.env): Env {
     deleteEnv(out, "CLAUDE_CONFIG_DIR", L.platform);
     deleteEnv(out, "CLAUDEP_AUTO", L.platform);
   }
+  // Variables a profile's claudep.env put in this shell are not the base's.
+  for (const k of exportedEnvKeys(env)) deleteEnv(out, k, L.platform);
+  deleteEnv(out, ENV_KEYS_VAR, L.platform);
   return out;
 }
 
 function claudeEnv(L: Layout, dir: string | undefined): Env {
-  return dir === undefined ? baseEnv(L) : envFor(dir, process.env, L.platform);
+  if (dir === undefined) return baseEnv(L);
+  return withProfileVars(readProfileEnv(dir).vars, envFor(dir, process.env, L.platform), L.platform);
 }
 
 async function execClaude(L: Layout, dir: string | undefined, args: string[]): Promise<never> {
@@ -965,6 +1107,12 @@ export type AuthStatus = {
   orgName?: string;
   subscriptionType?: string;
   authMethod?: string;
+  /** firstParty, bedrock, vertex, foundry. */
+  apiProvider?: string;
+  /** Where an API key came from, e.g. ANTHROPIC_API_KEY or apiKeyHelper. Absent without one. */
+  apiKeySource?: string;
+  /** The config dir Claude Code resolved (2.1.268+). */
+  configDirectory?: string;
 };
 
 export function parseAuthStatus(text: string): AuthStatus {
@@ -979,6 +1127,9 @@ export function parseAuthStatus(text: string): AuthStatus {
       orgName: str("orgName"),
       subscriptionType: str("subscriptionType"),
       authMethod: str("authMethod"),
+      apiProvider: str("apiProvider"),
+      apiKeySource: str("apiKeySource"),
+      configDirectory: str("configDirectory"),
     };
   } catch {
     return { loggedIn: false };
@@ -1015,10 +1166,15 @@ export async function keychainHas(
 // Flag parsing
 // ---------------------------------------------------------------------------
 
-export type Flags = { bools: Set<string>; strs: Map<string, string>; rest: string[] };
+/** `strs` holds the last value of each value flag; `lists` every value, in order. */
+export type Flags = { bools: Set<string>; strs: Map<string, string>; lists: Map<string, string[]>; rest: string[] };
 
 export function parseFlags(args: string[], boolNames: readonly string[], strNames: readonly string[]): Flags {
-  const flags: Flags = { bools: new Set(), strs: new Map(), rest: [] };
+  const flags: Flags = { bools: new Set(), strs: new Map(), lists: new Map(), rest: [] };
+  const value = (name: string, v: string) => {
+    flags.strs.set(name, v);
+    flags.lists.set(name, [...(flags.lists.get(name) ?? []), v]);
+  };
   for (let i = 0; i < args.length; i++) {
     const a = args[i] as string;
     if (boolNames.includes(a)) {
@@ -1026,11 +1182,11 @@ export function parseFlags(args: string[], boolNames: readonly string[], strName
     } else if (strNames.includes(a)) {
       const v = args[i + 1];
       if (v === undefined) die(`${a} requires a value`);
-      flags.strs.set(a, v);
+      value(a, v);
       i++;
     } else if (a.startsWith("--") && strNames.some((s) => a.startsWith(`${s}=`))) {
       const eq = a.indexOf("=");
-      flags.strs.set(a.slice(0, eq), a.slice(eq + 1));
+      value(a.slice(0, eq), a.slice(eq + 1));
     } else if (a.startsWith("-")) {
       die(`unknown flag ${a}`);
     } else {
@@ -1049,8 +1205,9 @@ async function cmdInit(L: Layout, args: string[]): Promise<void> {
   const name = f.rest[0];
   if (!name)
     die(
-      "usage: claudep init <name> [--copy-mcp] [--no-login] [--sso] [--email <e>] [--console] [--alias <cmd>] [--force]",
+      "usage: claudep init <name> [--copy-mcp] [--no-login] [--sso] [--email <e>] [--console] [--alias <cmd>] [--env KEY=VALUE]… [--force]",
     );
+  const newVars = parseEnvEntries(f.lists.get("--env") ?? []);
   if (!existsSync(L.base)) die(`base config dir ${L.base} does not exist. Run \`claude\` once first`);
   const dir = profileDir(L, name);
   const fresh = !existsSync(dir);
@@ -1077,6 +1234,11 @@ async function cmdInit(L: Layout, args: string[]): Promise<void> {
     ok(`.claude.json seeded${f.bools.has("--copy-mcp") ? " (with user-scope MCP servers)" : ""}`);
   else if (seeded === "exists") console.log(`${c.dim("·")} .claude.json ${c.dim("already present")}`);
   else warn(`could not read ${L.baseGlobalJson}; Claude Code will run its first-time onboarding`);
+
+  if (newVars.length) {
+    writeFileSync(join(dir, ENV_FILE), editEnvText(readEnvText(dir), name, newVars, []));
+    ok(`${ENV_FILE}: ${newVars.map(([k]) => k).join(", ")}`);
+  }
 
   const alias = f.strs.get("--alias");
   if (alias !== undefined) writeAlias(L, name, alias);
@@ -1278,14 +1440,100 @@ function cmdEnv(L: Layout, args: string[]): void {
     forced === undefined ? shellSyntax(process.env, L.platform, parentProcessName(L.platform)) : envSyntaxOf(forced);
   if (!syntax) die(`unsupported shell "${forced}". Use sh, zsh, bash, fish or powershell`);
   if (f.bools.has("--unset")) {
-    process.stdout.write(envScript(undefined, syntax));
+    process.stdout.write(envScript(undefined, syntax, { clear: exportedEnvKeys(process.env), set: [] }));
     return;
   }
   const name = f.rest[0];
   if (!name) die(envUsage(syntax));
   const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist`);
-  process.stdout.write(envScript(dir, syntax));
+  const { vars } = readProfileEnv(dir);
+  const plan = envPlan(vars, process.env, L.platform);
+  for (const [k] of vars)
+    if (!plan.set.some(([s]) => s === k)) console.error(`claudep: ${k} is already set in this shell; leaving it`);
+  process.stdout.write(envScript(dir, syntax, plan));
+}
+
+/** KEY=VALUE arguments, or exit with every reason one is refused. */
+function parseEnvEntries(entries: readonly string[]): EnvVar[] {
+  const out: EnvVar[] = [];
+  const errors: string[] = [];
+  for (const entry of entries) {
+    const r = validateEnvEntry(entry);
+    if (typeof r === "string") errors.push(r);
+    else out.push(r);
+  }
+  if (errors.length) die(errors.join("\n       "));
+  return out;
+}
+
+/** A claudep.env text with `set` applied and `unset` removed, edited in place:
+ *  comments and lines claudep skips stay, a key keeps its line, a new key goes
+ *  last. `undefined` text starts a new file. */
+export function editEnvText(
+  text: string | undefined,
+  name: string,
+  set: readonly EnvVar[],
+  unset: readonly string[],
+): string {
+  const lines = (text ?? envFileText(name, [])).split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  const pending = new Map(set);
+  const placed = new Set<string>();
+  const out: string[] = [];
+  for (const line of lines) {
+    const t = line.trim();
+    const eq = t.indexOf("=");
+    const key = t.startsWith("#") || eq === -1 ? "" : t.slice(0, eq);
+    if (!ENV_KEY_RE.test(key)) out.push(line);
+    else if (unset.includes(key) || placed.has(key)) continue;
+    else if (pending.has(key)) {
+      out.push(`${key}=${pending.get(key)}`);
+      placed.add(key);
+    } else out.push(line);
+  }
+  for (const [k, v] of pending) if (!placed.has(k)) out.push(`${k}=${v}`);
+  return `${out.join("\n")}\n`;
+}
+
+function readEnvText(dir: string): string | undefined {
+  try {
+    return readFileSync(join(dir, ENV_FILE), "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+function cmdVars(L: Layout, args: string[]): void {
+  const f = parseFlags(args, ...flagSpec("vars"));
+  const [name, ...rest] = f.rest;
+  if (!name) die("usage: claudep vars <name> [KEY=VALUE…] | --unset KEY… | --json");
+  const dir = profileDir(L, name);
+  if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
+  const file = join(dir, ENV_FILE);
+  const { vars, skipped } = readProfileEnv(dir);
+  if (!rest.length) {
+    if (f.bools.has("--unset")) die("usage: claudep vars <name> --unset KEY…");
+    if (f.bools.has("--json")) console.log(JSON.stringify(Object.fromEntries(vars), null, 2));
+    else for (const [k, v] of vars) console.log(`${k}=${v}`);
+    if (skipped.length) console.error(`claudep: ${file} has lines it skips: ${skipped.join(", ")}`);
+    return;
+  }
+  let text: string;
+  if (f.bools.has("--unset")) {
+    const bad = rest.filter((k) => !ENV_KEY_RE.test(k));
+    if (bad.length) die(`not variable names: ${bad.join(", ")}`);
+    text = editEnvText(readEnvText(dir), name, [], rest);
+  } else text = editEnvText(readEnvText(dir), name, parseEnvEntries(rest), []);
+  const next = parseEnvFile(text);
+  // Nothing left but claudep's own header: drop the file.
+  if (next.vars.length || next.skipped.length || text !== envFileText(name, [])) writeFileSync(file, text);
+  else rmSync(file, { force: true });
+  ok(next.vars.length ? `${name}: ${next.vars.map(([k]) => k).join(", ")}` : `${name}: no variables`);
+  if (L.activeProfile === name || exportedEnvKeys(process.env).length)
+    console.log(
+      `${c.dim("·")} this shell picks the change up on the next cd into a pinned directory, or from: claudep env ${name}`,
+    );
 }
 
 function describeCurrent(cur: Current): string {
@@ -1449,22 +1697,52 @@ export function fishQuote(s: string): string {
   return `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
 }
 
-/** The `claudep env` script: pin the shell to `dir`, or clear the pin. */
-export function envScript(dir: string | undefined, syntax: EnvSyntax): string {
+export type EnvPlan = { clear: string[]; set: EnvVar[] };
+
+/** The `claudep env` script: pin the shell to `dir`, or clear the pin. `plan`
+ *  clears the variables claudep exported before and sets the profile's own,
+ *  recording them in CLAUDEP_ENV_KEYS. */
+export function envScript(dir: string | undefined, syntax: EnvSyntax, plan: EnvPlan = { clear: [], set: [] }): string {
+  const set = dir === undefined ? [] : plan.set;
+  const keys = set.map(([k]) => k).join(" ");
+  const forget = plan.clear.length > 0 && set.length === 0;
   if (syntax === "powershell") {
-    if (dir === undefined) return "Remove-Item Env:CLAUDE_CONFIG_DIR, Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue\n";
-    // Clearing CLAUDEP_AUTO turns this into a manual pin the shell hook will not touch.
-    return `$env:CLAUDE_CONFIG_DIR = '${dir.replace(/'/g, "''")}'\nRemove-Item Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue\n`;
+    const ps = (v: string) => `'${v.replace(/'/g, "''")}'`;
+    const out: string[] = [];
+    if (plan.clear.length)
+      out.push(`Remove-Item ${plan.clear.map((k) => `Env:${k}`).join(", ")} -ErrorAction SilentlyContinue`);
+    if (dir === undefined)
+      out.push("Remove-Item Env:CLAUDE_CONFIG_DIR, Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue");
+    else {
+      // Clearing CLAUDEP_AUTO turns this into a manual pin the shell hook will not touch.
+      out.push(`$env:CLAUDE_CONFIG_DIR = ${ps(dir)}`, "Remove-Item Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue");
+    }
+    for (const [k, v] of set) out.push(`$env:${k} = ${ps(v)}`);
+    if (set.length) out.push(`$env:${ENV_KEYS_VAR} = ${ps(keys)}`);
+    if (forget) out.push(`Remove-Item Env:${ENV_KEYS_VAR} -ErrorAction SilentlyContinue`);
+    return `${out.join("\n")}\n`;
   }
   if (syntax === "fish") {
     // A bare `set -e` on a missing name returns 1 and `source` reports its
     // last status, which prompt themes paint red; the guard keeps it at 0.
-    if (dir === undefined)
-      return "not set -q CLAUDE_CONFIG_DIR; or set -e CLAUDE_CONFIG_DIR\nnot set -q CLAUDEP_AUTO; or set -e CLAUDEP_AUTO\n";
-    return `set -gx CLAUDE_CONFIG_DIR ${fishQuote(dir)}\nnot set -q CLAUDEP_AUTO; or set -e CLAUDEP_AUTO\n`;
+    const drop = (k: string) => `not set -q ${k}; or set -e ${k}`;
+    const out = plan.clear.map(drop);
+    if (dir === undefined) out.push(drop("CLAUDE_CONFIG_DIR"), drop("CLAUDEP_AUTO"));
+    else out.push(`set -gx CLAUDE_CONFIG_DIR ${fishQuote(dir)}`, drop("CLAUDEP_AUTO"));
+    for (const [k, v] of set) out.push(`set -gx ${k} ${fishQuote(v)}`);
+    if (set.length) out.push(`set -gx ${ENV_KEYS_VAR} ${fishQuote(keys)}`);
+    if (forget) out.push(drop(ENV_KEYS_VAR));
+    return `${out.join("\n")}\n`;
   }
-  if (dir === undefined) return "unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO\n";
-  return `export CLAUDE_CONFIG_DIR='${dir.replace(/'/g, `'\\''`)}'\nunset CLAUDEP_AUTO\n`;
+  const sq = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+  const out: string[] = [];
+  if (plan.clear.length) out.push(`unset ${plan.clear.join(" ")}`);
+  if (dir === undefined) out.push("unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO");
+  else out.push(`export CLAUDE_CONFIG_DIR=${sq(dir)}`, "unset CLAUDEP_AUTO");
+  for (const [k, v] of set) out.push(`export ${k}=${sq(v)}`);
+  if (set.length) out.push(`export ${ENV_KEYS_VAR}=${sq(keys)}`);
+  if (forget) out.push(`unset ${ENV_KEYS_VAR}`);
+  return `${out.join("\n")}\n`;
 }
 
 export function shellInit(shell: Shell, profilesRoot: string, platform: NodeJS.Platform = process.platform): string {
@@ -1481,6 +1759,35 @@ export function shellInit(shell: Shell, profilesRoot: string, platform: NodeJS.P
 function fishHook(profilesRoot: string): string {
   return `# claudep shell hook. Load it from ~/.config/fish/config.fish:  ${hookHint("fish")}
 set -g _claudep_root ${fishQuote(profilesRoot)}
+# Clear the variables a ${ENV_FILE} put in this shell.
+function _claudep_env_clear
+  for k in (string split ' ' -- "$${ENV_KEYS_VAR}")
+    string match -qr '^[A-Za-z_][A-Za-z0-9_]*$' -- $k; or continue
+    string match -qir '${refusedEnvRegex()}' -- $k; and continue
+    set -e $k
+  end
+  not set -q ${ENV_KEYS_VAR}; or set -e ${ENV_KEYS_VAR}
+end
+# Export a profile's ${ENV_FILE}: data read line by line, never sourced. A
+# variable the user set wins and is left alone.
+function _claudep_env_load -a file
+  test -f "$file"; or return 0
+  set -l keys
+  while read -l line
+    set line (string trim -- $line)
+    test -n "$line"; or continue
+    string match -q -- '#*' $line; and continue
+    set -l kv (string split -m1 = -- $line)
+    set -q kv[2]; and test -n "$kv[2]"; or continue
+    string match -qr '^[A-Za-z_][A-Za-z0-9_]*$' -- $kv[1]; or continue
+    string match -qir '${refusedEnvRegex()}' -- $kv[1]; and continue
+    set -q $kv[1]; and continue
+    set -gx $kv[1] $kv[2]
+    set -a keys $kv[1]
+  end < "$file"
+  set -q keys[1]; and set -gx ${ENV_KEYS_VAR} (string join ' ' -- $keys)
+  return 0
+end
 function _claudep_auto --on-variable PWD
   test "$PWD" = "$_claudep_last_pwd"; and return 0
   set -g _claudep_last_pwd $PWD
@@ -1515,6 +1822,7 @@ function _claudep_auto --on-variable PWD
     if test -n "$CLAUDEP_AUTO"
       set -e CLAUDE_CONFIG_DIR
       set -e CLAUDEP_AUTO
+      _claudep_env_clear
     end
     return 0
   end
@@ -1522,12 +1830,15 @@ function _claudep_auto --on-variable PWD
     if test -n "$CLAUDEP_AUTO"
       set -e CLAUDE_CONFIG_DIR
       set -e CLAUDEP_AUTO
+      _claudep_env_clear
     end
     printf 'claudep: %s/${PIN_FILE} names profile "%s", which does not exist. Run: claudep init %s\\n' "$found" "$name" "$name" >&2
     return 0
   end
   set -gx CLAUDE_CONFIG_DIR "$_claudep_root/$name"
   set -gx CLAUDEP_AUTO "$_claudep_root/$name"
+  _claudep_env_clear
+  _claudep_env_load "$_claudep_root/$name/${ENV_FILE}"
 end
 _claudep_auto
 `;
@@ -1543,6 +1854,32 @@ function powershellHook(profilesRoot: string): string {
   const q = profilesRoot.replace(/'/g, "''");
   return `# claudep shell hook. Load it from your $PROFILE:  ${hookHint("powershell")}
 $global:_claudep_root = '${q}'
+# Clear the variables a ${ENV_FILE} put in this shell.
+function global:_claudep_env_clear {
+  foreach ($k in @(([string]$env:${ENV_KEYS_VAR}).Split(' '))) {
+    if ($k -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$' -or $k -match '${refusedEnvRegex()}') { continue }
+    Remove-Item -LiteralPath "Env:$k" -ErrorAction SilentlyContinue
+  }
+  Remove-Item Env:${ENV_KEYS_VAR} -ErrorAction SilentlyContinue
+}
+# Export a profile's ${ENV_FILE}: data read line by line, never sourced. A
+# variable the user set wins and is left alone.
+function global:_claudep_env_load([string]$file) {
+  if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return }
+  $keys = @()
+  foreach ($line in @(Get-Content -LiteralPath $file)) {
+    $t = ([string]$line).Trim()
+    if ($t -eq '' -or $t.StartsWith('#')) { continue }
+    $i = $t.IndexOf('=')
+    if ($i -lt 1 -or $i -eq $t.Length - 1) { continue }
+    $k = $t.Substring(0, $i)
+    if ($k -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$' -or $k -match '${refusedEnvRegex()}') { continue }
+    if (Test-Path -LiteralPath "Env:$k") { continue }
+    Set-Item -LiteralPath "Env:$k" -Value $t.Substring($i + 1)
+    $keys += $k
+  }
+  if ($keys.Count) { $env:${ENV_KEYS_VAR} = $keys -join ' ' }
+}
 function global:_claudep_auto {
   $here = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
   if ($here -ceq $global:_claudep_last_pwd) { return }
@@ -1570,17 +1907,19 @@ function global:_claudep_auto {
   }
   if ($name -eq '') {
     # No pin here: hand the shell back to the base account.
-    if ($env:CLAUDEP_AUTO) { Remove-Item Env:CLAUDE_CONFIG_DIR, Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue }
+    if ($env:CLAUDEP_AUTO) { Remove-Item Env:CLAUDE_CONFIG_DIR, Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue; _claudep_env_clear }
     return
   }
   $target = Join-Path $global:_claudep_root $name
   if (-not (Test-Path -LiteralPath $target -PathType Container)) {
-    if ($env:CLAUDEP_AUTO) { Remove-Item Env:CLAUDE_CONFIG_DIR, Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue }
+    if ($env:CLAUDEP_AUTO) { Remove-Item Env:CLAUDE_CONFIG_DIR, Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue; _claudep_env_clear }
     [Console]::Error.WriteLine('claudep: ' + (Join-Path $found '${PIN_FILE}') + ' names profile "' + $name + '", which does not exist. Run: claudep init ' + $name)
     return
   }
   $env:CLAUDE_CONFIG_DIR = $target
   $env:CLAUDEP_AUTO = $target
+  _claudep_env_clear
+  _claudep_env_load (Join-Path $target '${ENV_FILE}')
 }
 if (-not $global:_claudep_prompt_orig) {
   $global:_claudep_prompt_orig = if (Test-Path Function:\\prompt) { $function:prompt } else { { 'PS> ' } }
@@ -1596,9 +1935,38 @@ function shHook(shell: "zsh" | "bash", profilesRoot: string, platform: NodeJS.Pl
   // native path claude.exe reads, so the root and its separator are embedded
   // as the native bun saw them and only the walk uses $PWD.
   const sep = platform === "win32" ? "\\" : "/";
+  // Whether the variable named by $_claudep_k is set, without eval or a subshell.
+  const isSet = shell === "zsh" ? `\${(P)_claudep_k+x}` : `\${!_claudep_k+x}`;
   const core = `# claudep shell hook. Load it from your rc file:  eval "$(claudep shell-init ${shell})"
 _claudep_root='${q}'
 _claudep_sep='${sep}'
+# Clear the variables a ${ENV_FILE} put in this shell.
+_claudep_env_clear() {
+  _claudep_rest="\${${ENV_KEYS_VAR}:-}"
+  while [ -n "$_claudep_rest" ]; do
+    _claudep_k="\${_claudep_rest%% *}"
+    case "$_claudep_rest" in *" "*) _claudep_rest="\${_claudep_rest#* }" ;; *) _claudep_rest="" ;; esac
+    case "$_claudep_k" in "" | [0-9]* | *[!A-Za-z0-9_]* | ${refusedEnvCase()}) ;; *) unset "$_claudep_k" ;; esac
+  done
+  unset ${ENV_KEYS_VAR}
+}
+# Export a profile's ${ENV_FILE}: data read line by line, never sourced. A
+# variable the user set wins and is left alone.
+_claudep_env_load() {
+  _claudep_keys=""
+  [ -f "$1" ] || return 0
+  while read -r _claudep_line || [ -n "$_claudep_line" ]; do
+    _claudep_line="\${_claudep_line%$'\\r'}"
+    case "$_claudep_line" in "" | "#"* | "="* | *=) continue ;; *=*) ;; *) continue ;; esac
+    _claudep_k="\${_claudep_line%%=*}"
+    case "$_claudep_k" in [0-9]* | *[!A-Za-z0-9_]* | ${refusedEnvCase()}) continue ;; esac
+    [ -n "${isSet}" ] && continue
+    export "$_claudep_k=\${_claudep_line#*=}"
+    _claudep_keys="\${_claudep_keys:+$_claudep_keys }$_claudep_k"
+  done < "$1"
+  [ -n "$_claudep_keys" ] && export ${ENV_KEYS_VAR}="$_claudep_keys"
+  return 0
+}
 _claudep_auto() {
   [ "$PWD" = "\${_claudep_last_pwd:-}" ] && return 0
   _claudep_last_pwd="$PWD"
@@ -1623,15 +1991,17 @@ _claudep_auto() {
   done
   if [ -z "$_claudep_name" ]; then
     # No pin here: hand the shell back to the base account.
-    [ -n "\${CLAUDEP_AUTO:-}" ] && unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO
+    if [ -n "\${CLAUDEP_AUTO:-}" ]; then unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO; _claudep_env_clear; fi
     return 0
   fi
   if [ ! -d "$_claudep_root$_claudep_sep$_claudep_name" ]; then
-    [ -n "\${CLAUDEP_AUTO:-}" ] && unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO
+    if [ -n "\${CLAUDEP_AUTO:-}" ]; then unset CLAUDE_CONFIG_DIR CLAUDEP_AUTO; _claudep_env_clear; fi
     printf 'claudep: %s/${PIN_FILE} names profile "%s", which does not exist. Run: claudep init %s\\n' "$_claudep_found" "$_claudep_name" "$_claudep_name" >&2
     return 0
   fi
   export CLAUDE_CONFIG_DIR="$_claudep_root$_claudep_sep$_claudep_name" CLAUDEP_AUTO="$_claudep_root$_claudep_sep$_claudep_name"
+  _claudep_env_clear
+  _claudep_env_load "$_claudep_root$_claudep_sep$_claudep_name\${_claudep_sep}${ENV_FILE}"
 }
 `;
   const tail =
@@ -1938,6 +2308,23 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
     else warn(`no .credentials.json in the profile. Not logged in yet (claudep ${name} auth login)`);
     if (s.loggedIn) ok(`logged in as ${s.email ?? "?"} (${s.orgName ?? "?"}, ${s.subscriptionType ?? "?"})`);
     else warn("not logged in");
+    if (s.configDirectory !== undefined) {
+      if (samePath(canon(s.configDirectory, L.home, L.platform), dir, L.platform))
+        ok(`Claude Code reports this config dir`);
+      else {
+        bad(`Claude Code reports config dir ${s.configDirectory}, not ${dir}`);
+        problems++;
+      }
+    }
+    if (s.apiKeySource) warn(`Claude Code uses an API key from ${s.apiKeySource} instead of the profile login`);
+    const env = readProfileEnv(dir);
+    if (env.vars.length) ok(`${ENV_FILE}: ${env.vars.map(([k]) => k).join(", ")}`);
+    if (env.skipped.length) {
+      bad(
+        `${join(dir, ENV_FILE)}: lines ${env.skipped.join(", ")} are not KEY=VALUE with an allowed name and a value; nothing reads them`,
+      );
+      problems++;
+    }
   }
   if (!names.length) console.log(c.dim("\nNo profiles to check."));
   if (problems) {
@@ -2023,6 +2410,8 @@ ${c.bold("USAGE")}
   claudep current [--json|--name]      which profile this shell is on, and why; --name prints only the name
   claudep env <name> | --unset         print the CLAUDE_CONFIG_DIR pin (or the unset) for eval, source or Invoke-Expression;
                                        --shell sh|fish|powershell picks the syntax when the shell was not detected
+  claudep vars <name> [KEY=VALUE…]     list or set the variables the profile exports; --unset KEY… removes,
+                                       --json lists as JSON
   claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
   claudep doctor [name]                verify symlinks, keychain entry, unclassified files, Claude Code version
   claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
@@ -2045,6 +2434,7 @@ ${c.bold("INIT OPTIONS")}
   --console           log in with an Anthropic Console (API billing) account instead of a subscription
   --copy-mcp          copy user-scope MCP servers from the base .claude.json
   --alias <command>   also create a shim command, e.g. --alias eclaude
+  --env KEY=VALUE     a variable the profile exports, as with claudep vars; repeat for more
   --no-login          set up files only; log in later with: claudep <name> auth login
   --force             relink shared items whose symlinks point elsewhere
 
@@ -2056,6 +2446,7 @@ ${c.bold("EXAMPLES")}
   eval "$(claudep env enterprise)"              # pin the whole shell to a profile
   claudep env enterprise | source               # the same from fish
   claudep env enterprise | Invoke-Expression    # the same from PowerShell
+  claudep vars enterprise ANTHROPIC_PROFILE=work # this profile also picks a Console sign-in
   claudep local enterprise                      # pin this repo; commit the ${PIN_FILE} file for the team
   eval "$(claudep shell-init zsh)"              # in .zshrc: shells follow ${PIN_FILE} pins on cd
   ${hookHint("fish")}              # the same line for config.fish
@@ -2080,9 +2471,16 @@ ${c.bold("PIN RULES")}
   so a manual pin from "claudep env" stays put. Leaving every pinned tree returns the shell to
   ~/.claude.
 
+${c.bold("PROFILE VARIABLES")}
+  <profile>/${ENV_FILE} holds KEY=VALUE lines that "claudep <name>", "claudep env" and the hook
+  export with the profile, e.g. CLAUDE_CODE_USE_BEDROCK=1 or ANTHROPIC_PROFILE=work. It is read as
+  data, never run. A variable you set yourself always wins. CLAUDE_CONFIG_DIR, CLAUDEP_* and
+  credential variables are refused.
+
 ${c.bold("ENVIRONMENT")}
   CLAUDE_PROFILES_DIR   where profiles live (default ~/.claudep; keep it out of iCloud/Dropbox)
   CLAUDEP_AUTO          set by the hook next to CLAUDE_CONFIG_DIR; marks the pin as hook-managed
+  ${ENV_KEYS_VAR}      the variables a ${ENV_FILE} put in this shell, cleared again on leaving
 
 ${c.dim("claudep is an independent, unofficial tool. It is not affiliated with, endorsed by or supported by Anthropic.")}
 `;
@@ -2128,6 +2526,8 @@ export async function main(argv: string[]): Promise<void> {
     case "-v":
       console.log(version());
       return;
+    case "vars":
+      return cmdVars(L, args);
     case "alias":
       return cmdAlias(L, args);
     case "doctor":

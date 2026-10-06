@@ -4,6 +4,8 @@ A `.claudep` file names the profile every hooked shell should use inside that di
 
 ## Four implementations that must agree
 
+The same four also read a profile's `claudep.env`: `parseEnvFile()` in TypeScript and `_claudep_env_load` in each hook. See "Profile variables in the hook" below.
+
 - `resolvePin(startDir)` in `claudep.ts` is the TypeScript version. `claudep resolve`, `claudep local` and `claudep current` use it.
 - The hook printed by `claudep shell-init zsh|bash` is the sh version. It runs on every directory change (zsh `chpwd`) or prompt (bash `PROMPT_COMMAND`), so it uses parameter expansion and builtins only. No subprocess, ever.
 - The hook printed by `claudep shell-init fish` is the fish version. `function _claudep_auto --on-variable PWD` runs it on every `cd`, `pushd` and `popd`, plus once at load. It uses `set`, `test`, `read`, `printf` and `string` only; every `(...)` in it is a `string` builtin, which fish runs in-process. `string trim` drops the `\r`, `string replace -r '/[^/]*$' ''` is the parent step and turns `/foo` into the empty string exactly like `${dir%/*}`, and `read` returns 0 on an unterminated last line so no `|| [ -n ]` twin is needed. The floor is fish 3.0: `path dirname` would need 3.5, `$(...)` 3.4, and Ubuntu 22.04 ships 3.3. The `_claudep_last_pwd` dedupe stays because fish fires the event on every `set` of `PWD`, `cd .` included. Not a Windows target; it joins with `/`.
@@ -31,6 +33,12 @@ The hook exports `CLAUDEP_AUTO` next to `CLAUDE_CONFIG_DIR` with the same value.
 `shellSyntax()` decides: PowerShell on Windows unless `MSYSTEM` is set (Git Bash sets it, PowerShell does not). Elsewhere the parent process is consulted first (`parentProcessName()`: `/proc/<ppid>/comm` on Linux, one `ps -o comm=` on macOS), because `eval "$(claudep env x)"` forks the calling shell and a fish pipeline runs claudep as fish's child: fish gives fish, `pwsh` gives PowerShell, an sh-like name gives sh. An unrecognised parent (a test runner, `make`) falls back to `basename($SHELL)`: fish when that is fish, else sh. fish exports no marker a child could see (`FISH_VERSION` and `fish_pid` are unexported), which is why the parent is consulted at all, and `--shell sh|zsh|bash|fish|powershell` overrides everything for scripts. The hook never does any of this; it is `claudep env` that spawns `ps`, once, when the user types it.
 
 Leaving every pinned tree unsets both variables, so the shell returns to `~/.claude`. A stale profile that silently followed you out of a repo was judged worse than a visible fall back to the default.
+
+## Profile variables in the hook
+
+After the hook sets a pin it runs `_claudep_env_clear` and then `_claudep_env_load <profile>/claudep.env`. Clear unsets every name in `CLAUDEP_ENV_KEYS` and then the marker itself. Load reads the file with the same loop as a pin file: trim, drop a trailing `\r`, skip empty and `#` lines, split on the first `=`, skip a key that is not `[A-Za-z_][A-Za-z0-9_]*`, is refused, has an empty value, or is already set, export the rest and record their names in `CLAUDEP_ENV_KEYS`. Leaving a pinned tree, or landing on a missing profile, clears them with `CLAUDE_CONFIG_DIR`. A manual pin returns before any of this, so the variables `claudep env` printed stay until `claudep env --unset`.
+
+Per dialect, "already set" is `${!k+x}` in bash (it works in macOS's bash 3.2), `${(P)k+x}` in zsh, `set -q $k` in fish and `Test-Path Env:$k` in PowerShell. None of them is a subshell. The refused list comes from `refusedEnvCase()` (an sh case pattern with `[Aa]` for every letter) and `refusedEnvRegex()` (anchored alternatives without a group, because every `(` in the fish hook must be a `string` call), and a unit test checks both against `refusedEnvKey()`.
 
 ## What `claudep current` reports
 

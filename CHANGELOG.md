@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Per-profile variables. `claudep vars <name> KEY=VALUE…` sets them, `claudep vars <name>` lists them (`--json` too), and `--unset KEY…` removes them; `claudep init --env KEY=VALUE` sets them at creation. They live in `~/.claudep/<name>/claudep.env`. `claudep <name>`, alias commands, `claudep env <name>` and the zsh, bash, fish and PowerShell hooks export them with the profile, and the hooks clear them when you leave a pinned tree. The file is read as data, never run. A variable you set yourself always wins. Use it for `CLAUDE_CODE_USE_BEDROCK`, `AWS_PROFILE`, or `ANTHROPIC_PROFILE` to give each profile its own Console sign-in. `CLAUDE_CONFIG_DIR`, `CLAUDEP_*` and credential variables are refused.
+- `claudep doctor` fails when Claude Code reports a config dir other than the profile's (`configDirectory` in `claude auth status --json`), names the API key source Claude Code reports, lists each profile's variable names, and fails on `claudep.env` lines nothing reads.
+- `claudep status --json` and `claudep list --json` include `apiProvider`, `apiKeySource` and `configDirectory` when Claude Code reports them.
+
+### Changed
+
+- **Breaking:** `vars` is now a reserved word. A profile named `vars` stops resolving; recreate it under another name.
+- `claudep env --unset`, `claudep default` and `claudep run` clear the variables a `claudep.env` put in the shell (listed in `CLAUDEP_ENV_KEYS`), so one profile's variables never reach another profile or the base.
+
 ## [0.4.2] - 2026-10-02
 
 ### Fixed

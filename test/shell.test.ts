@@ -27,6 +27,8 @@ type Dialect = {
   cd: (dir: string) => string;
   unset: (name: string) => string;
   echoVar: (name: string) => string;
+  /** Prints NAME=value, or NAME=<unset>. */
+  showVar: (name: string) => string;
   /** Runs `claudep resolve` from the shell. */
   resolve: string;
   /** How the hook spells the directory it found a pin in. */
@@ -47,6 +49,7 @@ function sh(name: "bash" | "zsh", exe: string): Dialect {
     cd: (dir) => `cd ${q(dir)}`,
     unset: (v) => `unset ${v}`,
     echoVar: (v) => `printf "%s\\n" "$${v}"`,
+    showVar: (v) => `printf "%s=%s\\n" ${v} "\${${v}-<unset>}"`,
     resolve: `${q(BUN)} ${q(SCRIPT)} resolve`,
     // Git Bash reports $PWD in its own /c/ spelling.
     foundDir: (dir) => `${msys(dir)}/.claudep`,
@@ -69,6 +72,7 @@ function fish(exe: string): Dialect {
     cd: (dir) => `cd ${q(dir)}`,
     unset: (v) => `set -e ${v}`,
     echoVar: (v) => `echo $${v}`,
+    showVar: (v) => `set -q ${v}; and echo "${v}=$${v}"; or echo "${v}=<unset>"`,
     resolve: `${q(BUN)} ${q(SCRIPT)} resolve`,
     foundDir: (dir) => `${dir}/.claudep`,
   };
@@ -88,6 +92,7 @@ function powershell(name: string, exe: string): Dialect {
     cd: (dir) => `Set-Location -LiteralPath ${q(dir)}`,
     unset: (v) => `Remove-Item Env:${v}`,
     echoVar: (v) => `Write-Output $env:${v}`,
+    showVar: (v) => `if (Test-Path Env:${v}) { Write-Output "${v}=$env:${v}" } else { Write-Output "${v}=<unset>" }`,
     resolve: `& ${q(BUN)} ${q(SCRIPT)} resolve`,
     foundDir: (dir) => join(dir, ".claudep"),
   };
@@ -251,6 +256,78 @@ describe.each(all)("$name hook", (d) => {
     expect(r.stderr.trim().split("\n")).toEqual([
       `claudep: ${d.foundDir(other)} names profile "ghost", which does not exist. Run: claudep init ghost`,
     ]);
+  });
+
+  test("exports the profile's variables on entering and clears them on leaving", async () => {
+    using h = fakeHome();
+    const { nested, work } = pinnedTree(h.home, h.profilesRoot);
+    writeFileSync(join(work, "claudep.env"), "# vars\nANTHROPIC_PROFILE=team\nAWS_REGION=eu west=1\n");
+    const show = [d.showVar("ANTHROPIC_PROFILE"), d.showVar("AWS_REGION"), d.showVar("CLAUDEP_ENV_KEYS")];
+    const r = await run(h.home, [d.cd(nested), "tick", ...show, d.cd(h.home), "tick", ...show]);
+    expect(r.stderr).toBe("");
+    expect(lines(r)).toEqual([
+      "ANTHROPIC_PROFILE=team",
+      "AWS_REGION=eu west=1",
+      "CLAUDEP_ENV_KEYS=ANTHROPIC_PROFILE AWS_REGION",
+      "ANTHROPIC_PROFILE=<unset>",
+      "AWS_REGION=<unset>",
+      "CLAUDEP_ENV_KEYS=<unset>",
+    ]);
+  });
+
+  test("leaves a variable you set alone, before and after the pin", async () => {
+    using h = fakeHome();
+    const { nested, work } = pinnedTree(h.home, h.profilesRoot);
+    writeFileSync(join(work, "claudep.env"), "AWS_PROFILE=team\nOTHER=x\n");
+    const show = [d.showVar("AWS_PROFILE"), d.showVar("CLAUDEP_ENV_KEYS")];
+    const r = await run(h.home, [d.cd(nested), "tick", ...show, d.cd(h.home), "tick", ...show], {
+      AWS_PROFILE: "mine",
+    });
+    expect(lines(r)).toEqual([
+      "AWS_PROFILE=mine",
+      "CLAUDEP_ENV_KEYS=OTHER",
+      "AWS_PROFILE=mine",
+      "CLAUDEP_ENV_KEYS=<unset>",
+    ]);
+  });
+
+  test("skips refused, malformed and empty lines and reads CRLF files", async () => {
+    using h = fakeHome();
+    const { nested, work } = pinnedTree(h.home, h.profilesRoot);
+    writeFileSync(
+      join(work, "claudep.env"),
+      "anthropic_api_key=sk-x\r\nCLAUDEP_AUTO=x\r\nCLAUDE_CONFIG_DIR=/x\r\n1BAD=x\r\nno equals\r\nEMPTY=\r\nGOOD=yes\r\n",
+    );
+    const r = await run(h.home, [
+      d.cd(nested),
+      "tick",
+      d.showVar("GOOD"),
+      d.showVar("anthropic_api_key"),
+      d.showVar("EMPTY"),
+      d.showVar("CLAUDEP_ENV_KEYS"),
+      "show",
+    ]);
+    expect(lines(r)).toEqual([
+      "GOOD=yes",
+      "anthropic_api_key=<unset>",
+      "EMPTY=<unset>",
+      "CLAUDEP_ENV_KEYS=GOOD",
+      `${work}|${work}`,
+    ]);
+  });
+
+  test("swaps the variables when moving between two pinned profiles", async () => {
+    using h = fakeHome();
+    const { nested, work } = pinnedTree(h.home, h.profilesRoot);
+    writeFileSync(join(work, "claudep.env"), "A=work\nONLY_WORK=1\n");
+    const other = join(h.profilesRoot, "other");
+    mkdirSync(other);
+    writeFileSync(join(other, "claudep.env"), "A=other\n");
+    const tree = join(h.home, "tree");
+    mkdirSync(tree);
+    writeFileSync(join(tree, ".claudep"), "other\n");
+    const r = await run(h.home, [d.cd(nested), "tick", d.cd(tree), "tick", d.showVar("A"), d.showVar("ONLY_WORK")]);
+    expect(lines(r)).toEqual(["A=other", "ONLY_WORK=<unset>"]);
   });
 
   test("agrees with `claudep resolve` on the nearest pin", async () => {

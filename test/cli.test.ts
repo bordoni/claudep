@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  appendFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -179,6 +180,8 @@ describe("list and status", () => {
       orgName: "s@x.io's Org",
       subscriptionType: "max",
       authMethod: "claude.ai",
+      apiProvider: "firstParty",
+      configDirectory: join(h.profilesRoot, "smoke"),
     });
   });
 
@@ -203,8 +206,18 @@ describe("list and status", () => {
       orgName: "base@example.com's Org",
       subscriptionType: "max",
       authMethod: "claude.ai",
+      apiProvider: "firstParty",
+      configDirectory: h.base,
     });
-    expect(rows[1]).toEqual({ name: "smoke", dir: join(h.profilesRoot, "smoke"), loggedIn: false, authMethod: "none" });
+    const smoke = join(h.profilesRoot, "smoke");
+    expect(rows[1]).toEqual({
+      name: "smoke",
+      dir: smoke,
+      loggedIn: false,
+      authMethod: "none",
+      apiProvider: "firstParty",
+      configDirectory: smoke,
+    });
     expect(r.stdout).not.toContain("active in this shell");
   });
 });
@@ -873,5 +886,143 @@ describe("completion", () => {
     const r = await runCli(["init", "completion", "--no-login"], { home: h.home });
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("reserved");
+  });
+});
+
+describe("vars", () => {
+  test("sets, lists, prints JSON and unsets a profile's variables", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const set = await runCli(["vars", "work", "ANTHROPIC_PROFILE=team", "AWS_REGION=us-east-1"], { home: h.home });
+    expect(set.exitCode).toBe(0);
+    expect(set.stdout).toContain("work: ANTHROPIC_PROFILE, AWS_REGION");
+    const file = join(h.profilesRoot, "work", "claudep.env");
+    expect(readFileSync(file, "utf8")).toEndWith("ANTHROPIC_PROFILE=team\nAWS_REGION=us-east-1\n");
+
+    await runCli(["vars", "work", "AWS_REGION=eu-west-1"], { home: h.home });
+    const list = await runCli(["vars", "work"], { home: h.home });
+    expect(list.stdout).toBe("ANTHROPIC_PROFILE=team\nAWS_REGION=eu-west-1\n");
+    const json = await runCli(["vars", "work", "--json"], { home: h.home });
+    expect(JSON.parse(json.stdout)).toEqual({ ANTHROPIC_PROFILE: "team", AWS_REGION: "eu-west-1" });
+
+    await runCli(["vars", "work", "--unset", "AWS_REGION"], { home: h.home });
+    expect((await runCli(["vars", "work"], { home: h.home })).stdout).toBe("ANTHROPIC_PROFILE=team\n");
+    await runCli(["vars", "work", "--unset", "ANTHROPIC_PROFILE"], { home: h.home });
+    expect(existsSync(file)).toBe(false);
+  });
+
+  test("refuses credential and claudep variables and writes nothing", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const r = await runCli(["vars", "work", "OK=1", "ANTHROPIC_API_KEY=sk-x", "CLAUDE_CONFIG_DIR=/x"], {
+      home: h.home,
+    });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("ANTHROPIC_API_KEY is not allowed: claudep never stores credentials");
+    expect(r.stderr).toContain("CLAUDE_CONFIG_DIR is not allowed");
+    expect(r.stderr).not.toContain("sk-x");
+    expect(existsSync(join(h.profilesRoot, "work", "claudep.env"))).toBe(false);
+  });
+
+  test("keeps hand-written comments and reports lines it skips", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const file = join(h.profilesRoot, "work", "claudep.env");
+    writeFileSync(file, "# team settings\nA=1\nnot a var\n");
+    await runCli(["vars", "work", "B=2"], { home: h.home });
+    expect(readFileSync(file, "utf8")).toBe("# team settings\nA=1\nnot a var\nB=2\n");
+    const list = await runCli(["vars", "work"], { home: h.home });
+    expect(list.stdout).toBe("A=1\nB=2\n");
+    expect(list.stderr).toContain("has lines it skips: 3");
+  });
+
+  test("init --env writes the variables, and refuses a bad one before creating the profile", async () => {
+    using h = fakeHome();
+    const r = await runCli(["init", "work", "--no-login", "--env", "A=1", "--env=B=x y"], { home: h.home });
+    expect(r.exitCode).toBe(0);
+    expect((await runCli(["vars", "work"], { home: h.home })).stdout).toBe("A=1\nB=x y\n");
+    const bad = await runCli(["init", "other", "--no-login", "--env", "CLAUDEP_AUTO=1"], { home: h.home });
+    expect(bad.exitCode).toBe(1);
+    expect(existsSync(join(h.profilesRoot, "other"))).toBe(false);
+  });
+
+  test("vars is a reserved profile name and needs an existing profile", async () => {
+    using h = fakeHome();
+    expect((await runCli(["init", "vars", "--no-login"], { home: h.home })).stderr).toContain("reserved");
+    const r = await runCli(["vars", "ghost", "A=1"], { home: h.home });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain('profile "ghost" does not exist');
+  });
+});
+
+describe("profile variables at run time", () => {
+  test("run exports the profile's variables, but a variable you set wins", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login", "--env", "A=1", "--env", "B=2"], { home: h.home });
+    const log = join(h.home, "claude.log");
+    await runCli(["work", "x"], { home: h.home, env: { FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_LOG_ENV: "A,B", B: "mine" } });
+    expect(JSON.parse(readFileSync(log, "utf8")).env).toEqual({ A: "1", B: "mine" });
+  });
+
+  test("run drops the variables another profile's claudep.env put in the shell", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login", "--env", "A=1"], { home: h.home });
+    const log = join(h.home, "claude.log");
+    const env = {
+      FAKE_CLAUDE_LOG: log,
+      FAKE_CLAUDE_LOG_ENV: "A,OTHER,CLAUDEP_ENV_KEYS",
+      OTHER: "o",
+      CLAUDEP_ENV_KEYS: "OTHER",
+    };
+    await runCli(["work", "x"], { home: h.home, env });
+    await runCli(["default", "x"], { home: h.home, env });
+    const [work, base] = readFileSync(log, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l).env);
+    expect(work).toEqual({ A: "1", OTHER: null, CLAUDEP_ENV_KEYS: null });
+    expect(base).toEqual({ A: null, OTHER: null, CLAUDEP_ENV_KEYS: null });
+  });
+
+  test("env exports the variables and records them; env --unset clears them", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login", "--env", "A=1", "--env", "B=2"], { home: h.home });
+    const dir = join(h.profilesRoot, "work");
+    const r = await runCli(["env", "work", "--shell", "sh"], { home: h.home, env: { B: "mine" } });
+    expect(r.stdout).toBe(
+      `export CLAUDE_CONFIG_DIR='${dir}'\nunset CLAUDEP_AUTO\nexport A='1'\nexport CLAUDEP_ENV_KEYS='A'\n`,
+    );
+    expect(r.stderr).toBe("claudep: B is already set in this shell; leaving it\n");
+    const off = await runCli(["env", "--unset", "--shell", "sh"], { home: h.home, env: { CLAUDEP_ENV_KEYS: "A" } });
+    expect(off.stdout).toBe("unset A\nunset CLAUDE_CONFIG_DIR CLAUDEP_AUTO\nunset CLAUDEP_ENV_KEYS\n");
+  });
+});
+
+describe("doctor and auth status details", () => {
+  test("lists a profile's variable names and fails on lines nothing reads", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login", "--env", "ANTHROPIC_PROFILE=secret-name"], { home: h.home });
+    const good = await runCli(["doctor", "work"], { home: h.home });
+    expect(good.exitCode).toBe(0);
+    expect(good.stdout).toContain("claudep.env: ANTHROPIC_PROFILE");
+    expect(good.stdout).not.toContain("secret-name");
+    expect(good.stdout).toContain("Claude Code reports this config dir");
+    appendFileSync(join(h.profilesRoot, "work", "claudep.env"), "ANTHROPIC_API_KEY=sk-x\n");
+    const bad = await runCli(["doctor", "work"], { home: h.home });
+    expect(bad.exitCode).toBe(1);
+    expect(bad.stdout).toMatch(/claudep\.env: lines 3 are not KEY=VALUE/);
+    expect(bad.stdout).not.toContain("sk-x");
+  });
+
+  test("fails when Claude Code reports a different config dir, and names an API key source", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const r = await runCli(["doctor", "work"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_CONFIG_DIRECTORY: h.base, ANTHROPIC_API_KEY: "sk-test" },
+    });
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain(`Claude Code reports config dir ${h.base}, not ${join(h.profilesRoot, "work")}`);
+    expect(r.stdout).toContain("Claude Code uses an API key from ANTHROPIC_API_KEY instead of the profile login");
   });
 });

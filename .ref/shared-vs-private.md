@@ -42,6 +42,8 @@ Sharing is opt-in per item. Anything not listed stays inside the profile directo
 
 The base `.claude.json` lives at `~/.claude.json` when `CLAUDE_CONFIG_DIR` is unset in the caller's shell, otherwise inside that dir. `BASE_GLOBAL_JSON` handles both.
 
+`claudep.env` is claudep's own per-profile file of variables (see `design-decisions.md`, 2026-10-05). It is in `KNOWN_PRIVATE` so `doctor` never calls it a stray, and it never exists in the base.
+
 ## Classifying a new file
 
 When `doctor` reports an unclassified base item, ask in order:

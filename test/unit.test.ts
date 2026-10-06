@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import {
+  AUTH_ENV,
   authEnvOverrides,
   baseEnv,
   COMMANDS,
@@ -15,11 +16,16 @@ import {
   currentProfile,
   defaultShell,
   deleteEnv,
+  ENV_KEYS_VAR,
   ENV_SHELLS,
   type Env,
+  editEnvText,
+  envFileText,
   envFor,
+  envPlan,
   envScript,
   envSyntaxOf,
+  exportedEnvKeys,
   fishQuote,
   flagSpec,
   formatTable,
@@ -38,11 +44,15 @@ import {
   PIN_FILE,
   parentProcessName,
   parseAuthStatus,
+  parseEnvFile,
   parseFlags,
   parseVersion,
   pathKey,
   projectSlug,
   RESERVED,
+  refusedEnvCase,
+  refusedEnvKey,
+  refusedEnvRegex,
   resolvePin,
   SHELLS,
   type Shell,
@@ -54,8 +64,10 @@ import {
   shortHome,
   splitPathVar,
   toNativePath,
+  validateEnvEntry,
   version,
   versionBelow,
+  withProfileVars,
 } from "../claudep.ts";
 import { fakeHome } from "./lib/home.ts";
 
@@ -322,7 +334,163 @@ describe("envFor", () => {
   });
 });
 
+describe("profile variables", () => {
+  test("validateEnvEntry takes KEY=VALUE and splits on the first =", () => {
+    expect(validateEnvEntry("ANTHROPIC_PROFILE=work")).toEqual(["ANTHROPIC_PROFILE", "work"]);
+    expect(validateEnvEntry("_X1=a=b c")).toEqual(["_X1", "a=b c"]);
+  });
+
+  test("validateEnvEntry refuses bad names, claudep's own and credential variables, in any case", () => {
+    expect(validateEnvEntry("NOEQUALS")).toContain("is not KEY=VALUE");
+    expect(validateEnvEntry("1X=y")).toContain("is not a variable name");
+    expect(validateEnvEntry("A-B=y")).toContain("is not a variable name");
+    expect(validateEnvEntry("=y")).toContain("is not a variable name");
+    for (const k of ["CLAUDE_CONFIG_DIR", "claude_config_dir", "CLAUDEP_AUTO", "CLAUDEP_ENV_KEYS", ...AUTH_ENV])
+      expect(validateEnvEntry(`${k}=x`)).toContain("is not allowed");
+    expect(validateEnvEntry("anthropic_api_key=x")).toContain("never stores credentials");
+  });
+
+  test("validateEnvEntry refuses empty, multi-line and padded values", () => {
+    expect(validateEnvEntry("A=")).toContain("the value is empty");
+    expect(validateEnvEntry("A=x\ny")).toContain("one line");
+    expect(validateEnvEntry("A=x\ry")).toContain("one line");
+    expect(validateEnvEntry("A= x")).toContain("whitespace");
+    expect(validateEnvEntry("A=x\t")).toContain("whitespace");
+  });
+
+  test("the hooks' refused-key patterns agree with refusedEnvKey", () => {
+    const re = new RegExp(refusedEnvRegex(), "i");
+    const samples = [
+      "CLAUDE_CONFIG_DIR",
+      "Claude_Config_Dir",
+      "CLAUDEP_X",
+      "claudep_",
+      "CLAUDEP",
+      "XCLAUDEP_A",
+      "CLAUDE_CONFIG_DIRX",
+      ...AUTH_ENV,
+      "ANTHROPIC_API_KEY2",
+      "ANTHROPIC_PROFILE",
+      "AWS_PROFILE",
+    ];
+    for (const k of samples) expect([k, re.test(k)]).toEqual([k, refusedEnvKey(k) !== undefined]);
+    expect(refusedEnvCase()).toContain("[Cc][Ll][Aa][Uu][Dd][Ee][Pp]_*");
+    expect(refusedEnvRegex()).not.toContain("(");
+  });
+
+  test("parseEnvFile trims lines, skips comments, keeps the first of a key, and numbers the skipped lines", () => {
+    const text = "# c\r\n  A=1  \r\nB=x=y\n\nA=2\nbad line\nCLAUDEP_AUTO=z\nE=\n1A=x\n";
+    expect(parseEnvFile(text)).toEqual({
+      vars: [
+        ["A", "1"],
+        ["B", "x=y"],
+      ],
+      skipped: [6, 7, 8, 9],
+    });
+    expect(parseEnvFile("")).toEqual({ vars: [], skipped: [] });
+  });
+
+  test("editEnvText updates in place, appends new keys, removes unset ones and keeps comments", () => {
+    const start = editEnvText(undefined, "work", [["A", "1"]], []);
+    expect(start).toBe(`${envFileText("work", [])}A=1\n`);
+    const hand = "# mine\nA=1\nweird\nB=2\nA=3\n";
+    expect(
+      editEnvText(
+        hand,
+        "work",
+        [
+          ["A", "9"],
+          ["C", "3"],
+        ],
+        [],
+      ),
+    ).toBe("# mine\nA=9\nweird\nB=2\nC=3\n");
+    expect(editEnvText(hand, "work", [], ["A"])).toBe("# mine\nweird\nB=2\n");
+    expect(editEnvText("B=2", "work", [], ["B"])).toBe("\n");
+  });
+
+  test("envPlan clears what claudep exported and fills only what the user has not set", () => {
+    const vars: [string, string][] = [
+      ["A", "1"],
+      ["B", "2"],
+      ["C", "3"],
+    ];
+    const env = { B: "mine", C: "old", [ENV_KEYS_VAR]: "C X bad-name CLAUDEP_AUTO" };
+    expect(exportedEnvKeys(env)).toEqual(["C", "X"]);
+    expect(envPlan(vars, env, "linux")).toEqual({
+      clear: ["C", "X"],
+      set: [
+        ["A", "1"],
+        ["C", "3"],
+      ],
+    });
+    expect(envPlan(vars, { b: "mine" }, "win32").set).toEqual([
+      ["A", "1"],
+      ["C", "3"],
+    ]);
+    expect(envPlan(vars, { b: "mine" }, "linux").set).toEqual(vars);
+  });
+
+  test("withProfileVars applies the plan and drops CLAUDEP_ENV_KEYS", () => {
+    const out = withProfileVars(
+      [
+        ["A", "1"],
+        ["B", "2"],
+      ],
+      { B: "mine", OLD: "x", [ENV_KEYS_VAR]: "OLD" },
+      "linux",
+    );
+    expect(out).toEqual({ A: "1", B: "mine" });
+  });
+
+  test("baseEnv drops the variables a profile's claudep.env put in the shell", () => {
+    const L = layout({ HOME: "/home/me" }, "linux");
+    expect(baseEnv(L, { A: "1", KEEP: "y", [ENV_KEYS_VAR]: "A" })).toEqual({ KEEP: "y" });
+  });
+
+  test("envScript exports the plan and records CLAUDEP_ENV_KEYS in every syntax", () => {
+    const plan = {
+      clear: ["OLD"],
+      set: [
+        ["A", "1"],
+        ["B", "it's"],
+      ] as [string, string][],
+    };
+    expect(envScript("/p/w", "sh", plan)).toBe(
+      "unset OLD\nexport CLAUDE_CONFIG_DIR='/p/w'\nunset CLAUDEP_AUTO\nexport A='1'\nexport B='it'\\''s'\nexport CLAUDEP_ENV_KEYS='A B'\n",
+    );
+    expect(envScript("/p/w", "fish", plan)).toBe(
+      "not set -q OLD; or set -e OLD\nset -gx CLAUDE_CONFIG_DIR '/p/w'\nnot set -q CLAUDEP_AUTO; or set -e CLAUDEP_AUTO\nset -gx A '1'\nset -gx B 'it\\'s'\nset -gx CLAUDEP_ENV_KEYS 'A B'\n",
+    );
+    expect(envScript("/p/w", "powershell", plan)).toBe(
+      "Remove-Item Env:OLD -ErrorAction SilentlyContinue\n$env:CLAUDE_CONFIG_DIR = '/p/w'\nRemove-Item Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue\n$env:A = '1'\n$env:B = 'it''s'\n$env:CLAUDEP_ENV_KEYS = 'A B'\n",
+    );
+  });
+
+  test("envScript clears exported variables on --unset and when the new profile has none", () => {
+    expect(envScript(undefined, "sh", { clear: ["A", "B"], set: [] })).toBe(
+      "unset A B\nunset CLAUDE_CONFIG_DIR CLAUDEP_AUTO\nunset CLAUDEP_ENV_KEYS\n",
+    );
+    expect(envScript("/p/w", "sh", { clear: ["A"], set: [] })).toBe(
+      "unset A\nexport CLAUDE_CONFIG_DIR='/p/w'\nunset CLAUDEP_AUTO\nunset CLAUDEP_ENV_KEYS\n",
+    );
+    expect(envScript(undefined, "fish", { clear: ["A"], set: [] })).toBe(
+      "not set -q A; or set -e A\nnot set -q CLAUDE_CONFIG_DIR; or set -e CLAUDE_CONFIG_DIR\nnot set -q CLAUDEP_AUTO; or set -e CLAUDEP_AUTO\nnot set -q CLAUDEP_ENV_KEYS; or set -e CLAUDEP_ENV_KEYS\n",
+    );
+    expect(envScript(undefined, "powershell", { clear: ["A", "B"], set: [] })).toBe(
+      "Remove-Item Env:A, Env:B -ErrorAction SilentlyContinue\nRemove-Item Env:CLAUDE_CONFIG_DIR, Env:CLAUDEP_AUTO -ErrorAction SilentlyContinue\nRemove-Item Env:CLAUDEP_ENV_KEYS -ErrorAction SilentlyContinue\n",
+    );
+  });
+});
+
 describe("parseFlags", () => {
+  test("keeps every value of a repeated value flag, and the last in strs", () => {
+    const f = parseFlags(["w", "--env", "A=1", "--env=B=2"], [], ["--env"]);
+    expect(f.lists.get("--env")).toEqual(["A=1", "B=2"]);
+    expect(f.strs.get("--env")).toBe("B=2");
+    expect(f.rest).toEqual(["w"]);
+  });
+
   test("separates booleans, string flags and positionals", () => {
     const f = parseFlags(["smoke", "--sso", "--email", "a@b.c", "extra"], ["--sso"], ["--email"]);
     expect([...f.bools]).toEqual(["--sso"]);
@@ -408,6 +576,9 @@ describe("parseAuthStatus", () => {
         subscriptionType: "max",
         authMethod: "claude.ai",
         orgId: "x",
+        apiProvider: "bedrock",
+        apiKeySource: "ANTHROPIC_API_KEY",
+        configDirectory: "/home/me/.claudep/w",
       }),
     );
     expect(s).toEqual({
@@ -416,6 +587,9 @@ describe("parseAuthStatus", () => {
       orgName: "Org",
       subscriptionType: "max",
       authMethod: "claude.ai",
+      apiProvider: "bedrock",
+      apiKeySource: "ANTHROPIC_API_KEY",
+      configDirectory: "/home/me/.claudep/w",
     });
   });
 
@@ -839,7 +1013,7 @@ describe("the command table", () => {
   test("flagSpec returns the booleans and the value flags, or nothing for an unknown name", () => {
     expect(flagSpec("init")).toEqual([
       ["--sso", "--console", "--copy-mcp", "--no-login", "--force"],
-      ["--email", "--alias"],
+      ["--email", "--alias", "--env"],
     ]);
     expect(flagSpec("env")).toEqual([["--unset"], ["--shell"]]);
     expect(flagSpec("nope")).toEqual([[], []]);
