@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- `claudep completion powershell` completes subcommands, flags, the values `--shell`, `shell-init` and `completion` take, and your profile names in pwsh and Windows PowerShell 5.1, with each command's description as the tooltip. Load it from your `$PROFILE` with `claudep completion powershell | Out-String | Invoke-Expression`. In Windows PowerShell 5.1 a flag completes from its first letter (`--e<Tab>`), because 5.1 never hands a bare `--` to a completer. A bare `claudep completion` in PowerShell on Windows now prints the script instead of refusing. Profile names are read from `~/.claudep` when you press Tab, so the completer never runs claudep.
+
 ## [0.5.0] - 2026-10-06
 
 ### Added

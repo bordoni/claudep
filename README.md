@@ -65,7 +65,7 @@ claudep rm <name> [--keep-login]     log out and delete a profile (base is never
 claudep local <name> | --remove      pin the current directory tree to a profile (see below)
 claudep resolve [dir]                print the profile pinned for a directory
 claudep shell-init [zsh|bash|fish|powershell]   print the hook that applies pins on cd
-claudep completion [zsh|bash|fish]   print tab completions for commands, flags and profile names
+claudep completion [zsh|bash|fish|powershell]   print tab completions for commands, flags and profile names
 claudep --version
 ```
 
@@ -128,7 +128,7 @@ They live in `~/.claudep/<name>/claudep.env`, one `KEY=VALUE` per line. `claudep
 
 ## Tab completion
 
-One line in your rc file completes subcommands, their flags, the values `--shell` and `shell-init` take, and your profile names:
+One line in your rc file completes subcommands, their flags, the values `--shell`, `shell-init` and `completion` take, and your profile names:
 
 ```sh
 eval "$(claudep completion zsh)"      # ~/.zshrc, after compinit
@@ -139,7 +139,13 @@ eval "$(claudep completion bash)"     # ~/.bashrc
 claudep completion fish | source      # ~/.config/fish/config.fish
 ```
 
-Profile names come from a directory listing of `~/.claudep` at the moment you press Tab, so the script never runs claudep and a new profile shows up without reloading anything. In zsh the same output also works as a file: `claudep completion zsh > ~/.zfunc/_claudep` with `~/.zfunc` on `fpath` before `compinit`, if you prefer autoloading over `eval`.
+```powershell
+claudep completion powershell | Out-String | Invoke-Expression   # $PROFILE, pwsh or Windows PowerShell 5.1
+```
+
+Windows PowerShell 5.1 does not hand a bare `-` or `--` to a completer, so type the first letter of a flag there: `claudep init --e<Tab>`. pwsh completes `--<Tab>` too.
+
+Profile names come from a directory listing of `~/.claudep` at the moment you press Tab (`Get-ChildItem` in PowerShell), so the script never runs claudep and a new profile shows up without reloading anything. In zsh the same output also works as a file: `claudep completion zsh > ~/.zfunc/_claudep` with `~/.zfunc` on `fpath` before `compinit`, if you prefer autoloading over `eval`.
 
 ## Show the profile in your prompt or statusline
 

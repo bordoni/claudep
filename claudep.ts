@@ -357,10 +357,10 @@ export const SEED_KEYS = [
 
 export const NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
-/** Shells with a directory-pin hook, and the subset with tab completions. */
+/** Shells with a directory-pin hook, and the ones with tab completions. */
 export type Shell = "zsh" | "bash" | "fish" | "powershell";
 export const SHELLS: readonly Shell[] = ["zsh", "bash", "fish", "powershell"];
-export const COMPLETION_SHELLS = ["zsh", "bash", "fish"] as const;
+export const COMPLETION_SHELLS = ["zsh", "bash", "fish", "powershell"] as const;
 export type CompletionShell = (typeof COMPLETION_SHELLS)[number];
 /** What `claudep env --shell` accepts. */
 export const ENV_SHELLS = ["sh", "zsh", "bash", "fish", "powershell"] as const;
@@ -2029,6 +2029,7 @@ function cmdShellInit(L: Layout, args: string[]): void {
 
 /** The one rc-file line that loads the completions. */
 export function completionHint(shell: CompletionShell): string {
+  if (shell === "powershell") return "claudep completion powershell | Out-String | Invoke-Expression";
   return shell === "fish" ? "claudep completion fish | source" : `eval "$(claudep completion ${shell})"`;
 }
 
@@ -2038,6 +2039,7 @@ const isList = (arg: Command["arg"]): arg is readonly string[] => arg !== undefi
 export function completionScript(shell: CompletionShell, profilesRoot: string): string {
   if (shell === "zsh") return zshCompletion(profilesRoot);
   if (shell === "bash") return bashCompletion(profilesRoot);
+  if (shell === "powershell") return powershellCompletion(profilesRoot);
   return fishCompletion(profilesRoot);
 }
 
@@ -2192,6 +2194,85 @@ function __claudep_cmd
 end
 complete -c claudep -f
 ${lines.join("\n")}
+`;
+}
+
+/** A native completer, so it works on Windows PowerShell 5.1 and pwsh alike.
+ *  The words before the cursor are the command elements that end before it;
+ *  the first is claudep itself. Names come from Get-ChildItem over the root
+ *  when Tab is pressed. Returning nothing, as for `resolve <dir>`, hands the
+ *  word to PowerShell's own path completion. Windows PowerShell 5.1 never
+ *  calls a native completer for a bare `-` or `--` word, so there a flag
+ *  completes from its first letter: `--e<Tab>`. */
+function powershellCompletion(profilesRoot: string): string {
+  const ps = (v: string) => `'${v.replace(/'/g, "''")}'`;
+  const list = (vs: readonly string[]) => `@(${vs.map(ps).join(", ")})`;
+  const commands = visibleCommands().flatMap((c) => commandWords(c).map((w) => `    ${ps(w)} = ${ps(c.desc)}`));
+  const flags = COMMANDS.filter((c) => c.flags || c.valueFlags).flatMap((c) =>
+    commandWords(c).map(
+      (w) => `    ${ps(w)} = ${list([...(c.flags ?? []), ...(c.valueFlags ?? []).map((v) => v.name)])}`,
+    ),
+  );
+  const values = COMMANDS.flatMap((c) =>
+    (c.valueFlags ?? [])
+      .filter((v) => v.values)
+      .flatMap((v) => commandWords(c).map((w) => `    ${ps(`${w} ${v.name}`)} = ${list(v.values ?? [])}`)),
+  );
+  const profileArg = COMMANDS.filter((c) => c.arg === "profile").flatMap(commandWords);
+  const listArg = COMMANDS.flatMap((c) => {
+    const arg = c.arg;
+    return isList(arg) ? commandWords(c).map((w) => `    ${ps(w)} = ${list(arg)}`) : [];
+  });
+  return `# claudep completions. Load them from your $PROFILE:  ${completionHint("powershell")}
+Register-ArgumentCompleter -Native -CommandName claudep -ScriptBlock {
+  param($wordToComplete, $commandAst, $cursorPosition)
+  $root = ${ps(profilesRoot)}
+  $commands = [ordered]@{
+${commands.join("\n")}
+  }
+  $flags = @{
+${flags.join("\n")}
+  }
+  $values = @{
+${values.join("\n")}
+  }
+  $listArg = @{
+${listArg.join("\n")}
+  }
+  $profileArg = ${list(profileArg)}
+  $before = @($commandAst.CommandElements | Where-Object { $_.Extent.EndOffset -lt $cursorPosition })
+  $cmd = if ($before.Count -ge 2) { $before[1].Extent.Text } else { '' }
+  $prev = $before[$before.Count - 1].Extent.Text
+  $type = 'ParameterValue'
+  $words = @()
+  $profiles = $false
+  if ($before.Count -le 1) {
+    foreach ($k in $commands.Keys) { $words += ,@($k, $commands[$k]) }
+    $profiles = $true
+  } elseif ($wordToComplete.StartsWith('-')) {
+    if ($flags.ContainsKey($cmd)) { foreach ($f in $flags[$cmd]) { $words += ,@($f, $f) } }
+    $type = 'ParameterName'
+  } elseif ($values.ContainsKey("$cmd $prev")) {
+    foreach ($v in $values["$cmd $prev"]) { $words += ,@($v, $v) }
+  } elseif ($before.Count -eq 2 -and $profileArg -contains $cmd) {
+    $profiles = $true
+  } elseif ($before.Count -eq 2 -and $listArg.ContainsKey($cmd)) {
+    foreach ($v in $listArg[$cmd]) { $words += ,@($v, $v) }
+  } else {
+    return
+  }
+  if ($profiles) {
+    $words += ,@('default', 'profile')
+    foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
+      $words += ,@($d.Name, 'profile')
+    }
+  }
+  foreach ($w in $words) {
+    if ($w[0].StartsWith($wordToComplete, [System.StringComparison]::OrdinalIgnoreCase)) {
+      [System.Management.Automation.CompletionResult]::new($w[0], $w[0], $type, $w[1])
+    }
+  }
+}
 `;
 }
 
@@ -2426,7 +2507,7 @@ ${c.bold("DIRECTORY PINS")}
 
 ${c.bold("TAB COMPLETION")}
   claudep completion [${COMPLETION_SHELLS.join("|")}]   print completions for commands, flags and profile names;
-                                       load them from your rc file (after compinit in zsh)
+                                       load them from your rc file (after compinit in zsh) or $PROFILE
 
 ${c.bold("INIT OPTIONS")}
   --sso               force the SSO login flow (Enterprise orgs)

@@ -1,23 +1,52 @@
 /**
  * Loads the generated completion scripts in the real shells. Parse checks
- * for all three; bash and fish are also driven to produce candidates. zsh's
- * _arguments cannot run outside a completion widget, so zsh is checked to
- * load under compinit and define _claudep. Every case is gated on the shell
- * being installed; the Windows job skips them all.
+ * for zsh, bash and fish; bash, fish and PowerShell are also driven to
+ * produce candidates, PowerShell through TabExpansion2. zsh's _arguments
+ * cannot run outside a completion widget, so zsh is checked to load under
+ * compinit and define _claudep. Every case is gated on the shell being
+ * installed. The Windows job runs only the PowerShell cases, under pwsh and
+ * Windows PowerShell 5.1.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { SCRIPT } from "./lib/cli.ts";
+import { delimiter, join } from "node:path";
+import { fakeBin, SCRIPT } from "./lib/cli.ts";
 import { fakeHome } from "./lib/home.ts";
 
 const WIN = process.platform === "win32";
 const BUN = process.execPath;
 const q = (p: string) => JSON.stringify(p);
 
-async function shell(exe: string, args: string[], home: string): Promise<{ code: number; out: string; err: string }> {
+/** What the shells need from the host to start at all, Windows PowerShell
+ *  above all; nothing claudep reads. */
+function hostEnv(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of [
+    "PSModulePath",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "PATHEXT",
+    "COMSPEC",
+    "LOCALAPPDATA",
+    "APPDATA",
+  ]) {
+    const v = process.env[k];
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
+
+async function shell(
+  exe: string,
+  args: string[],
+  home: string,
+  bin?: string,
+): Promise<{ code: number; out: string; err: string }> {
+  const path = [bin, process.env.PATH].filter(Boolean).join(delimiter);
   const proc = Bun.spawn([exe, ...args], {
-    env: { PATH: process.env.PATH ?? "", HOME: home, USERPROFILE: home, NO_COLOR: "1", TERM: "dumb" },
+    env: { ...hostEnv(), PATH: path, HOME: home, USERPROFILE: home, NO_COLOR: "1", TERM: "dumb" },
     cwd: home,
     stdin: "ignore",
     stdout: "pipe",
@@ -69,7 +98,7 @@ describe("completion scripts in real shells", () => {
     expect(rm).toBe("default personal work");
     expect(init?.split(" ")).toEqual(expect.arrayContaining(["--sso", "--email", "--env"]));
     expect(env).toBe("sh zsh bash fish powershell");
-    expect(comp).toBe("zsh bash fish");
+    expect(comp).toBe("zsh bash fish powershell");
   });
 
   test.if(!WIN && Bun.which("fish") !== null)(
@@ -95,6 +124,50 @@ describe("completion scripts in real shells", () => {
       expect(env).toBe("bash fish powershell sh zsh");
     },
   );
+
+  const powershells = [
+    ["pwsh", Bun.which("pwsh")],
+    ["powershell", WIN ? Bun.which("powershell") : null],
+  ] as const;
+  // claudep is on PATH, as it is once installed. Without it every Tab sends
+  // PowerShell through PATH and module auto-loading looking for the command,
+  // which on the Windows runner took pwsh 17 s and 5.1 past 30 s.
+  // Windows PowerShell 5.1 never calls a native completer for a bare `-`,
+  // `--` or `-x` word: its own parameter completion takes those and finds
+  // nothing. From `--x` on it calls the completer as pwsh does.
+  for (const [name, exe] of powershells) {
+    test.if(exe !== null)(`${name} offers commands, profiles, flags, values and shells`, async () => {
+      using h = withProfiles();
+      const bin = fakeBin(h.home, { withClaudep: true });
+      const psq = (s: string) => `'${s.replace(/'/g, "''")}'`;
+      const script = [
+        `& ${psq(BUN)} ${psq(SCRIPT)} completion powershell | Out-String | Invoke-Expression`,
+        "function c([string]$line) { ((TabExpansion2 -inputScript $line -cursorColumn $line.Length).CompletionMatches | ForEach-Object { $_.CompletionText }) -join ' ' }",
+        "c 'claudep '",
+        "c 'claudep rm '",
+        "c 'claudep init --'",
+        "c 'claudep init --e'",
+        "c 'claudep env work --shell '",
+        "c 'claudep completion '",
+        "c 'claudep sta'",
+        "(TabExpansion2 -inputScript 'claudep in' -cursorColumn 10).CompletionMatches[0].ToolTip",
+      ].join("\n");
+      const r = await shell(exe as string, ["-NoProfile", "-NonInteractive", "-Command", script], h.home, bin);
+      expect(r.err).toBe("");
+      const [top, rm, init, initE, env, comp, sta, tip] = r.out.trim().split(/\r?\n/);
+      expect(top?.split(" ")).toEqual(
+        expect.arrayContaining(["init", "rm", "vars", "completion", "default", "work", "personal"]),
+      );
+      expect(rm).toBe("default personal work");
+      if (name === "pwsh") expect(init?.split(" ")).toEqual(expect.arrayContaining(["--sso", "--email", "--env"]));
+      else expect(init).toBe("");
+      expect(initE).toBe("--email --env");
+      expect(env).toBe("sh zsh bash fish powershell");
+      expect(comp).toBe("zsh bash fish powershell");
+      expect(sta).toBe("status");
+      expect(tip).toBe("create or update a profile and log in");
+    });
+  }
 
   test.if(!WIN && Bun.which("zsh") !== null)("zsh loads the script under compinit and registers _claudep", async () => {
     using h = withProfiles();

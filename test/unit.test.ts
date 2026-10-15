@@ -1030,7 +1030,7 @@ describe("the command table", () => {
       const shown = [c.name, ...(c.aliases ?? [])].some((w) => text.includes(`claudep ${w}`));
       expect(shown).toBe(true);
     }
-    expect(text).toContain("claudep completion [zsh|bash|fish]");
+    expect(text).toContain("claudep completion [zsh|bash|fish|powershell]");
   });
 });
 
@@ -1085,9 +1085,23 @@ describe("completionScript", () => {
     expect(completionScript("fish", "/o'brien")).toContain("for d in '/o\\'brien'/*/");
   });
 
+  test("powershell", () => {
+    const s = completionScript("powershell", root);
+    expect(s).toContain("Register-ArgumentCompleter -Native -CommandName claudep -ScriptBlock {");
+    expect(s).toContain("$root = '/home/me/.claudep'");
+    expect(s).toContain("Get-ChildItem -LiteralPath $root -Directory");
+    expect(s).toContain("'env --shell' = @('sh', 'zsh', 'bash', 'fish', 'powershell')");
+    expect(s).toContain("'ls' = @('--json')");
+    every(s);
+    expect(completionScript("powershell", "C:\\Users\\o'brien\\.claudep")).toContain(
+      "$root = 'C:\\Users\\o''brien\\.claudep'",
+    );
+  });
+
   test("completionHint is the rc-file line per shell", () => {
     expect(completionHint("zsh")).toBe('eval "$(claudep completion zsh)"');
     expect(completionHint("bash")).toBe('eval "$(claudep completion bash)"');
     expect(completionHint("fish")).toBe("claudep completion fish | source");
+    expect(completionHint("powershell")).toBe("claudep completion powershell | Out-String | Invoke-Expression");
   });
 });

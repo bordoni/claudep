@@ -74,7 +74,7 @@ Deleting a profile directory does not remove its Keychain item. `rm` runs `claud
 
 The 2026-09-06 decision said `claudep env` has no `--shell` flag because `MSYSTEM` tells PowerShell from Git Bash. fish has no such marker: `FISH_VERSION`, `fish_pid` and `__fish_bin_dir` are all unexported. Two things were added. `shellSyntax()` now asks the parent process first (`/proc/<ppid>/comm` on Linux, `ps -o comm=` on macOS), which is the calling shell for both `eval "$(...)"` and a fish pipeline; the first by-hand run showed why, when a fish started from zsh got sh syntax from `$SHELL`. The subprocess rule (Never 10) is about the hook, which runs on every prompt; `claudep env` runs when typed, and one `ps` there is nothing. `$SHELL` remains the fallback for an unrecognised parent, and `--shell sh|zsh|bash|fish|powershell` overrides both for scripts. A side effect is that `claudep env x | Invoke-Expression` works in `pwsh` on macOS and Linux. `defaultShell()` learned fish at the same time so the hints name the right rc line.
 
-## 2026-09-14: Completions are generated from one command table
+## 2026-09-14: Completions are generated from one command table (PowerShell reopened 2026-10-14)
 
 `claudep completion zsh|bash|fish` prints a script built from `COMMANDS`, the same table that now derives `RESERVED` and feeds every `parseFlags` call through `flagSpec()`. Three things follow from one source, so a new flag cannot be parsed but not completed, or completed but not reserved. Profile names are a glob over the profiles root inside the script (`(N/:t)` in zsh, `"$root"/*/` in bash, `for d in root/*/` in fish), so pressing Tab never spawns bun and a new profile appears without reloading. The zsh script is dual-mode: `eval` after `compinit` registers it with `compdef`, and saved as `_claudep` on `fpath` the `#compdef` line plus a `funcstack` check make it autoload. `help()` stays hand-written because its layout says more than the table can; a test checks that every visible command appears in it.
 
@@ -109,6 +109,17 @@ Since Claude Code 2.1.280 every auto-memory write in a profile prompts (anthropi
 - **The slug rule is copied from the binary** (`gitRoot`, `canonicalGitRoot`, `projectSlug`): first `.git` upward, a linked worktree maps to its main checkout, `[^a-zA-Z0-9]` becomes `-`, past 200 characters a base-36 Java hash is added, and `CLAUDE_CODE_PROJECT_DIR_NAME` wins. A wrong slug would split a project's memory, so re-check it at each catch-up.
 - **Skipped** when the caller passes `--settings` (the option takes one value; a second replaces the first), when `CLAUDE_CODE_REMOTE_MEMORY_DIR` moves memory, and when nothing on the path is a symlink.
 - **The hook and `claudep env` cannot help.** They set variables, and plain `claude` started afterwards still prompts until upstream fixes it. Rejected: exporting `CLAUDE_CODE_REMOTE_MEMORY_DIR=~/.claude`, which would fix those too without a slug. It is an internal remote-session switch and also moves project-local subagent memory (`agent-memory-local`) out of the repo's `.claude/`.
+
+## 2026-10-14: PowerShell completions
+
+`claudep completion powershell` is the fourth generator the 2026-09-14 entry turned down. The reason given then, that PowerShell had no hook test off Windows, did not hold: since 0.2.0 `test/shell.test.ts` has driven the PowerShell hook under pwsh wherever pwsh is installed, and every GitHub runner image has it. `test/completion.test.ts` now drives the completer through `TabExpansion2` under pwsh on every OS and under Windows PowerShell 5.1 on the Windows job.
+
+- **`Register-ArgumentCompleter -Native`**, the one form that works on 5.1 and 7 alike. The words before the cursor are the command elements that end before it, so a half-typed word never counts as an argument.
+- **Profile names come from `Get-ChildItem -Directory -LiteralPath <root>`** inside the completer, the PowerShell form of the glob the other three scripts use. Pressing Tab never starts bun.
+- **Nothing is returned for `resolve <dir>`** and other positions the table does not describe, which hands the word to PowerShell's own path completion. bash offers nothing there and fish offers directories; in PowerShell an empty answer cannot suppress the fallback.
+- **Each command's description is the tooltip**, the text zsh and fish already show.
+- **Windows PowerShell 5.1 completes a flag only from its first letter.** A probe on the Windows runner (5.1.26100) showed 5.1 never calls a native completer when the word is `-`, `--` or `-x`: those go to its own parameter completion, which knows nothing about a native command. `--e` and every non-dash word reach the completer as in pwsh 7.6. Nothing inside the completer can change that, so the README says to type a letter, and the test asserts both behaviours so a change shows up.
+- **The test puts `claudep` on PATH.** Without it, each `TabExpansion2` call searched PATH and module auto-loading for the command: 17 s under pwsh and past the 30 s limit under 5.1 on the Windows runner, against 0.76 s with it.
 
 ## Not built, on purpose
 
