@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-16
+
 ### Added
 
 - `claudep completion powershell` completes subcommands, flags, the values `--shell`, `shell-init` and `completion` take, and your profile names in pwsh and Windows PowerShell 5.1, with each command's description as the tooltip. Load it from your `$PROFILE` with `claudep completion powershell | Out-String | Invoke-Expression`. In Windows PowerShell 5.1 a flag completes from its first letter (`--e<Tab>`), because 5.1 never hands a bare `--` to a completer. A bare `claudep completion` in PowerShell on Windows now prints the script instead of refusing. Profile names are read from `~/.claudep` when you press Tab, so the completer never runs claudep.
@@ -124,7 +126,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
-[Unreleased]: https://github.com/bordoni/claudep/compare/0.5.0...HEAD
+[Unreleased]: https://github.com/bordoni/claudep/compare/0.6.0...HEAD
+[0.6.0]: https://github.com/bordoni/claudep/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/bordoni/claudep/compare/0.4.2...0.5.0
 [0.4.2]: https://github.com/bordoni/claudep/compare/0.4.1...0.4.2
 [0.4.1]: https://github.com/bordoni/claudep/compare/0.4.0...0.4.1
