@@ -27,11 +27,12 @@ export const SEEDABLE = {
   hasCompletedOnboarding: true,
   lastOnboardingVersion: "1.0.67",
   theme: "dark",
-  autoUpdates: false,
   installMethod: "native",
 } as const;
 
 export const NEVER_SEEDED = {
+  // Claude Code would migrate it into the shared settings.json.
+  autoUpdates: false,
   oauthAccount: { emailAddress: "base@example.com", organizationName: "Base Org" },
   userID: "user-123",
   projects: { "/tmp/x": { allowedTools: [] } },

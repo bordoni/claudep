@@ -185,6 +185,27 @@ describe("list and status", () => {
     });
   });
 
+  test("below Claude Code 2.1.301 list reads .claude.json instead of asking, unless --live", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    writeLogin(join(h.profilesRoot, "smoke"), "live@x.io");
+    const env = { FAKE_CLAUDE_VERSION: "2.1.300 (Claude Code)" };
+    const r = await runCli(["list"], { home: h.home, env });
+    expect(r.exitCode).toBe(0);
+    // The base .claude.json records an account; the new profile's records none.
+    expect(r.stdout).toMatch(/^default\s+yes\*\s+base@example\.com\s+Base Org/m);
+    expect(r.stdout).toMatch(/^smoke\s+no\*/m);
+    expect(r.stdout).not.toContain("live@x.io");
+    expect(r.stdout).toContain("anthropics/claude-code/issues/95822");
+    const json = await runCli(["status", "smoke", "--json"], { home: h.home, env });
+    expect(JSON.parse(json.stdout)).toMatchObject({ loggedIn: false, cached: true });
+    const live = await runCli(["list", "--live"], { home: h.home, env });
+    expect(live.stdout).toMatch(/^smoke\s+yes\s+live@x\.io/m);
+    expect(live.stdout).not.toContain("95822");
+    const fixed = await runCli(["list"], { home: h.home, env: { FAKE_CLAUDE_VERSION: "2.1.301 (Claude Code)" } });
+    expect(fixed.stdout).toMatch(/^smoke\s+yes\s+live@x\.io/m);
+  });
+
   test("status of an unknown profile fails", async () => {
     using h = fakeHome();
     const r = await runCli(["status", "ghost"], { home: h.home });
@@ -396,6 +417,42 @@ describe("doctor", () => {
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain("loop.md: linked to the base by an older claudep");
     expect(r.stdout).toContain("1 problem(s)");
+  });
+
+  test("below Claude Code 2.1.301 warns about sign-outs and shows the recorded account", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const r = await runCli(["doctor", "smoke"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_VERSION: "2.1.300 (Claude Code)" },
+    });
+    expect(r.stdout).toContain("can sign a profile out on a short `claude auth status`");
+    expect(r.stdout).toContain("no account recorded in .claude.json");
+    expect(r.stdout).not.toContain("Claude Code reports this config dir");
+  });
+
+  test("reports each config dir's auto-update state and last update", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login", "--env", "DISABLE_AUTOUPDATER=1"], { home: h.home });
+    writeFileSync(
+      join(h.base, ".last-update-result.json"),
+      JSON.stringify({
+        timestamp: "2026-10-06T12:45:00.000Z",
+        path: "native",
+        outcome: "success",
+        version_from: "2.1.290",
+        version_to: "2.1.291",
+      }),
+    );
+    const r = await runCli(["doctor", "smoke"], {
+      home: h.home,
+      env: { DISABLE_AUTOUPDATER: undefined, DISABLE_UPDATES: undefined },
+    });
+    // The base .claude.json says autoUpdates: false and does not protect a native install.
+    expect(r.stdout).toContain("default: auto-update off (autoUpdates in .claude.json)");
+    expect(r.stdout).toContain("default: last update 2.1.290 → 2.1.291 (success, native, 2026-10-06)");
+    expect(r.stdout).toContain("auto-update off (DISABLE_AUTOUPDATER in claudep.env)");
+    expect(r.stdout).toContain("install: unknown");
   });
 
   test("warns about auto-memory prompts from Claude Code 2.1.280 on, without failing", async () => {

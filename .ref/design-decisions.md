@@ -121,6 +121,20 @@ Since Claude Code 2.1.280 every auto-memory write in a profile prompts (anthropi
 - **Windows PowerShell 5.1 completes a flag only from its first letter.** A probe on the Windows runner (5.1.26100) showed 5.1 never calls a native completer when the word is `-`, `--` or `-x`: those go to its own parameter completion, which knows nothing about a native command. `--e` and every non-dash word reach the completer as in pwsh 7.6. Nothing inside the completer can change that, so the README says to type a letter, and the test asserts both behaviours so a change shows up.
 - **The test puts `claudep` on PATH.** Without it, each `TabExpansion2` call searched PATH and module auto-loading for the command: 17 s under pwsh and past the 30 s limit under 5.1 on the Windows runner, against 0.76 s with it.
 
+## 2026-10-17: Claude Code updates, and no `claudep update`
+
+bordoni/claudep#7: profiles raced each other's auto-updates on one npm-global install, and a launch in the window died with "`claude` not found". Section 13 of the internals doc has the mechanism. The fix is in three parts, and claudep does not take over updating.
+
+- **Point users at the native installer.** On macOS and Linux its update is an atomic symlink swap, so the window does not exist. `doctor` classifies the install from where `claude` resolves and warns on npm or bun with `claude install` as the fix.
+- **`run` waits on Claude Code's own signal.** When `claude` is missing, a `.update.lock` younger than five minutes in the base or any profile means an npm update is running: wait up to five minutes. With no lock, five seconds covers the end of a reinstall. Every command that starts `claude` goes through the same wait; the shell hook does not start `claude` and is unchanged.
+- **`doctor` computes the updater state itself**, in Claude Code's order, because `claude doctor` has no JSON and fails on any warning. On npm or bun, more than one config dir with the updater on is a warning, with `claudep vars <name> DISABLE_AUTOUPDATER=1` as the fix.
+
+Rejected: `claudep update` with its own lock and a timer, as the issue proposed. Native needs neither, and on npm the per-profile switch plus the wait cover the race. Revisit if npm users still hit it.
+
+## 2026-10-17: Do not run `claude auth status` below 2.1.301
+
+Before Claude Code 2.1.301 a short `claude auth status` can sign a profile out (anthropics/claude-code#95822, internals section 14), and `list`, `status` and `doctor` ran it once per profile. Below that version they now read the account from `.claude.json`, which says who was signed in last, not whether the login still works. The table marks those rows `*` and JSON carries `"cached": true`. `--live` asks anyway, for someone who knows their version is patched. An unknown version is treated as old.
+
 ## Not built, on purpose
 
 - **Per-profile `settings.json` overrides.** Would need a merge layer; `--settings <file>` on the command line already covers the rare case.

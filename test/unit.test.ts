@@ -5,9 +5,11 @@ import { delimiter, join, resolve } from "node:path";
 import {
   AUTH_ENV,
   authEnvOverrides,
+  authStatusSafe,
   baseEnv,
   COMMANDS,
   COMPLETION_SHELLS,
+  cachedAuthStatus,
   canon,
   commandWords,
   completionHint,
@@ -566,6 +568,25 @@ describe("profile names", () => {
   });
 });
 
+describe("the auth status guard (anthropics/claude-code#95822)", () => {
+  test("asks Claude Code 2.1.301 and later, never an older or unknown version", () => {
+    expect(authStatusSafe([2, 1, 301])).toBe(true);
+    expect(authStatusSafe([2, 2, 0])).toBe(true);
+    expect(authStatusSafe([2, 1, 300])).toBe(false);
+    expect(authStatusSafe(undefined)).toBe(false);
+  });
+
+  test("reads the account name and organisation from .claude.json, and nothing else", () => {
+    const json = {
+      oauthAccount: { emailAddress: "a@b.c", organizationName: "Org", accountUuid: "u", billingType: "x" },
+      userID: "id",
+    };
+    expect(cachedAuthStatus(json)).toEqual({ loggedIn: true, email: "a@b.c", orgName: "Org", cached: true });
+    expect(cachedAuthStatus({})).toEqual({ loggedIn: false, cached: true });
+    expect(cachedAuthStatus(undefined)).toEqual({ loggedIn: false, cached: true });
+  });
+});
+
 describe("parseAuthStatus", () => {
   test("extracts the fields claudep shows", () => {
     const s = parseAuthStatus(
@@ -1091,7 +1112,7 @@ describe("completionScript", () => {
     expect(s).toContain("$root = '/home/me/.claudep'");
     expect(s).toContain("Get-ChildItem -LiteralPath $root -Directory");
     expect(s).toContain("'env --shell' = @('sh', 'zsh', 'bash', 'fish', 'powershell')");
-    expect(s).toContain("'ls' = @('--json')");
+    expect(s).toContain("'ls' = @('--json', '--live')");
     every(s);
     expect(completionScript("powershell", "C:\\Users\\o'brien\\.claudep")).toContain(
       "$root = 'C:\\Users\\o''brien\\.claudep'",

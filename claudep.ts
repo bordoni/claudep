@@ -343,7 +343,10 @@ export const KNOWN_PRIVATE = new Set<string>([
 ]);
 
 /** Keys copied from the base .claude.json into a fresh profile so first-run
- *  onboarding does not repeat. Account identity is deliberately excluded. */
+ *  onboarding does not repeat. Account identity is deliberately excluded, and
+ *  so is `autoUpdates`: Claude Code migrates `autoUpdates: false` into
+ *  `env.DISABLE_AUTOUPDATER` in the user settings.json, which in a profile is
+ *  the shared file, so one profile's seed would switch every profile. */
 export const SEED_KEYS = [
   "hasCompletedOnboarding",
   "lastOnboardingVersion",
@@ -351,7 +354,6 @@ export const SEED_KEYS = [
   "editorMode",
   "preferredNotifChannel",
   "shiftEnterKeyBindingInstalled",
-  "autoUpdates",
   "installMethod",
 ] as const;
 
@@ -390,8 +392,13 @@ export const COMMANDS: readonly Command[] = [
     valueFlags: [{ name: "--email" }, { name: "--alias" }, { name: "--env" }],
   },
   { name: "run", desc: "run claude with a profile", arg: "profile", hidden: true },
-  { name: "list", desc: "show every profile and who it is logged in as", aliases: ["ls"], flags: ["--json"] },
-  { name: "status", desc: "login state for one profile", arg: "profile", flags: ["--json"] },
+  {
+    name: "list",
+    desc: "show every profile and who it is logged in as",
+    aliases: ["ls"],
+    flags: ["--json", "--live"],
+  },
+  { name: "status", desc: "login state for one profile", arg: "profile", flags: ["--json", "--live"] },
   { name: "current", desc: "which profile this shell is on, and why", flags: ["--json", "--name"] },
   {
     name: "env",
@@ -923,11 +930,51 @@ export function versionBelow(a: Version, b: Version): boolean {
  *  Claude Code disables features when it finds one that differs from the
  *  active dir, and under claudep it always differs for some profile. */
 export async function settingsEnvConfigDir(settingsPath: string): Promise<string | undefined> {
-  const settings = await readJson(settingsPath);
-  const env = settings?.env;
-  if (!env || typeof env !== "object" || Array.isArray(env)) return undefined;
-  const value = (env as JsonObject).CLAUDE_CONFIG_DIR;
-  return typeof value === "string" ? value : undefined;
+  return (await settingsEnv(settingsPath)).CLAUDE_CONFIG_DIR;
+}
+
+/** The string values of a settings file's `env` block. Claude Code copies
+ *  them into its own environment at start. */
+export async function settingsEnv(settingsPath: string): Promise<Env> {
+  const env = (await readJson(settingsPath))?.env;
+  if (!env || typeof env !== "object" || Array.isArray(env)) return {};
+  const out: Env = {};
+  for (const [k, v] of Object.entries(env as JsonObject)) if (typeof v === "string") out[k] = v;
+  return out;
+}
+
+export type AutoUpdate = { enabled: boolean; by?: string };
+
+/** Whether Claude Code's background updater runs for a config dir, in the
+ *  order Claude Code 2.1.286 checks: three variables, then `autoUpdates` in
+ *  .claude.json, which a native install ignores once it has set
+ *  `autoUpdatesProtectedForNative`. `sources` are labelled environments,
+ *  strongest first. */
+export function autoUpdateState(sources: readonly [string, Env][], globalJson: JsonObject | undefined): AutoUpdate {
+  for (const key of ["DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]) {
+    const hit = sources.find(([, env]) => /^(1|true|yes|on)$/i.test((env[key] ?? "").trim()));
+    if (hit) return { enabled: false, by: `${key} in ${hit[0]}` };
+  }
+  const protectedNative = globalJson?.installMethod === "native" && globalJson.autoUpdatesProtectedForNative === true;
+  if (globalJson?.autoUpdates === false && !protectedNative)
+    return { enabled: false, by: "autoUpdates in .claude.json" };
+  return { enabled: true };
+}
+
+export type LastUpdate = { from?: string; to?: string; outcome?: string; at?: string; path?: string };
+
+/** What Claude Code recorded about its last update attempt in a config dir. */
+export async function lastUpdate(dir: string): Promise<LastUpdate | undefined> {
+  const j = await readJson(join(dir, ".last-update-result.json"));
+  if (!j) return undefined;
+  const str = (k: string) => (typeof j[k] === "string" ? (j[k] as string) : undefined);
+  return {
+    from: str("version_from"),
+    to: str("version_to"),
+    outcome: str("outcome"),
+    at: str("timestamp"),
+    path: str("path"),
+  };
 }
 
 export type SeedResult = "seeded" | "exists" | "no-base";
@@ -1023,9 +1070,107 @@ export function wrapperSignals(platform: NodeJS.Platform): { ignore: NodeJS.Sign
   return { ignore: ["SIGINT"], forward: ["SIGTERM", "SIGHUP"] };
 }
 
-function claudeLaunch(): ClaudeLaunch {
-  const launch = findClaude();
-  if (!launch) die("`claude` not found on PATH. Install Claude Code first: https://code.claude.com/docs/en/setup");
+/** Every `claude` on PATH, in PATH order, one per directory. */
+export function findAllClaude(deps: FindDeps = defaultFindDeps()): string[] {
+  const P = pathApi(deps.platform);
+  const names = deps.platform === "win32" ? ["claude.exe", "claude.cmd", "claude.bat"] : ["claude"];
+  const out: string[] = [];
+  for (const dir of splitPathVar(deps.pathVar, deps.platform)) {
+    const hit = names.map((n) => P.join(dir, n)).find((p) => deps.exists(p));
+    if (hit && !out.some((o) => samePath(o, hit, deps.platform))) out.push(hit);
+  }
+  return out;
+}
+
+export type InstallKind = "native" | "npm" | "bun" | "homebrew" | "unknown";
+
+/** How the claude at `bin` was installed, from the path it resolves to. The
+ *  native installer keeps versions under .../claude/versions/ and points a
+ *  launcher at one; npm and bun install @anthropic-ai/claude-code into a
+ *  global node_modules; Homebrew uses a cask. On Windows npm's launcher is a
+ *  .cmd shim and the native one is ~/.local/bin/claude.exe. */
+export function installKind(bin: string, real: string, platform: NodeJS.Platform = process.platform): InstallKind {
+  const r = real.replace(/\\/g, "/");
+  if (r.includes("/.bun/")) return "bun";
+  if (r.includes("/node_modules/@anthropic-ai/claude-code")) return "npm";
+  if (r.includes("/Caskroom/")) return "homebrew";
+  if (r.includes("/claude/versions/")) return "native";
+  if (platform === "win32") {
+    if (/\.(cmd|bat|ps1)$/i.test(bin)) return "npm";
+    if (/\/\.local\/bin\/claude\.exe$/i.test(bin.replace(/\\/g, "/"))) return "native";
+  }
+  return "unknown";
+}
+
+/** Claude Code's own update lock, one per config dir: it cannot stop two
+ *  profiles from updating the same npm install at once (anthropics/claude-code#93197).
+ *  Claude Code treats one older than five minutes as stale. */
+export const UPDATE_LOCK = ".update.lock";
+export const UPDATE_LOCK_STALE_MS = 300_000;
+export const NPM_RACE_ISSUE = "https://github.com/anthropics/claude-code/issues/93197";
+
+export type WaitDeps = {
+  find: () => ClaudeLaunch | undefined;
+  /** Ages in ms of every update lock that exists. */
+  lockAges: () => number[];
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  note: (msg: string) => void;
+};
+
+/** `claude`, waiting for it when it is missing. An npm-global update removes
+ *  claude while it reinstalls. While a fresh update lock exists in any config
+ *  dir, wait up to five minutes; otherwise allow a few seconds, then give up. */
+export async function waitForClaude(
+  deps: WaitDeps,
+  graceMs = 5_000,
+  maxMs = UPDATE_LOCK_STALE_MS,
+  stepMs = 500,
+): Promise<{ launch?: ClaudeLaunch; updating: boolean }> {
+  const start = deps.now();
+  let told = false;
+  for (;;) {
+    const launch = deps.find();
+    const updating = deps.lockAges().some((age) => age < UPDATE_LOCK_STALE_MS);
+    if (launch) return { launch, updating };
+    if (deps.now() - start >= (updating ? maxMs : graceMs)) return { updating };
+    if (updating && !told) {
+      deps.note("claudep: waiting for a Claude Code update to finish");
+      told = true;
+    }
+    await deps.sleep(stepMs);
+  }
+}
+
+/** The config dirs whose update lock counts: the base and every profile. */
+function configDirs(L: Layout): string[] {
+  return [L.base, ...listProfileNames(L).map((n) => profileDir(L, n))];
+}
+
+function updateLockAges(L: Layout, now: number): number[] {
+  const ages: number[] = [];
+  for (const dir of configDirs(L)) {
+    try {
+      ages.push(now - statSync(join(dir, UPDATE_LOCK)).mtimeMs);
+    } catch {}
+  }
+  return ages;
+}
+
+async function claudeLaunch(L: Layout): Promise<ClaudeLaunch> {
+  const { launch, updating } = await waitForClaude({
+    find: () => findClaude(),
+    lockAges: () => updateLockAges(L, Date.now()),
+    now: Date.now,
+    sleep: (ms) => Bun.sleep(ms),
+    note: (msg) => console.error(msg),
+  });
+  if (!launch)
+    die(
+      updating
+        ? "`claude` is still missing after a Claude Code update ran for five minutes. Check the install: claude doctor"
+        : "`claude` not found on PATH. Install Claude Code first: https://code.claude.com/docs/en/setup",
+    );
   if (launch.kind === "ps1")
     die(
       `only ${launch.bin} was found. Install Claude Code with the native installer or npm so claude.exe or claude.cmd exists: https://code.claude.com/docs/en/setup`,
@@ -1033,8 +1178,8 @@ function claudeLaunch(): ClaudeLaunch {
   return launch;
 }
 
-function spawnClaude(L: Layout, dir: string | undefined, args: string[], io: "inherit" | "pipe") {
-  const { cmd, verbatim } = claudeSpawn(claudeLaunch(), args);
+async function spawnClaude(L: Layout, dir: string | undefined, args: string[], io: "inherit" | "pipe") {
+  const { cmd, verbatim } = claudeSpawn(await claudeLaunch(L), args);
   return Bun.spawn(cmd, {
     env: claudeEnv(L, dir),
     stdin: io === "inherit" ? "inherit" : "ignore",
@@ -1080,7 +1225,7 @@ function claudeEnv(L: Layout, dir: string | undefined): Env {
 }
 
 async function execClaude(L: Layout, dir: string | undefined, args: string[]): Promise<never> {
-  const proc = spawnClaude(L, dir, args, "inherit");
+  const proc = await spawnClaude(L, dir, args, "inherit");
   // Ctrl+C reaches the child through the terminal; keep the wrapper alive so
   // it can report the child's real exit code.
   const signals = wrapperSignals(L.platform);
@@ -1095,7 +1240,7 @@ async function captureClaude(
   dir: string | undefined,
   args: string[],
 ): Promise<{ code: number; out: string }> {
-  const proc = spawnClaude(L, dir, args, "pipe");
+  const proc = await spawnClaude(L, dir, args, "pipe");
   const out = await new Response(proc.stdout).text();
   const code = await proc.exited;
   return { code, out };
@@ -1113,7 +1258,33 @@ export type AuthStatus = {
   apiKeySource?: string;
   /** The config dir Claude Code resolved (2.1.268+). */
   configDirectory?: string;
+  /** Read from the profile's .claude.json instead of asking Claude Code. */
+  cached?: boolean;
 };
+
+/** Before this Claude Code, a short command such as `claude auth status`
+ *  could start an OAuth token refresh and exit before saving it, spending the
+ *  refresh token and signing the profile out (anthropics/claude-code#95822,
+ *  fixed in 2.1.301). claudep does not ask older versions. */
+export const SAFE_AUTH_STATUS_FROM = "2.1.301";
+export const AUTH_STATUS_ISSUE = "https://github.com/anthropics/claude-code/issues/95822";
+
+/** True when `claude auth status` cannot sign a profile out. An unknown version is not trusted. */
+export function authStatusSafe(v: Version | undefined): boolean {
+  const from = parseVersion(SAFE_AUTH_STATUS_FROM);
+  return v !== undefined && from !== undefined && !versionBelow(v, from);
+}
+
+/** The last account Claude Code recorded in a .claude.json: its name and
+ *  organisation, never a credential. Says nothing about whether the login
+ *  still works. */
+export function cachedAuthStatus(globalJson: JsonObject | undefined): AuthStatus {
+  const o = globalJson?.oauthAccount;
+  if (!o || typeof o !== "object" || Array.isArray(o)) return { loggedIn: false, cached: true };
+  const a = o as JsonObject;
+  const str = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : undefined);
+  return { loggedIn: true, email: str("emailAddress"), orgName: str("organizationName"), cached: true };
+}
 
 export function parseAuthStatus(text: string): AuthStatus {
   try {
@@ -1139,6 +1310,16 @@ export function parseAuthStatus(text: string): AuthStatus {
 async function authStatus(L: Layout, dir: string | undefined): Promise<AuthStatus> {
   const { out } = await captureClaude(L, dir, ["auth", "status", "--json"]);
   return parseAuthStatus(out);
+}
+
+async function claudeVersion(L: Layout): Promise<Version | undefined> {
+  return parseVersion((await captureClaude(L, undefined, ["--version"])).out);
+}
+
+/** `claude auth status` when it is safe or `live` asks for it, otherwise the .claude.json record. */
+async function loginOf(L: Layout, dir: string | undefined, live: boolean): Promise<AuthStatus> {
+  if (live) return authStatus(L, dir);
+  return cachedAuthStatus(await readJson(dir === undefined ? L.baseGlobalJson : join(dir, ".claude.json")));
 }
 
 /** Minimal spawner shape so the keychain check can be exercised without a real `security`. */
@@ -1357,20 +1538,28 @@ async function cmdRun(L: Layout, args: string[]): Promise<never> {
 
 export type Row = { name: string; dir: string; status: AuthStatus };
 
-async function collectRows(L: Layout, names: string[]): Promise<Row[]> {
-  return Promise.all(
+async function collectRows(L: Layout, names: string[], live: boolean): Promise<{ rows: Row[]; v?: Version }> {
+  const v = await claudeVersion(L);
+  const ask = live || authStatusSafe(v);
+  const rows = await Promise.all(
     names.map(async (name) => {
       const dir = name === "default" ? L.base : profileDir(L, name);
-      return { name, dir, status: await authStatus(L, name === "default" ? undefined : dir) };
+      return { name, dir, status: await loginOf(L, name === "default" ? undefined : dir, ask) };
     }),
   );
+  return { rows, v };
+}
+
+/** The footnote under a table built from .claude.json. */
+function cachedNote(v: Version | undefined): string {
+  return `* from .claude.json, not asked live: Claude Code ${v?.join(".") ?? "of unknown version"} can sign a profile out on a short \`claude auth status\` (${AUTH_STATUS_ISSUE}, fixed in ${SAFE_AUTH_STATUS_FROM}). Update Claude Code, or pass --live`;
 }
 
 export function formatTable(rows: Row[], home: string, platform: NodeJS.Platform = process.platform): string[] {
   const cols = ["PROFILE", "LOGIN", "EMAIL", "ORG", "PLAN", "DIR"];
   const data = rows.map((r) => [
     r.name,
-    r.status.loggedIn ? "yes" : "no",
+    `${r.status.loggedIn ? "yes" : "no"}${r.status.cached ? "*" : ""}`,
     r.status.email ?? "-",
     r.status.orgName ?? "-",
     r.status.subscriptionType ?? "-",
@@ -1381,12 +1570,13 @@ export function formatTable(rows: Row[], home: string, platform: NodeJS.Platform
   return [fmt(cols), ...data.map((d) => fmt(d))];
 }
 
-function printTable(rows: Row[], home: string, platform: NodeJS.Platform): void {
+function printTable(rows: Row[], home: string, platform: NodeJS.Platform, v: Version | undefined): void {
   const [header, ...lines] = formatTable(rows, home, platform);
   console.log(c.bold(header as string));
   lines.forEach((line, i) => {
     console.log(rows[i]?.status.loggedIn ? line : c.dim(line));
   });
+  if (rows.some((r) => r.status.cached)) console.log(c.dim(`\n${cachedNote(v)}`));
 }
 
 /** The flat object `status --json` prints for one row; `list --json` prints an array of them. */
@@ -1397,12 +1587,12 @@ function rowJson(row: Row): JsonObject {
 async function cmdList(L: Layout, args: string[]): Promise<void> {
   const f = parseFlags(args, ...flagSpec("list"));
   const names = ["default", ...listProfileNames(L)];
-  const rows = await collectRows(L, names);
+  const { rows, v } = await collectRows(L, names, f.bools.has("--live"));
   if (f.bools.has("--json")) {
     console.log(JSON.stringify(rows.map(rowJson), null, 2));
     return;
   }
-  printTable(rows, L.home, L.platform);
+  printTable(rows, L.home, L.platform, v);
   if (names.length === 1) console.log(c.dim("\nNo profiles yet. Create one: claudep init <name>"));
   const cur = currentProfile(L);
   if (cur.kind !== "base") console.log(c.dim(`\nactive in this shell: ${describeCurrent(cur)}`));
@@ -1413,10 +1603,13 @@ async function cmdStatus(L: Layout, args: string[]): Promise<void> {
   const name = f.rest[0];
   if (!name) die("usage: claudep status <name> [--json]");
   if (name !== "default" && !profileExists(L, name)) die(`profile "${name}" does not exist`);
-  const [row] = await collectRows(L, [name]);
+  const {
+    rows: [row],
+    v,
+  } = await collectRows(L, [name], f.bools.has("--live"));
   if (!row) return;
   if (f.bools.has("--json")) console.log(JSON.stringify(rowJson(row), null, 2));
-  else printTable([row], L.home, L.platform);
+  else printTable([row], L.home, L.platform, v);
 }
 
 function envUsage(syntax: EnvSyntax): string {
@@ -2290,14 +2483,43 @@ function msysConfigDirWarning(L: Layout, env: Env = process.env): string | undef
   return `CLAUDE_CONFIG_DIR is a POSIX-style path (${cfg}); claude.exe will not read it. Set it with: eval "$(claudep env <name>)"`;
 }
 
+/** Prints whether Claude Code's updater runs for a config dir (undefined is
+ *  the base) and its last update; true when the updater is on. */
+async function reportUpdates(L: Layout, dir: string | undefined): Promise<boolean> {
+  const d = dir ?? L.base;
+  const sources: [string, Env][] = [
+    ["settings.json env", await settingsEnv(join(d, "settings.json"))],
+    ["this shell", baseEnv(L)],
+  ];
+  if (dir !== undefined) sources.push([ENV_FILE, Object.fromEntries(readProfileEnv(dir).vars)]);
+  const state = autoUpdateState(
+    sources,
+    await readJson(dir === undefined ? L.baseGlobalJson : join(dir, ".claude.json")),
+  );
+  const who = dir === undefined ? "default: " : "";
+  console.log(`${c.dim("·")} ${who}auto-update ${state.enabled ? "on" : `off (${state.by})`}`);
+  const last = await lastUpdate(d);
+  if (last?.to)
+    console.log(
+      `${c.dim("·")} ${who}last update ${last.from ?? "?"} → ${last.to} (${last.outcome ?? "?"}, ${last.path ?? "?"}, ${(last.at ?? "").slice(0, 10)})`,
+    );
+  return state.enabled;
+}
+
 async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
   const names = args[0] ? [args[0]] : listProfileNames(L);
   let problems = 0;
   let v: Version | undefined;
+  let kind: InstallKind | undefined;
   const launch = findClaude();
   if (launch && launch.kind !== "ps1") {
     const { out } = await captureClaude(L, undefined, ["--version"]);
     ok(`claude: ${launch.bin} (${out.trim() || "version unknown"})`);
+    let real = launch.bin;
+    try {
+      real = realpathSync(launch.bin);
+    } catch {}
+    kind = installKind(launch.bin, real, L.platform);
     if (launch.kind === "cmd")
       console.log(
         `${c.dim("·")} claude is the npm cmd shim and runs through cmd.exe; the native installer's claude.exe avoids that hop`,
@@ -2312,6 +2534,16 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
     }
   } else if (launch) bad(`only ${launch.bin} found; claudep needs claude.exe or claude.cmd`);
   else bad("claude binary not found on PATH");
+  if (kind === "npm" || kind === "bun")
+    warn(
+      `claude is a ${kind}-global install. Every profile runs its own auto-updater against it, and a reinstall removes claude while it runs, so a launch can find nothing (${NPM_RACE_ISSUE}). claudep run waits for an update it can see; the native installer swaps versions in one step: claude install`,
+    );
+  else if (kind) console.log(`${c.dim("·")} install: ${kind}`);
+  const all = findAllClaude();
+  if (all.length > 1)
+    warn(
+      `more than one claude on PATH; the first one runs, and a later one starts if it goes missing: ${all.join(", ")}`,
+    );
   ok(`base: ${L.base}${L.callerConfigDir && !L.managed ? c.yellow("  (from CLAUDE_CONFIG_DIR in your shell)") : ""}`);
   const msysWarning = msysConfigDirWarning(L);
   if (msysWarning) warn(msysWarning);
@@ -2326,6 +2558,13 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
   for (const v of authEnvOverrides(process.env, L.platform))
     warn(`${v} is set in this shell; Claude Code uses it instead of the profile login, always in -p mode`);
   ok(`profiles root: ${L.profilesRoot}`);
+  const ask = authStatusSafe(v);
+  if (launch && !ask)
+    warn(
+      `Claude Code ${v?.join(".") ?? "of unknown version"} can sign a profile out on a short \`claude auth status\` (${AUTH_STATUS_ISSUE}). claudep reads logins from .claude.json instead until Claude Code is ${SAFE_AUTH_STATUS_FROM} or newer: claude update`,
+    );
+  let updaters: string[] = [];
+  if (await reportUpdates(L, undefined)) updaters.push("default");
 
   const shared = sharedItems(L.base);
   const sharedNames = new Set(shared.map((s) => s.name));
@@ -2376,7 +2615,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       );
       problems++;
     }
-    const s = await authStatus(L, dir);
+    const s = await loginOf(L, dir, ask);
     if (L.platform === "darwin") {
       const svc = keychainService(dir);
       if (await keychainHas(svc)) ok(`keychain item "${svc}" present`);
@@ -2387,7 +2626,9 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
         `${c.dim("·")} no .credentials.json in the profile; Claude Code keeps this login elsewhere (on Windows, possibly Credential Manager)`,
       );
     else warn(`no .credentials.json in the profile. Not logged in yet (claudep ${name} auth login)`);
-    if (s.loggedIn) ok(`logged in as ${s.email ?? "?"} (${s.orgName ?? "?"}, ${s.subscriptionType ?? "?"})`);
+    if (s.cached && s.loggedIn) ok(`last known account: ${s.email ?? "?"} (${s.orgName ?? "?"}), from .claude.json`);
+    else if (s.cached) warn("no account recorded in .claude.json");
+    else if (s.loggedIn) ok(`logged in as ${s.email ?? "?"} (${s.orgName ?? "?"}, ${s.subscriptionType ?? "?"})`);
     else warn("not logged in");
     if (s.configDirectory !== undefined) {
       if (samePath(canon(s.configDirectory, L.home, L.platform), dir, L.platform))
@@ -2398,6 +2639,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       }
     }
     if (s.apiKeySource) warn(`Claude Code uses an API key from ${s.apiKeySource} instead of the profile login`);
+    if (await reportUpdates(L, dir)) updaters.push(name);
     const env = readProfileEnv(dir);
     if (env.vars.length) ok(`${ENV_FILE}: ${env.vars.map(([k]) => k).join(", ")}`);
     if (env.skipped.length) {
@@ -2408,6 +2650,11 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
     }
   }
   if (!names.length) console.log(c.dim("\nNo profiles to check."));
+  if (args[0]) updaters = [];
+  if ((kind === "npm" || kind === "bun") && updaters.length > 1)
+    warn(
+      `\n${updaters.length} config dirs run the auto-updater against one ${kind} install (${updaters.join(", ")}). Leave it on in one: claudep vars <name> DISABLE_AUTOUPDATER=1 for each of the others`,
+    );
   if (problems) {
     console.log(`\n${c.red(`${problems} problem(s)`)}`);
     process.exit(1);
@@ -2447,7 +2694,7 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
     }
   }
   if (!f.bools.has("--keep-login")) {
-    const proc = spawnClaude(L, dir, ["auth", "logout"], "inherit");
+    const proc = await spawnClaude(L, dir, ["auth", "logout"], "inherit");
     if ((await proc.exited) === 0) ok("logged out (token revoked, credentials removed)");
     else warn("logout failed or was not logged in. Continuing");
   }
@@ -2486,8 +2733,9 @@ export function helpText(L: Layout): string {
 ${c.bold("USAGE")}
   claudep <name> [claude args…]        run claude with profile <name>  (alias for "run")
   claudep init <name> [options]        create/update a profile and log in
-  claudep list [--json]                show every profile and who it is logged in as
-  claudep status <name> [--json]       login state for one profile ("default" = ~/.claude)
+  claudep list [--json] [--live]       show every profile and who it is logged in as
+  claudep status <name> [--json] [--live]   login state for one profile ("default" = ~/.claude);
+                                       before Claude Code 2.1.301 both read .claude.json unless --live
   claudep current [--json|--name]      which profile this shell is on, and why; --name prints only the name
   claudep env <name> | --unset         print the CLAUDE_CONFIG_DIR pin (or the unset) for eval, source or Invoke-Expression;
                                        --shell sh|fish|powershell picks the syntax when the shell was not detected

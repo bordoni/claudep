@@ -111,6 +111,22 @@ Re-verified on 2.1.286 (2026-10-02), where the functions are `pE()`, `Tc()`, `Z3
 
 Credential stores come in three kinds, `keychain`, `plaintext` and `windows-credman`, and fallback pairs such as `windows-credman-with-plaintext-fallback`. Credential Manager is on when `CLAUDE_CODE_FORCE_WINDOWS_CREDMAN=1`, or when `cachedGrowthBookFeatures.tengu_windows_credman` is true in the config dir's `.claude.json` (`ivr()`), so a server-side flag can switch one profile and not another. The Windows-only code that names the Credential Manager entry is not in the macOS build, so whether it is namespaced per config dir like the Keychain item is not verified. `claudep doctor` on Windows no longer calls a profile without `.credentials.json` logged out when `auth status` says it is logged in. Verify the entry name on a Windows machine when the flag is seen in the wild.
 
+## 13. The auto-updater (2026-10-17)
+
+Checked in the 2.1.286 binary (native, macOS) and against the upstream CHANGELOG through 2.1.302.
+
+- **Switches**, in the order `ESe()` checks them: `DISABLE_UPDATES`, `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, then `.claude.json` `autoUpdates === false`, which is ignored when `installMethod` is `native` and `autoUpdatesProtectedForNative` is true (upstream #91646). A settings `env` block lands in the process environment, so `DISABLE_AUTOUPDATER` there counts; `claude doctor` then prints "Auto-updates: disabled (set by env: DISABLE_AUTOUPDATER)". `DISABLE_AUTOUPDATER` stops the background check only; `claude update` still works. `DISABLE_UPDATES` blocks that too.
+- **Migration**: `Hr()` turns `autoUpdates: false` into `env.DISABLE_AUTOUPDATER: "1"` in the user `settings.json` and deletes the key. Through a symlinked `settings.json` the write lands in the shared file. This is why `autoUpdates` left `SEED_KEYS` in 0.7.0.
+- **Lock**: the npm and bun path takes `<CLAUDE_CONFIG_DIR>/.update.lock` (`wx`, pid inside, stale after 300000 ms). It is per config dir, so two profiles never see each other's lock. The native path takes none.
+- **npm vs native**: npm runs `npm|bun install -g @anthropic-ai/claude-code@<v>`, which moves the package aside while it installs, so the bin link is missing for the duration (upstream #93197, open through 2.1.302). Native stages into `~/.cache/claude/staging/<v>.<pid>.<ts>.<hex>`, moves the result to `versions/<v>`, then swaps the launcher with symlink-to-tmp and rename ("Atomically updated symlink"). On Windows the swap is two renames.
+- **Running version**: both paths compare against the running version, so every older session in every profile installs the same release again. Native finds it on disk and only re-points the symlink; npm reinstalls. This is the four reinstalls in bordoni/claudep#7.
+- **`.last-update-result.json`**, per config dir: `timestamp` (ISO), `path` (`npm-global|npm-local|native`), `outcome`, `status`, `version_from`, `version_to`, `error_code`.
+- **`claude doctor`** has no JSON output and exits 1 on any warning, so claudep computes the same answers itself.
+
+## 14. Short commands and the token refresh (2026-10-17)
+
+A short-lived command such as `claude auth status` can start an OAuth refresh at init and exit before saving it, which spends the refresh token and signs the profile out (anthropics/claude-code#95822, reported on 2.1.283 to 2.1.294). The 2.1.301 changelog: "Fixed sign-in refresh timeouts and unexpected sign-outs after a short command such as `claude auth status` or `claude plugin list` exited in the middle of a token refresh". `claudep list`, `status` and `doctor` ran `auth status` once per profile, so below 2.1.301 they now read `oauthAccount` from `.claude.json` instead. Its keys on 2.1.286 include `emailAddress`, `organizationName`, `organizationType`, `billingType` and `accountUuid`; no secrets. `claude --version` stays safe: it returns in 0.01 s on 2.1.286, before any sign-in work starts.
+
 ## How to re-verify
 
 The fastest way needs no script: byte offsets from a fixed-string grep, then a bounded slice around each one. `/usr/bin/grep` because the shell's `grep` is ugrep and rejects wide context regexes; `tr` because the slice is binary.

@@ -38,7 +38,7 @@ Sharing is opt-in per item. Anything not listed stays inside the profile directo
 
 ## Seeded into a new profile's `.claude.json`
 
-`SEED_KEYS`: `hasCompletedOnboarding`, `lastOnboardingVersion`, `theme`, `editorMode`, `preferredNotifChannel`, `shiftEnterKeyBindingInstalled`, `autoUpdates`, `installMethod`. Only keys present in the base are copied. Purpose: skip first-run onboarding. With `--copy-mcp`, the top-level `mcpServers` object is copied too (work MCP servers usually belong in the work profile). Never copied: `oauthAccount`, `userID`, `projects`, any cache.
+`SEED_KEYS`: `hasCompletedOnboarding`, `lastOnboardingVersion`, `theme`, `editorMode`, `preferredNotifChannel`, `shiftEnterKeyBindingInstalled`, `installMethod`. `autoUpdates` was dropped in 0.7.0: Claude Code 2.1.286 migrates `autoUpdates: false` into `env.DISABLE_AUTOUPDATER` in the user `settings.json` and deletes the key, and a profile's user `settings.json` is the shared symlink, so the write changes every profile. Its meaning also depends on `autoUpdatesProtectedForNative`, which is not seeded. `installMethod` stays: the npm updater removes the native launcher when it is not `native`. Only keys present in the base are copied. Purpose: skip first-run onboarding. With `--copy-mcp`, the top-level `mcpServers` object is copied too (work MCP servers usually belong in the work profile). Never copied: `oauthAccount`, `userID`, `projects`, any cache.
 
 The base `.claude.json` lives at `~/.claude.json` when `CLAUDE_CONFIG_DIR` is unset in the caller's shell, otherwise inside that dir. `BASE_GLOBAL_JSON` handles both.
 

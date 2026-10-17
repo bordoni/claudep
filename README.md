@@ -54,8 +54,8 @@ Two things differ from macOS:
 ```
 claudep <name> [claude args…]        run claude with profile <name>
 claudep init <name> [options]        create/update a profile and log in
-claudep list [--json]                every profile and who it is logged in as
-claudep status <name> [--json]       login state for one profile ("default" = ~/.claude)
+claudep list [--json] [--live]       every profile and who it is logged in as
+claudep status <name> [--json] [--live]   login state for one profile ("default" = ~/.claude)
 claudep env <name> [--shell <sh>]    print the CLAUDE_CONFIG_DIR pin for eval, source or Invoke-Expression
 claudep vars <name> [KEY=VALUE…]     list or set the variables a profile exports (see below)
 claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
@@ -163,6 +163,14 @@ function fish_prompt; set -q CLAUDE_CONFIG_DIR; and echo -n "[$(string replace -
 
 In scripts, and in the shared `statusline-command.sh`, `claudep current --name` prints exactly one word: the profile name, `default` for `~/.claude`, or `custom` for a `CLAUDE_CONFIG_DIR` outside the profiles root. The statusline script inherits Claude Code's environment, so it sees the profile the session was started with.
 
+## Claude Code updates
+
+Install Claude Code with the native installer when you use profiles. Each profile is its own config dir, so each runs its own auto-updater. With the native installer an update unpacks a new version and swaps one symlink, so `claude` is always there. With an npm or bun global install every profile reinstalls the same package, and `claude` is gone while the reinstall runs ([anthropics/claude-code#93197](https://github.com/anthropics/claude-code/issues/93197)). Move with `claude install`.
+
+- `claudep <name>`, `claudep run` and alias commands wait when `claude` is missing: up to five minutes while any config dir holds a fresh `.update.lock`, five seconds otherwise.
+- `claudep doctor` names the install method, every `claude` on PATH, whether each config dir runs the updater and why, and each one's last update. On npm or bun it warns when more than one config dir updates. Leave one on and turn the rest off with `claudep vars <name> DISABLE_AUTOUPDATER=1`.
+- `DISABLE_AUTOUPDATER=1` in the shared `settings.json` `env` turns the updater off in every profile at once. `claude update` still works by hand.
+
 ## How it works
 
 `~/.claude` is left exactly as it is and stays the **default** profile. Each named profile is a thin directory under `~/.claudep/<name>`. Inside it, shared configuration is a symlink back into `~/.claude`:
@@ -191,6 +199,7 @@ The shared list is an allowlist, so an account-specific file cannot leak across 
 - Never put `CLAUDE_CONFIG_DIR` in a `settings.json` `env` block. Claude Code detects that mismatch and disables features; `claudep doctor` reports it.
 - `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` override the login in any config dir, always in `-p` mode. `claudep <name>` and `claudep doctor` warn when one is set and leave it alone. `claudep doctor` also names the key source Claude Code reports, and fails when Claude Code reports a config dir other than the profile's.
 - `claudep doctor` fails on macOS when Claude Code is older than 2.1.144, the first build whose Keychain item is namespaced per config dir.
+- Before Claude Code 2.1.301 a short `claude auth status` can spend a profile's refresh token and sign it out ([anthropics/claude-code#95822](https://github.com/anthropics/claude-code/issues/95822)). On those versions `claudep list`, `status` and `doctor` show the account recorded in the profile's `.claude.json`, marked `*`, and do not ask Claude Code. `--live` asks anyway. Update Claude Code to get live answers back.
 
 ## Releases
 
