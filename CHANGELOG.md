@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-17
+
 ### Added
 
 - `claudep doctor` names how Claude Code is installed (native, npm, bun or Homebrew) and warns on an npm or bun install, where every profile's auto-updater reinstalls the one shared package and `claude` is missing while it does ([anthropics/claude-code#93197](https://github.com/anthropics/claude-code/issues/93197)). The native installer avoids that: `claude install`. It also warns when more than one `claude` is on PATH, shows whether each config dir runs the auto-updater and why, shows each one's last update, and warns when more than one config dir updates the same npm or bun install.
@@ -145,7 +147,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
-[Unreleased]: https://github.com/bordoni/claudep/compare/0.6.0...HEAD
+[Unreleased]: https://github.com/bordoni/claudep/compare/0.7.0...HEAD
+[0.7.0]: https://github.com/bordoni/claudep/compare/0.6.0...0.7.0
 [0.6.0]: https://github.com/bordoni/claudep/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/bordoni/claudep/compare/0.4.2...0.5.0
 [0.4.2]: https://github.com/bordoni/claudep/compare/0.4.1...0.4.2
