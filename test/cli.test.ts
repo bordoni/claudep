@@ -453,7 +453,9 @@ describe("doctor", () => {
     expect(r.stdout).toContain("default: auto-update off (autoUpdates in .claude.json)");
     expect(r.stdout).toContain("default: last update 2.1.290 → 2.1.291 (success, native, 2026-10-06)");
     expect(r.stdout).toContain("auto-update off (DISABLE_AUTOUPDATER in claudep.env)");
-    expect(r.stdout).toContain("install: unknown");
+    // On Windows the fake claude is a .cmd shim, which is how npm installs it there.
+    if (WIN) expect(r.stdout).toContain("claude is an npm-global install");
+    else expect(r.stdout).toContain("install: unknown");
   });
 
   test("warns about auto-memory prompts from Claude Code 2.1.280 on, without failing", async () => {

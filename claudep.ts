@@ -2935,7 +2935,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
   else bad("claude binary not found on PATH");
   if (kind === "npm" || kind === "bun")
     warn(
-      `claude is a ${kind}-global install. Every profile runs its own auto-updater against it, and a reinstall removes claude while it runs, so a launch can find nothing (${NPM_RACE_ISSUE}). claudep run waits for an update it can see; the native installer swaps versions in one step: claude install`,
+      `claude is ${kind === "npm" ? "an" : "a"} ${kind}-global install. Every profile runs its own auto-updater against it, and a reinstall removes claude while it runs, so a launch can find nothing (${NPM_RACE_ISSUE}). claudep run waits for an update it can see; the native installer swaps versions in one step: claude install`,
     );
   else if (kind) console.log(`${c.dim("·")} install: ${kind}`);
   const all = findAllClaude();
