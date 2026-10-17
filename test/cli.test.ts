@@ -9,6 +9,7 @@ import {
   readlinkSync,
   realpathSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -1081,5 +1082,65 @@ describe("doctor and auth status details", () => {
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain(`Claude Code reports config dir ${h.base}, not ${join(h.profilesRoot, "work")}`);
     expect(r.stdout).toContain("Claude Code uses an API key from ANTHROPIC_API_KEY instead of the profile login");
+  });
+});
+
+describe("handoff", () => {
+  const OLD = "11111111-1111-4111-8111-111111111111";
+  const NEW = "22222222-2222-4222-8222-222222222222";
+
+  function sessions(h: ReturnType<typeof fakeHome>): { cwd: string; dir: string } {
+    const cwd = join(h.home, "repo");
+    mkdirSync(cwd);
+    const dir = join(h.base, "projects", projectSlug(cwd));
+    mkdirSync(dir, { recursive: true });
+    for (const f of [`${OLD}.jsonl`, `${NEW}.jsonl`, "notes.jsonl"]) writeFileSync(join(dir, f), "{}\n");
+    utimesSync(join(dir, `${OLD}.jsonl`), new Date(1_000), new Date(1_000));
+    return { cwd, dir };
+  }
+
+  test("resumes this directory's newest session under the profile as a fork", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const { cwd } = sessions(h);
+    const log = join(h.home, "claude.log");
+    const r = await runCli(["handoff", "work", "--", "-p", "go on"], {
+      home: h.home,
+      cwd,
+      env: { FAKE_CLAUDE_LOG: log },
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr).toContain(`handing session ${NEW}`);
+    const entry = JSON.parse(readFileSync(log, "utf8"));
+    expect(entry.configDir).toBe(join(h.profilesRoot, "work"));
+    expect(entry.argv.slice(entry.argv.indexOf("--resume"))).toEqual([
+      "--resume",
+      NEW,
+      "--fork-session",
+      "-p",
+      "go on",
+    ]);
+  });
+
+  test("takes a session id, and refuses junk, an empty directory and a missing profile", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const { cwd } = sessions(h);
+    const log = join(h.home, "claude.log");
+    await runCli(["handoff", "work", OLD], { home: h.home, cwd, env: { FAKE_CLAUDE_LOG: log } });
+    expect(JSON.parse(readFileSync(log, "utf8")).argv).toContain(OLD);
+    const junk = await runCli(["handoff", "work", "nope"], { home: h.home, cwd });
+    expect(junk.exitCode).toBe(1);
+    expect(junk.stderr).toContain('"nope" is not a session id');
+    const empty = await runCli(["handoff", "work"], { home: h.home, cwd: h.home });
+    expect(empty.exitCode).toBe(1);
+    expect(empty.stderr).toContain("no session for this directory");
+    const ghost = await runCli(["handoff", "ghost"], { home: h.home, cwd });
+    expect(ghost.stderr).toContain('profile "ghost" does not exist');
+  });
+
+  test("handoff is a reserved profile name", async () => {
+    using h = fakeHome();
+    expect((await runCli(["init", "handoff", "--no-login"], { home: h.home })).stderr).toContain("reserved");
   });
 });

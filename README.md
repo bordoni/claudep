@@ -59,6 +59,7 @@ claudep status <name> [--json] [--live]   login state for one profile ("default"
 claudep env <name> [--shell <sh>]    print the CLAUDE_CONFIG_DIR pin for eval, source or Invoke-Expression
 claudep vars <name> [KEY=VALUE…]     list or set the variables a profile exports (see below)
 claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
+claudep handoff <name> [session-id]  carry this directory's latest session on under another profile
 claudep current [--json|--name]      which profile this shell is on, and why
 claudep doctor [name]                verify symlinks, keychain entry, unclassified files, Claude Code version
 claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
@@ -162,6 +163,18 @@ function fish_prompt; set -q CLAUDE_CONFIG_DIR; and echo -n "[$(string replace -
 ```
 
 In scripts, and in the shared `statusline-command.sh`, `claudep current --name` prints exactly one word: the profile name, `default` for `~/.claude`, or `custom` for a `CLAUDE_CONFIG_DIR` outside the profiles root. The statusline script inherits Claude Code's environment, so it sees the profile the session was started with.
+
+## Hand a session to another profile
+
+When one account hits its limit, carry on in another:
+
+```sh
+claudep handoff personal                # newest session in this directory, resumed under "personal"
+claudep handoff personal <session-id>   # a specific one
+claudep handoff work -- -p "go on"      # anything after -- goes to claude
+```
+
+`projects/` is shared, so every profile can read every transcript. `handoff` finds the newest one for the current directory and runs `claude --resume <id> --fork-session` under the other profile. The fork gets a new session id, so the original session can keep running without two processes writing one file. The first reply is slower and costs more than usual: the prompt cache belongs to the account that built it.
 
 ## Claude Code updates
 

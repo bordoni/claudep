@@ -9,10 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Added
 
 - `claudep doctor` names how Claude Code is installed (native, npm, bun or Homebrew) and warns on an npm or bun install, where every profile's auto-updater reinstalls the one shared package and `claude` is missing while it does ([anthropics/claude-code#93197](https://github.com/anthropics/claude-code/issues/93197)). The native installer avoids that: `claude install`. It also warns when more than one `claude` is on PATH, shows whether each config dir runs the auto-updater and why, shows each one's last update, and warns when more than one config dir updates the same npm or bun install.
+- `claudep handoff <name> [session-id]` resumes this directory's newest session under another profile, as a fork with a new session id, so the work goes on when one account hits its limit. Arguments after `--` go to claude.
 - `claudep list --live` and `claudep status --live` ask Claude Code for the login even on a version that can sign a profile out (see Changed).
 
 ### Changed
 
+- **Breaking:** `handoff` is now a reserved word. A profile named `handoff` stops resolving; recreate it under another name.
 - Below Claude Code 2.1.301, `claudep list`, `status` and `doctor` no longer run `claude auth status`, which there can spend a profile's refresh token and sign it out ([anthropics/claude-code#95822](https://github.com/anthropics/claude-code/issues/95822)). They show the account recorded in the profile's `.claude.json` instead, marked `*` in the table and `"cached": true` in JSON, and `doctor` says to update Claude Code.
 - `claudep init` no longer copies `autoUpdates` into a new profile. Claude Code moves `autoUpdates: false` into `env.DISABLE_AUTOUPDATER` in the user `settings.json`, which in a profile is the shared file, so one new profile could switch updates off for all of them.
 

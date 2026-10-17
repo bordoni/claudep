@@ -414,6 +414,7 @@ export const COMMANDS: readonly Command[] = [
     flags: ["--unset", "--json"],
   },
   { name: "alias", desc: "write a shim command that runs claudep with a profile", arg: "profile" },
+  { name: "handoff", desc: "resume this directory's latest session under another profile", arg: "profile" },
   { name: "doctor", desc: "verify symlinks, keychain entry, unclassified files, Claude Code version", arg: "profile" },
   {
     name: "rm",
@@ -1536,6 +1537,65 @@ async function cmdRun(L: Layout, args: string[]): Promise<never> {
   return execClaude(L, dir, rest);
 }
 
+export const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The newest session transcript Claude Code keeps for `cwd`, by mtime.
+ *  Transcripts live in projects/<slug of the launch directory>/<id>.jsonl,
+ *  keyed by the directory itself, not its git root as auto memory is. */
+export function latestSession(
+  projectsDir: string,
+  cwd: string,
+  env: Env = process.env,
+  platform: NodeJS.Platform = process.platform,
+): { id: string; mtimeMs: number; dir: string } | undefined {
+  const P = pathApi(platform);
+  const dir = P.join(projectsDir, projectSlug(P.resolve(cwd).normalize("NFC"), env));
+  let best: { id: string; mtimeMs: number; dir: string } | undefined;
+  let files: string[] = [];
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return undefined;
+  }
+  for (const f of files) {
+    const id = f.replace(/\.jsonl$/, "");
+    if (id === f || !SESSION_ID_RE.test(id)) continue;
+    const mtimeMs = statSync(P.join(dir, f)).mtimeMs;
+    if (!best || mtimeMs > best.mtimeMs) best = { id, mtimeMs, dir };
+  }
+  return best;
+}
+
+/** `claudep handoff <name> [session-id] [-- claude args]`: carry on this
+ *  directory's latest session under another profile. projects/ is shared,
+ *  so the other profile can read the transcript; --fork-session gives it a
+ *  new id so two processes never append to one file. */
+async function cmdHandoff(L: Layout, args: string[]): Promise<never> {
+  const usage = "usage: claudep handoff <name> [session-id] [-- claude args…]";
+  const name = args[0];
+  if (!name || name.startsWith("-")) die(usage);
+  let rest = args.slice(1);
+  let id: string | undefined;
+  if (rest[0] !== undefined && rest[0] !== "--") {
+    id = rest.shift();
+    if (!id || !SESSION_ID_RE.test(id)) die(`"${id}" is not a session id. ${usage}`);
+  }
+  if (rest[0] === "--") rest = rest.slice(1);
+  const target = name === "default" || name === "base" ? L.base : profileDir(L, name);
+  if (target !== L.base && !existsSync(target)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
+  const projects = sharedItems(L.base).find((s) => s.name === "projects");
+  if (!projects || (target !== L.base && linkState(L.base, target, projects) !== "ok"))
+    die(`projects/ is not shared with "${name}", so it cannot read this session. Run: claudep init ${name}`);
+  if (!id) {
+    const latest = latestSession(join(L.base, "projects"), process.cwd(), process.env, L.platform);
+    if (!latest) die(`no session for this directory in ${join(L.base, "projects")}. Pass a session id`);
+    id = latest.id;
+    const mins = Math.max(0, Math.round((Date.now() - latest.mtimeMs) / 60_000));
+    console.error(`claudep: handing session ${id} (last written ${mins} min ago) to "${name}" as a new forked session`);
+  }
+  return cmdRun(L, [name, "--", "--resume", id, "--fork-session", ...rest]);
+}
+
 export type Row = { name: string; dir: string; status: AuthStatus };
 
 async function collectRows(L: Layout, names: string[], live: boolean): Promise<{ rows: Row[]; v?: Version }> {
@@ -2242,8 +2302,8 @@ export function completionScript(shell: CompletionShell, profilesRoot: string): 
  *  nothing on an empty root, directories only, basename. */
 function zshCompletion(profilesRoot: string): string {
   const q = `'${profilesRoot.replace(/'/g, `'\\''`)}'`;
-  const noColon = (s: string) => s.replace(/:/g, "\\:");
-  const cmds = visibleCommands().flatMap((c) => commandWords(c).map((w) => `    '${w}:${noColon(c.desc)}'`));
+  const zshDesc = (s: string) => s.replace(/:/g, "\\:").replace(/'/g, `'\\''`);
+  const cmds = visibleCommands().flatMap((c) => commandWords(c).map((w) => `    '${w}:${zshDesc(c.desc)}'`));
   const cases = COMMANDS.filter((c) => c.arg || c.flags || c.valueFlags).map((c) => {
     const specs: string[] = [];
     if (c.arg === "profile") specs.push("'1:profile:_claudep_profiles'");
@@ -2742,6 +2802,8 @@ ${c.bold("USAGE")}
   claudep vars <name> [KEY=VALUE…]     list or set the variables the profile exports; --unset KEY… removes,
                                        --json lists as JSON
   claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
+  claudep handoff <name> [session-id]  resume this directory's latest session under <name>, as a fork;
+                                       arguments after -- go to claude
   claudep doctor [name]                verify symlinks, keychain entry, unclassified files, Claude Code version
   claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
   claudep help                         show this text
@@ -2859,6 +2921,8 @@ export async function main(argv: string[]): Promise<void> {
       return cmdVars(L, args);
     case "alias":
       return cmdAlias(L, args);
+    case "handoff":
+      return cmdHandoff(L, args);
     case "doctor":
       return cmdDoctor(L, args);
     case "rm":

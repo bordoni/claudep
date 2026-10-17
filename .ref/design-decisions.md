@@ -135,6 +135,16 @@ Rejected: `claudep update` with its own lock and a timer, as the issue proposed.
 
 Before Claude Code 2.1.301 a short `claude auth status` can sign a profile out (anthropics/claude-code#95822, internals section 14), and `list`, `status` and `doctor` ran it once per profile. Below that version they now read the account from `.claude.json`, which says who was signed in last, not whether the login still works. The table marks those rows `*` and JSON carries `"cached": true`. `--live` asks anyway, for someone who knows their version is patched. An unknown version is treated as old.
 
+## 2026-10-17: `handoff` resumes a forked copy
+
+`claudep handoff <name>` runs `claude --resume <id> --fork-session` under another profile. Every competitor ships a version of it, and claudep needs no copying because `projects/` is shared. Facts from the 2.1.286 binary: a transcript lives in `projects/<slug of the launch directory>/<id>.jsonl`, keyed by the directory itself, not the git root that auto memory uses; `--resume <id>` looks in the current folder, then the repo's worktrees, then every folder, and gives up when the id is in more than one.
+
+- **Always a fork.** The original session may still be open under the first profile, and two processes appending to one transcript corrupt it. The fork costs nothing but a new id.
+- **Newest by mtime in this directory's folder**, which is what "carry on" means. A session id argument covers everything else.
+- **Refused when `projects/` is not shared with the target**, since the other profile could not read the transcript.
+
+Cost: `handoff` became a reserved word. The first turn under the new account is uncached.
+
 ## Not built, on purpose
 
 - **Per-profile `settings.json` overrides.** Would need a merge layer; `--settings <file>` on the command line already covers the rare case.
