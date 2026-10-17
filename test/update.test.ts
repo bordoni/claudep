@@ -44,7 +44,7 @@ describe("installKind", () => {
     ],
     ["C:\\Users\\me\\.local\\bin\\claude.exe", "C:\\Users\\me\\.local\\bin\\claude.exe", "win32", "native"],
     ["/usr/bin/claude", "/usr/bin/claude", "linux", "unknown"],
-  ] as const)("%s → %s is %s on %s", (bin, real, platform, kind) => {
+  ] as const)("%s → %s on %s is %s", (bin, real, platform, kind) => {
     expect(installKind(bin, real, platform)).toBe(kind);
   });
 });
