@@ -338,8 +338,9 @@ export const KNOWN_PRIVATE = new Set<string>([
   "antproto.json",
   ".cc-writes",
   "loop.md",
-  // claudep's own per-profile file.
+  // claudep's own per-profile files.
   "claudep.env",
+  "claudep.settings.json",
 ]);
 
 /** Keys copied from the base .claude.json into a fresh profile so first-run
@@ -410,6 +411,12 @@ export const COMMANDS: readonly Command[] = [
   {
     name: "vars",
     desc: "list, set or unset the variables a profile exports",
+    arg: "profile",
+    flags: ["--unset", "--json"],
+  },
+  {
+    name: "settings",
+    desc: "list, set or unset the settings claudep run gives a profile",
     arg: "profile",
     flags: ["--unset", "--json"],
   },
@@ -1539,8 +1546,16 @@ async function cmdRun(L: Layout, args: string[]): Promise<never> {
   if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
   for (const v of authEnvOverrides(process.env, L.platform))
     console.error(`claudep: ${v} is set; Claude Code will use it instead of the "${name}" login`);
-  const memoryDir = memoryDirOverride(dir, process.cwd(), rest, process.env, L.platform);
-  if (memoryDir !== undefined) rest.unshift("--settings", JSON.stringify({ autoMemoryDirectory: memoryDir }));
+  const overlay = readProfileSettings(dir);
+  if (overlay.error)
+    die(`${join(dir, SETTINGS_FILE)}: ${overlay.error}. Fix it, or: claudep settings ${name} --unset <key>`);
+  if (rest.some((a) => a === "--settings" || a.startsWith("--settings="))) {
+    if (Object.keys(overlay.settings).length)
+      console.error(`claudep: you passed --settings, so ${join(dir, SETTINGS_FILE)} is not applied`);
+    return execClaude(L, dir, rest);
+  }
+  const settings = runSettings(memoryDirOverride(dir, process.cwd(), rest, process.env, L.platform), overlay.settings);
+  if (settings) rest.unshift("--settings", JSON.stringify(settings));
   return execClaude(L, dir, rest);
 }
 
@@ -1794,6 +1809,84 @@ function cmdVars(L: Layout, args: string[]): void {
     console.log(
       `${c.dim("·")} this shell picks the change up on the next cd into a pinned directory, or from: claudep env ${name}`,
     );
+}
+
+/** Settings `claudep run` passes a profile through --settings, on top of the
+ *  shared settings.json. Flag settings rank above user and project settings
+ *  and below managed ones. Plain `claude` in a pinned shell does not see them. */
+export const SETTINGS_FILE = "claudep.settings.json";
+const SETTING_KEY_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+/** Why a settings key is refused, or undefined. `env` belongs in claudep vars,
+ *  where the credential and CLAUDE_CONFIG_DIR rules apply. */
+export function refusedSettingKey(key: string): string | undefined {
+  if (!SETTING_KEY_RE.test(key)) return `"${key}" is not a settings key`;
+  if (key === "env") return "env is not allowed here: set variables with claudep vars";
+  return undefined;
+}
+
+/** `key=value`: the value is JSON when it parses (false, 3, {"a":1}), otherwise a string. */
+export function parseSettingEntry(entry: string): [string, unknown] {
+  const eq = entry.indexOf("=");
+  if (eq < 1) die(`expected key=value, got "${entry}"`);
+  const key = entry.slice(0, eq);
+  const why = refusedSettingKey(key);
+  if (why) die(why);
+  const raw = entry.slice(eq + 1);
+  try {
+    return [key, JSON.parse(raw)];
+  } catch {
+    return [key, raw];
+  }
+}
+
+/** A profile's settings overlay: an object, or the reason it cannot be used. */
+export function readProfileSettings(dir: string): { settings: JsonObject; error?: string } {
+  let text: string;
+  try {
+    text = readFileSync(join(dir, SETTINGS_FILE), "utf8");
+  } catch {
+    return { settings: {} };
+  }
+  try {
+    const j: unknown = JSON.parse(text);
+    if (!j || typeof j !== "object" || Array.isArray(j)) return { settings: {}, error: "not a JSON object" };
+    const bad = Object.keys(j).map(refusedSettingKey).find(Boolean);
+    return bad ? { settings: {}, error: bad } : { settings: j as JsonObject };
+  } catch {
+    return { settings: {}, error: "not valid JSON" };
+  }
+}
+
+/** The --settings value `run` passes: the auto-memory path, then the profile's overlay, which wins. */
+export function runSettings(memoryDir: string | undefined, overlay: JsonObject): JsonObject | undefined {
+  const out: JsonObject = { ...(memoryDir === undefined ? {} : { autoMemoryDirectory: memoryDir }), ...overlay };
+  return Object.keys(out).length ? out : undefined;
+}
+
+function cmdSettings(L: Layout, args: string[]): void {
+  const f = parseFlags(args, ...flagSpec("settings"));
+  const [name, ...rest] = f.rest;
+  if (!name) die("usage: claudep settings <name> [key=value…] | --unset key… | --json");
+  if (name === "default" || name === "base")
+    die(`the default profile reads ${join(L.base, "settings.json")} directly; edit that file`);
+  const dir = profileDir(L, name);
+  if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
+  const file = join(dir, SETTINGS_FILE);
+  const { settings, error } = readProfileSettings(dir);
+  if (error) die(`${file}: ${error}. Fix or remove it`);
+  if (!rest.length) {
+    if (f.bools.has("--unset")) die("usage: claudep settings <name> --unset key…");
+    if (f.bools.has("--json")) console.log(JSON.stringify(settings, null, 2));
+    else for (const [k, v] of Object.entries(settings)) console.log(`${k}=${JSON.stringify(v)}`);
+    return;
+  }
+  const next: JsonObject = { ...settings };
+  if (f.bools.has("--unset")) for (const k of rest) delete next[k];
+  else for (const [k, v] of rest.map(parseSettingEntry)) next[k] = v;
+  if (Object.keys(next).length) writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`);
+  else rmSync(file, { force: true });
+  ok(Object.keys(next).length ? `${name}: ${Object.keys(next).join(", ")}` : `${name}: no settings`);
 }
 
 function describeCurrent(cur: Current): string {
@@ -2948,6 +3041,12 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
     if (await reportUpdates(L, dir)) updaters.push(name);
     const env = readProfileEnv(dir);
     if (env.vars.length) ok(`${ENV_FILE}: ${env.vars.map(([k]) => k).join(", ")}`);
+    const overlay = readProfileSettings(dir);
+    if (overlay.error) {
+      bad(`${join(dir, SETTINGS_FILE)}: ${overlay.error}; claudep run refuses to start this profile until it is fixed`);
+      problems++;
+    } else if (Object.keys(overlay.settings).length)
+      ok(`${SETTINGS_FILE}: ${Object.keys(overlay.settings).join(", ")} (claudep run and alias commands only)`);
     if (env.skipped.length) {
       bad(
         `${join(dir, ENV_FILE)}: lines ${env.skipped.join(", ")} are not KEY=VALUE with an allowed name and a value; nothing reads them`,
@@ -3048,6 +3147,8 @@ ${c.bold("USAGE")}
   claudep vars <name> [KEY=VALUE…]     list or set the variables the profile exports; --unset KEY… removes,
                                        --json lists as JSON
   claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
+  claudep settings <name> [key=value…] settings claudep run gives <name> on top of the shared settings.json
+                                       (values are JSON or a string); --unset key…, --json
   claudep handoff <name> [session-id]  resume this directory's latest session under <name>, as a fork;
                                        arguments after -- go to claude
   claudep usage [name…] [--json]       five-hour and weekly usage per profile; live from claude -p /usage on
@@ -3177,6 +3278,8 @@ export async function main(argv: string[]): Promise<void> {
       return cmdStatusline(L);
     case "usage":
       return cmdUsage(L, args);
+    case "settings":
+      return cmdSettings(L, args);
     case "doctor":
       return cmdDoctor(L, args);
     case "rm":

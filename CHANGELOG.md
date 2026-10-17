@@ -12,11 +12,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - `claudep handoff <name> [session-id]` resumes this directory's newest session under another profile, as a fork with a new session id, so the work goes on when one account hits its limit. Arguments after `--` go to claude.
 - `claudep usage [name…] [--json]` shows each profile's five-hour and weekly usage and when each window resets. From Claude Code 2.1.301 it asks every profile with `claude -p /usage --no-session-persistence`; on older versions, or with `--cached`, it shows the numbers last seen. claudep reads no token.
 - `claudep statusline` reads the statusline JSON on stdin and prints `work · 5h 23% · 7d 41%` from its `rate_limits`, and remembers the numbers in `~/.claudep/.usage/` for `claudep usage`. Pipe your `statusline-command.sh` input to it.
+- `claudep settings <name> [key=value…]` gives one profile its own settings on top of the shared `settings.json`, such as a different `model` or `syncClaudeAiSkills=false`. They live in `claudep.settings.json` in the profile, and `claudep <name>`, `claudep run` and alias commands pass them with `--settings`. `--unset` and `--json` work as in `claudep vars`; `env` is refused. `claudep doctor` lists the keys and fails on a broken file.
 - `claudep list --live` and `claudep status --live` ask Claude Code for the login even on a version that can sign a profile out (see Changed).
 
 ### Changed
 
-- **Breaking:** `handoff`, `usage` and `statusline` are now reserved words. A profile with one of those names stops resolving; recreate it under another name.
+- **Breaking:** `handoff`, `usage`, `statusline` and `settings` are now reserved words. A profile with one of those names stops resolving; recreate it under another name.
 - Below Claude Code 2.1.301, `claudep list`, `status` and `doctor` no longer run `claude auth status`, which there can spend a profile's refresh token and sign it out ([anthropics/claude-code#95822](https://github.com/anthropics/claude-code/issues/95822)). They show the account recorded in the profile's `.claude.json` instead, marked `*` in the table and `"cached": true` in JSON, and `doctor` says to update Claude Code.
 - `claudep init` no longer copies `autoUpdates` into a new profile. Claude Code moves `autoUpdates: false` into `env.DISABLE_AUTOUPDATER` in the user `settings.json`, which in a profile is the shared file, so one new profile could switch updates off for all of them.
 

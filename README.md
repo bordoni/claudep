@@ -59,6 +59,7 @@ claudep status <name> [--json] [--live]   login state for one profile ("default"
 claudep env <name> [--shell <sh>]    print the CLAUDE_CONFIG_DIR pin for eval, source or Invoke-Expression
 claudep vars <name> [KEY=VALUE…]     list or set the variables a profile exports (see below)
 claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
+claudep settings <name> [key=value…] settings one profile gets on top of the shared settings.json (see below)
 claudep handoff <name> [session-id]  carry this directory's latest session on under another profile
 claudep usage [name…] [--json]       five-hour and weekly usage for every profile
 claudep statusline                   statusline segment with the profile and its usage (reads stdin)
@@ -128,6 +129,19 @@ They live in `~/.claudep/<name>/claudep.env`, one `KEY=VALUE` per line. `claudep
 - `CLAUDE_CONFIG_DIR`, `CLAUDEP_*`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` are refused. claudep never stores credentials.
 - Values are one line, not empty, with no spaces at either end. `claudep vars` edits the file in place and keeps your comments. `claudep doctor` lists each profile's variable names and reports lines nothing reads.
 - A shell that is already inside a pinned tree picks up a change on the next `cd`.
+
+## Per-profile settings
+
+`settings.json` is shared. For the few settings one account needs differently, give the profile its own:
+
+```sh
+claudep settings work model=opus                 # values are JSON when they parse, otherwise a string
+claudep settings work syncClaudeAiSkills=false   # stop syncing this account's claude.ai skills
+claudep settings work                            # list them
+claudep settings work --unset model              # remove one
+```
+
+They live in `~/.claudep/<name>/claudep.settings.json`. `claudep <name>`, `claudep run` and alias commands pass them to Claude Code with `--settings`, which ranks above your user and project settings and below managed ones. Plain `claude` in a shell the hook or `claudep env` set up does not see them, and neither does a run where you pass your own `--settings`. `env` is refused here; use `claudep vars`. `claudep doctor` lists the keys and fails on a file that is not a JSON object.
 
 ## Tab completion
 
@@ -226,7 +240,7 @@ The shared list is an allowlist, so an account-specific file cannot leak across 
 - Two profiles running at the same time write the same `settings.json` and `plugins/`. That is the same situation as two terminals today.
 - Background sessions and the daemon are tied to `~/.claude`. As of Claude Code 2.1.280, `claude daemon install` refuses to run with `CLAUDE_CONFIG_DIR` set, and the launcher skips the daemon for `claude --bg` under a profile. Anthropic's docs describe a separate background supervisor per config dir; I have not verified that here.
 - Since Claude Code 2.1.280, every auto-memory write in a profile asks for approval, and auto mode cannot give it. The memory directory sits under the shared `projects/` symlink, and Claude Code now checks a write at the path it lands on, `~/.claude/projects/...`, which it treats as sensitive. This is [anthropics/claude-code#98044](https://github.com/anthropics/claude-code/issues/98044), open upstream. `claudep <name>`, `claudep run` and alias commands avoid it: they pass the real memory path with `--settings`, unless you pass your own `--settings`. Plain `claude` in a shell the hook or `claudep env` set up still asks. `claudep doctor` warns while your Claude Code is affected. The default profile is not.
-- Skills and plugins synced from claude.ai land in the shared `skills/synced/` and `plugins/synced/`, in one folder per account, so profiles do not mix them. The `syncClaudeAiSkills` and `syncClaudeAiPlugins` switches live in the shared `settings.json` and apply to every profile.
+- Skills and plugins synced from claude.ai land in the shared `skills/synced/` and `plugins/synced/`, in one folder per account, so profiles do not mix them. The `syncClaudeAiSkills` and `syncClaudeAiPlugins` switches live in the shared `settings.json`; to change one for a single profile, use `claudep settings <name> syncClaudeAiSkills=false`.
 - Console sign-ins made without an API key live in `~/.config/anthropic`, outside every config dir, so all profiles see the same ones. `ANTHROPIC_PROFILE` picks which one Claude Code uses; set it per profile with `claudep vars <name> ANTHROPIC_PROFILE=<sign-in>`.
 - In VS Code, `CLAUDE_CONFIG_DIR` in `claudeCode.environmentVariables` must be an absolute path. The session list ignores it when `claudeProcessWrapper` is set.
 - Set `CLAUDE_PROFILES_DIR` to move the profiles root. Keep it out of iCloud or Dropbox; `.claude.json` is rewritten constantly and sync tools create conflict copies.

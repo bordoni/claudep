@@ -1225,3 +1225,76 @@ describe("usage", () => {
     expect(existsSync(log)).toBe(false);
   });
 });
+
+describe("settings", () => {
+  test("sets, lists, prints JSON and unsets a profile's settings", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const set = await runCli(
+      ["settings", "work", "model=opus", "syncClaudeAiSkills=false", 'enabledPlugins={"x@y":true}'],
+      {
+        home: h.home,
+      },
+    );
+    expect(set.exitCode).toBe(0);
+    const file = join(h.profilesRoot, "work", "claudep.settings.json");
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      model: "opus",
+      syncClaudeAiSkills: false,
+      enabledPlugins: { "x@y": true },
+    });
+    const list = await runCli(["settings", "work"], { home: h.home });
+    expect(list.stdout).toBe('model="opus"\nsyncClaudeAiSkills=false\nenabledPlugins={"x@y":true}\n');
+    await runCli(["settings", "work", "--unset", "model", "enabledPlugins"], { home: h.home });
+    expect(JSON.parse((await runCli(["settings", "work", "--json"], { home: h.home })).stdout)).toEqual({
+      syncClaudeAiSkills: false,
+    });
+    await runCli(["settings", "work", "--unset", "syncClaudeAiSkills"], { home: h.home });
+    expect(existsSync(file)).toBe(false);
+  });
+
+  test("refuses env, a bad key and the default profile", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const env = await runCli(["settings", "work", 'env={"A":"1"}'], { home: h.home });
+    expect(env.exitCode).toBe(1);
+    expect(env.stderr).toContain("claudep vars");
+    expect((await runCli(["settings", "work", "a.b=1"], { home: h.home })).stderr).toContain("not a settings key");
+    expect((await runCli(["settings", "default", "model=opus"], { home: h.home })).stderr).toContain(
+      "reads " + join(h.base, "settings.json"),
+    );
+  });
+
+  test("run passes them with the auto-memory path, and your own --settings wins", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    await runCli(["settings", "work", "model=opus"], { home: h.home });
+    const log = join(h.home, "claude.log");
+    await runCli(["work", "x"], { home: h.home, env: { FAKE_CLAUDE_LOG: log } });
+    const [flag, value, ...rest] = JSON.parse(readFileSync(log, "utf8")).argv;
+    expect(flag).toBe("--settings");
+    const settings = JSON.parse(value);
+    expect(settings.model).toBe("opus");
+    expect(typeof settings.autoMemoryDirectory).toBe("string");
+    expect(rest).toEqual(["x"]);
+    const own = await runCli(["work", "--settings", "{}", "x"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_LOG: join(h.home, "own.log") },
+    });
+    expect(own.stderr).toContain("is not applied");
+    expect(JSON.parse(readFileSync(join(h.home, "own.log"), "utf8")).argv).toEqual(["--settings", "{}", "x"]);
+  });
+
+  test("a broken file stops run and fails doctor", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    writeFileSync(join(h.profilesRoot, "work", "claudep.settings.json"), "{ nope");
+    const r = await runCli(["work", "x"], { home: h.home });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("not valid JSON");
+    const doc = await runCli(["doctor", "work"], { home: h.home });
+    expect(doc.exitCode).toBe(1);
+    expect(doc.stdout).toContain("claudep run refuses to start this profile");
+    expect(doc.stdout).not.toContain("unexpected private items");
+  });
+});

@@ -154,9 +154,20 @@ The 2026-09-07 entry rejected usage because the only source needed the account's
 
 `claudep usage` asks live only when `claude auth status` would be safe (2.1.301, see the entry above): `-p /usage` is a short command too. Below that it shows the cache. Still rejected: rotating accounts on its own, and anything that reads the token.
 
+## 2026-10-17: Per-profile settings through `--settings`
+
+This reverses the "Not built" line on per-profile `settings.json` overrides, which said it would need a merge layer. Since 0.4.2 `run` already builds a `--settings` JSON for `autoMemoryDirectory`, so the merge is one spread, and Claude Code does the layering: flag settings rank above user and project settings and below managed ones. The cases that made it worth doing: `syncClaudeAiSkills` cannot differ per profile through the shared file (see `shared-vs-private.md`), and a gateway login, a `model` or `enabledPlugins` can belong to one account.
+
+- **`<profile>/claudep.settings.json`**, edited with `claudep settings` the way `claudep vars` edits `claudep.env`. A value is JSON when it parses, so `false`, `30` and objects work, otherwise a string.
+- **The profile's keys win over claudep's `autoMemoryDirectory`.** Someone who sets it means it.
+- **`env` is refused.** Variables go through `claudep vars`, where the credential and `CLAUDE_CONFIG_DIR` rules live.
+- **A broken file stops `run`** instead of starting the account without settings someone asked for. `doctor` fails on it.
+- **The user's own `--settings` wins** and the overlay is skipped with a note, as the auto-memory path already was: Claude Code takes one value.
+
+Cost: only `run` and alias commands apply it. The hook and `claudep env` set variables, and plain `claude` cannot be handed a flag. `settings` became a reserved word.
+
 ## Not built, on purpose
 
-- **Per-profile `settings.json` overrides.** Would need a merge layer; `--settings <file>` on the command line already covers the rare case.
 - **Auto-migration of an existing `~/.claude` login into a named profile.** Would touch the base, which is the one thing claudep promises not to do.
 - **Credential ACL checks on Linux and Windows.** `doctor` checks that `<profile>/.credentials.json` exists and stops there. Reading the file's permissions would need an `icacls` or `stat` subprocess for a fact the user cannot act on through claudep.
 

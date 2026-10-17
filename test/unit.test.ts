@@ -48,6 +48,7 @@ import {
   parseAuthStatus,
   parseEnvFile,
   parseFlags,
+  parseSettingEntry,
   parseVersion,
   pathKey,
   projectSlug,
@@ -55,7 +56,9 @@ import {
   refusedEnvCase,
   refusedEnvKey,
   refusedEnvRegex,
+  refusedSettingKey,
   resolvePin,
+  runSettings,
   SHELLS,
   type Shell,
   samePath,
@@ -1124,5 +1127,26 @@ describe("completionScript", () => {
     expect(completionHint("bash")).toBe('eval "$(claudep completion bash)"');
     expect(completionHint("fish")).toBe("claudep completion fish | source");
     expect(completionHint("powershell")).toBe("claudep completion powershell | Out-String | Invoke-Expression");
+  });
+});
+
+describe("settings overlay helpers", () => {
+  test("parseSettingEntry reads JSON values and keeps anything else as a string", () => {
+    expect(parseSettingEntry("model=opus")).toEqual(["model", "opus"]);
+    expect(parseSettingEntry("cleanupPeriodDays=30")).toEqual(["cleanupPeriodDays", 30]);
+    expect(parseSettingEntry('statusLine={"type":"command"}')).toEqual(["statusLine", { type: "command" }]);
+    expect(parseSettingEntry("x=a=b")).toEqual(["x", "a=b"]);
+  });
+
+  test("runSettings lets the profile override the auto-memory path, and is empty without either", () => {
+    expect(runSettings("/m", { model: "opus" })).toEqual({ autoMemoryDirectory: "/m", model: "opus" });
+    expect(runSettings("/m", { autoMemoryDirectory: "/mine" })).toEqual({ autoMemoryDirectory: "/mine" });
+    expect(runSettings(undefined, {})).toBeUndefined();
+  });
+
+  test("refusedSettingKey", () => {
+    expect(refusedSettingKey("model")).toBeUndefined();
+    expect(refusedSettingKey("env")).toContain("claudep vars");
+    expect(refusedSettingKey("1x")).toContain("not a settings key");
   });
 });
