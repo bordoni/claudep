@@ -1144,3 +1144,84 @@ describe("handoff", () => {
     expect((await runCli(["init", "handoff", "--no-login"], { home: h.home })).stderr).toContain("reserved");
   });
 });
+
+describe("statusline", () => {
+  const payload = (five: number, week: number) =>
+    JSON.stringify({
+      session_id: "s",
+      rate_limits: {
+        five_hour: { used_percentage: five, resets_at: 1_797_500_000 },
+        seven_day: { used_percentage: week, resets_at: 1_797_900_000 },
+      },
+    });
+
+  test("prints the profile with its usage and remembers it under the profiles root", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const env = { CLAUDE_CONFIG_DIR: join(h.profilesRoot, "work") };
+    const r = await runCli(["statusline"], { home: h.home, env, stdin: payload(23.4, 41) });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("work · 5h 23% · 7d 41%\n");
+    const cache = JSON.parse(readFileSync(join(h.profilesRoot, ".usage", "work.json"), "utf8"));
+    expect(cache).toMatchObject({ fiveHour: { usedPercentage: 23.4, resetsAt: 1_797_500_000 }, source: "statusline" });
+    expect(existsSync(join(h.base, ".usage"))).toBe(false);
+    // The profiles root's .usage folder is not a profile.
+    expect((await runCli(["list"], { home: h.home })).stdout).not.toContain(".usage");
+  });
+
+  test("prints only the name without rate limits, and default for ~/.claude", async () => {
+    using h = fakeHome();
+    const r = await runCli(["statusline"], { home: h.home, stdin: JSON.stringify({ session_id: "s" }) });
+    expect(r.stdout).toBe("default\n");
+    expect(existsSync(join(h.profilesRoot, ".usage"))).toBe(false);
+  });
+});
+
+describe("usage", () => {
+  test("asks each profile live with -p /usage, writes no transcript, and remembers the numbers", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const log = join(h.home, "claude.log");
+    const r = await runCli(["usage"], { home: h.home, env: { FAKE_CLAUDE_LOG: log } });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/^default\s+12%\s+Oct 17 at 1:59pm\s+34%\s+Oct 23 at 10:59pm\s+now$/m);
+    expect(r.stdout).toMatch(/^work\s+12%/m);
+    const calls = readFileSync(log, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    expect(calls.map((c: { configDir: string | null }) => c.configDir).sort()).toEqual(
+      [join(h.profilesRoot, "work"), null].sort(),
+    );
+    for (const c of calls)
+      expect(c.argv).toEqual(["-p", "/usage", "--output-format", "json", "--no-session-persistence"]);
+    expect(existsSync(join(h.profilesRoot, ".usage", "work.json"))).toBe(true);
+    const json = await runCli(["usage", "work", "--json"], { home: h.home });
+    expect(JSON.parse(json.stdout)[0]).toMatchObject({
+      name: "work",
+      live: true,
+      sevenDay: { usedPercentage: 34 },
+      models: { Fable: { usedPercentage: 5 } },
+    });
+  });
+
+  test("below Claude Code 2.1.301 shows the last seen numbers without asking, and --cached never asks", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const stdin = JSON.stringify({ rate_limits: { seven_day: { used_percentage: 41, resets_at: 1_797_900_000 } } });
+    await runCli(["statusline"], { home: h.home, env: { CLAUDE_CONFIG_DIR: join(h.profilesRoot, "work") }, stdin });
+    const log = join(h.home, "claude.log");
+    const old = await runCli(["usage"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_VERSION: "2.1.300 (Claude Code)", FAKE_CLAUDE_LOG: log },
+    });
+    expect(old.stdout).toMatch(/^work\s+-\s+-\s+41%\s+.+\s+now \(statusline\)$/m);
+    expect(old.stdout).toMatch(/^default\s+(-\s+){4}never$/m);
+    expect(old.stdout).toContain("anthropics/claude-code/issues/95822");
+    expect(existsSync(log)).toBe(false);
+    const cached = await runCli(["usage", "--cached"], { home: h.home, env: { FAKE_CLAUDE_LOG: log } });
+    expect(cached.stdout).toMatch(/^work\s+-\s+-\s+41%/m);
+    expect(cached.stdout).not.toContain("95822");
+    expect(existsSync(log)).toBe(false);
+  });
+});

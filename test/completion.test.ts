@@ -164,7 +164,7 @@ describe("completion scripts in real shells", () => {
       expect(initE).toBe("--email --env");
       expect(env).toBe("sh zsh bash fish powershell");
       expect(comp).toBe("zsh bash fish powershell");
-      expect(sta).toBe("status");
+      expect(sta).toBe("status statusline");
       expect(tip).toBe("create or update a profile and log in");
     });
   }

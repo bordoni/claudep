@@ -8,6 +8,8 @@
  *   auth login           writes that file (email from --email or FAKE_CLAUDE_EMAIL)
  *   auth logout          deletes it
  *   --version            prints a fake version
+ *   -p /usage            prints a result document like 2.1.286's, its text from FAKE_CLAUDE_USAGE
+ *                        when set, after logging like anything else
  *   anything else        appends {argv, configDir} to $FAKE_CLAUDE_LOG and exits $FAKE_CLAUDE_EXIT;
  *                        FAKE_CLAUDE_LOG_ENV=A,B adds {env: {A, B}} with the values it saw
  */
@@ -79,5 +81,12 @@ const logEnv = process.env.FAKE_CLAUDE_LOG_ENV;
 const entry: Record<string, unknown> = { argv, configDir: process.env.CLAUDE_CONFIG_DIR ?? null };
 if (logEnv) entry.env = Object.fromEntries(logEnv.split(",").map((k) => [k, process.env[k] ?? null]));
 if (log) appendFileSync(log, `${JSON.stringify(entry)}\n`);
+if (argv[0] === "-p" && argv[1] === "/usage") {
+  const result =
+    process.env.FAKE_CLAUDE_USAGE ??
+    "You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 12% used · resets Oct 17 at 1:59pm (America/New_York)\nCurrent week (all models): 34% used · resets Oct 23 at 10:59pm (America/New_York)\nCurrent week (Fable): 5% used · resets Oct 23 at 11pm (America/New_York)\n\nWhat's contributing to your limits usage?";
+  out(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 0, total_cost_usd: 0, result }));
+  process.exit(0);
+}
 out(`fake claude ran with: ${argv.join(" ")}`);
 process.exit(Number(process.env.FAKE_CLAUDE_EXIT ?? "0"));

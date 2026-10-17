@@ -415,6 +415,13 @@ export const COMMANDS: readonly Command[] = [
   },
   { name: "alias", desc: "write a shim command that runs claudep with a profile", arg: "profile" },
   { name: "handoff", desc: "resume this directory's latest session under another profile", arg: "profile" },
+  { name: "statusline", desc: "print the profile and its usage from the statusline JSON on stdin" },
+  {
+    name: "usage",
+    desc: "five-hour and weekly usage for every profile",
+    arg: "profile",
+    flags: ["--json", "--live", "--cached"],
+  },
   { name: "doctor", desc: "verify symlinks, keychain entry, unclassified files, Claude Code version", arg: "profile" },
   {
     name: "rm",
@@ -1800,6 +1807,245 @@ export function currentLabel(cur: Current): string {
   return cur.kind === "profile" ? (cur.name ?? "?") : cur.kind === "custom" ? "custom" : "default";
 }
 
+// ---------------------------------------------------------------------------
+// Usage limits. Claude Code hands every statusline command a JSON document
+// whose rate_limits carry the account's five-hour and weekly windows, so
+// claudep can show and remember them without ever touching a token.
+// ---------------------------------------------------------------------------
+
+/** `resetsAt` is epoch seconds (the statusline); `resets` is Claude Code's own text (`/usage`). */
+export type UsageWindow = { usedPercentage: number; resetsAt?: number; resets?: string };
+/** `at` is when the numbers were seen, in epoch seconds; `source` says how.
+ *  `models` holds per-model weekly windows, which only `/usage` reports. */
+export type Usage = {
+  fiveHour?: UsageWindow;
+  sevenDay?: UsageWindow;
+  models?: Record<string, UsageWindow>;
+  at: number;
+  source: "statusline" | "usage";
+};
+
+/** One window from the statusline's rate_limits: used_percentage 0 to 100, resets_at in epoch seconds. */
+function usageWindow(v: unknown): UsageWindow | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const o = v as JsonObject;
+  if (typeof o.used_percentage !== "number" || typeof o.resets_at !== "number") return undefined;
+  return { usedPercentage: o.used_percentage, resetsAt: o.resets_at };
+}
+
+/** The usage in a statusline payload. Absent for API-key, Bedrock and Vertex
+ *  sessions and before the first response, and each window can be missing. */
+export function statuslineUsage(payload: string, now: number): Usage | undefined {
+  let j: unknown;
+  try {
+    j = JSON.parse(payload);
+  } catch {
+    return undefined;
+  }
+  const rl = j && typeof j === "object" ? (j as JsonObject).rate_limits : undefined;
+  if (!rl || typeof rl !== "object") return undefined;
+  const fiveHour = usageWindow((rl as JsonObject).five_hour);
+  const sevenDay = usageWindow((rl as JsonObject).seven_day);
+  if (!fiveHour && !sevenDay) return undefined;
+  return { fiveHour, sevenDay, at: now, source: "statusline" };
+}
+
+/** `work · 5h 23% · 7d 41%`, leaving out what is not known. */
+export function usageSegment(name: string, u: Usage | undefined): string {
+  const parts = [name];
+  if (u?.fiveHour) parts.push(`5h ${Math.round(u.fiveHour.usedPercentage)}%`);
+  if (u?.sevenDay) parts.push(`7d ${Math.round(u.sevenDay.usedPercentage)}%`);
+  return parts.join(" · ");
+}
+
+/** Where a profile's last seen usage is kept: claudep's own root, never ~/.claude. */
+export function usageCachePath(L: Layout, name: string): string {
+  return pathApi(L.platform).join(L.profilesRoot, ".usage", `${name}.json`);
+}
+
+function cachedWindow(v: unknown): UsageWindow | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const o = v as JsonObject;
+  if (typeof o.usedPercentage !== "number") return undefined;
+  const w: UsageWindow = { usedPercentage: o.usedPercentage };
+  if (typeof o.resetsAt === "number") w.resetsAt = o.resetsAt;
+  if (typeof o.resets === "string") w.resets = o.resets;
+  return w;
+}
+
+export async function readUsageCache(L: Layout, name: string): Promise<Usage | undefined> {
+  const j = await readJson(usageCachePath(L, name));
+  if (!j || typeof j.at !== "number") return undefined;
+  const u: Usage = {
+    fiveHour: cachedWindow(j.fiveHour),
+    sevenDay: cachedWindow(j.sevenDay),
+    at: j.at,
+    source: j.source === "usage" ? "usage" : "statusline",
+  };
+  if (j.models && typeof j.models === "object") {
+    const models: Record<string, UsageWindow> = {};
+    for (const [k, v] of Object.entries(j.models as JsonObject)) {
+      const w = cachedWindow(v);
+      if (w) models[k] = w;
+    }
+    u.models = models;
+  }
+  return u;
+}
+
+/** The windows in `claude -p /usage`'s text, as 2.1.286 prints them:
+ *  "Current session: 2% used · resets Oct 17 at 1:59pm (America/New_York)",
+ *  "Current week (all models): …" and one "Current week (<model>): …" per
+ *  model. The reset stays Claude Code's text; its format is not stable
+ *  enough to turn into a date. */
+export function parseUsageText(text: string, now: number): Usage | undefined {
+  const re = /^Current (session|week \(([^)]*)\)):\s*(\d+(?:\.\d+)?)% used(?:\s*·\s*resets\s+(.+?))?\s*$/gm;
+  const u: Usage = { at: now, source: "usage" };
+  for (const m of text.matchAll(re)) {
+    const w: UsageWindow = { usedPercentage: Number(m[3]) };
+    if (m[4]) w.resets = m[4];
+    if (m[1] === "session") u.fiveHour = w;
+    else if (m[2] === "all models") u.sevenDay = w;
+    else if (m[2]) u.models = { ...u.models, [m[2]]: w };
+  }
+  return u.fiveHour || u.sevenDay ? u : undefined;
+}
+
+/** The usage in `claude -p /usage --output-format json` output, or undefined. */
+export function parseUsageOutput(out: string, now: number): Usage | undefined {
+  try {
+    const j: unknown = JSON.parse(out);
+    const result = j && typeof j === "object" ? (j as JsonObject).result : undefined;
+    return typeof result === "string" ? parseUsageText(result, now) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** When a window resets, short and in local time. */
+function resetsText(w: UsageWindow | undefined): string {
+  if (!w) return "-";
+  if (w.resets) return w.resets.replace(/\s*\([^)]*\)$/, "");
+  if (w.resetsAt === undefined) return "-";
+  return new Date(w.resetsAt * 1000).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/** "now", "4 min ago", "3 h ago", "2 d ago". */
+export function ageText(at: number, now: number): string {
+  const s = Math.max(0, now - at);
+  if (s < 60) return "now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86_400) return `${Math.floor(s / 3600)} h ago`;
+  return `${Math.floor(s / 86_400)} d ago`;
+}
+
+export type UsageRow = { name: string; usage?: Usage; live: boolean };
+
+export function formatUsageTable(rows: UsageRow[], now: number): string[] {
+  const cols = ["PROFILE", "5H", "RESETS", "7D", "RESETS", "SEEN"];
+  const pct = (w?: UsageWindow) => (w ? `${Math.round(w.usedPercentage)}%` : "-");
+  const data = rows.map((r) => [
+    r.name,
+    pct(r.usage?.fiveHour),
+    resetsText(r.usage?.fiveHour),
+    pct(r.usage?.sevenDay),
+    resetsText(r.usage?.sevenDay),
+    r.usage ? (r.live ? "now" : `${ageText(r.usage.at, now)} (${r.usage.source})`) : "never",
+  ]);
+  const widths = cols.map((h, i) => Math.max(h.length, ...data.map((d) => (d[i] as string).length)));
+  const fmt = (cells: string[]) =>
+    cells
+      .map((v, i) => v.padEnd(widths[i] as number))
+      .join("  ")
+      .trimEnd();
+  return [fmt(cols), ...data.map((d) => fmt(d))];
+}
+
+/** `claudep usage [name…]`: each profile's five-hour and weekly usage. Live
+ *  from `claude -p /usage` when that is safe (see SAFE_AUTH_STATUS_FROM),
+ *  otherwise the numbers last seen by the statusline or an earlier run. */
+async function cmdUsage(L: Layout, args: string[]): Promise<void> {
+  const f = parseFlags(args, ...flagSpec("usage"));
+  const names = f.rest.length ? f.rest : ["default", ...listProfileNames(L)];
+  for (const n of names) if (n !== "default" && !profileExists(L, n)) die(`profile "${n}" does not exist`);
+  const v = f.bools.has("--cached") ? undefined : await claudeVersion(L);
+  const live = !f.bools.has("--cached") && (f.bools.has("--live") || authStatusSafe(v));
+  const now = Math.floor(Date.now() / 1000);
+  const rows: UsageRow[] = await Promise.all(
+    names.map(async (name) => {
+      const old = await readUsageCache(L, name);
+      if (live) {
+        const dir = name === "default" ? undefined : profileDir(L, name);
+        const args = ["-p", "/usage", "--output-format", "json", "--no-session-persistence"];
+        const fresh = parseUsageOutput((await captureClaude(L, dir, args)).out, now);
+        if (fresh) {
+          try {
+            writeUsageCache(L, name, fresh, old);
+          } catch {}
+          return { name, usage: fresh, live: true };
+        }
+      }
+      return { name, usage: old, live: false };
+    }),
+  );
+  if (f.bools.has("--json")) {
+    console.log(
+      JSON.stringify(
+        rows.map((r) => ({ name: r.name, live: r.live, ...r.usage })),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  const [header, ...lines] = formatUsageTable(rows, now);
+  console.log(c.bold(header as string));
+  for (const line of lines) console.log(line);
+  if (!live && !f.bools.has("--cached"))
+    console.log(
+      c.dim(
+        `\nLast seen numbers: Claude Code ${v?.join(".") ?? "of unknown version"} can sign a profile out on a short command (${AUTH_STATUS_ISSUE}, fixed in ${SAFE_AUTH_STATUS_FROM}). Update Claude Code, or pass --live`,
+      ),
+    );
+  if (rows.some((r) => !r.usage))
+    console.log(
+      c.dim(
+        "\nNo numbers for a profile until Claude Code reports them: an API-key or Bedrock login has none, and the statusline needs claudep statusline",
+      ),
+    );
+}
+
+/** Writes the cache only when the windows changed, since the statusline runs on every render. */
+export function writeUsageCache(L: Layout, name: string, u: Usage, old: Usage | undefined): boolean {
+  const same = (a?: UsageWindow, b?: UsageWindow) =>
+    a?.usedPercentage === b?.usedPercentage && a?.resetsAt === b?.resetsAt && a?.resets === b?.resets;
+  if (old?.source === u.source && same(old.fiveHour, u.fiveHour) && same(old.sevenDay, u.sevenDay)) return false;
+  const file = usageCachePath(L, name);
+  mkdirSync(pathApi(L.platform).dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(u)}\n`);
+  return true;
+}
+
+/** `claudep statusline`: reads the statusline JSON on stdin and prints the
+ *  profile with its usage. Meant to be piped to from statusline-command.sh. */
+async function cmdStatusline(L: Layout): Promise<void> {
+  const cur = currentProfile(L);
+  const name = currentLabel(cur);
+  const payload = process.stdin.isTTY ? "" : await Bun.stdin.text();
+  const fresh = statuslineUsage(payload, Math.floor(Date.now() / 1000));
+  if (fresh && cur.kind !== "custom") {
+    try {
+      writeUsageCache(L, name, fresh, await readUsageCache(L, name));
+    } catch {}
+  }
+  console.log(usageSegment(name, fresh));
+}
+
 function cmdCurrent(L: Layout, args: string[]): void {
   const f = parseFlags(args, ...flagSpec("current"));
   const cur = currentProfile(L);
@@ -2804,6 +3050,10 @@ ${c.bold("USAGE")}
   claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
   claudep handoff <name> [session-id]  resume this directory's latest session under <name>, as a fork;
                                        arguments after -- go to claude
+  claudep usage [name…] [--json]       five-hour and weekly usage per profile; live from claude -p /usage on
+                                       Claude Code 2.1.301+, else last seen (--live asks, --cached never does)
+  claudep statusline                   pipe the statusline JSON in: prints "work · 5h 23% · 7d 41%" and
+                                       remembers the numbers for claudep usage
   claudep doctor [name]                verify symlinks, keychain entry, unclassified files, Claude Code version
   claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
   claudep help                         show this text
@@ -2923,6 +3173,10 @@ export async function main(argv: string[]): Promise<void> {
       return cmdAlias(L, args);
     case "handoff":
       return cmdHandoff(L, args);
+    case "statusline":
+      return cmdStatusline(L);
+    case "usage":
+      return cmdUsage(L, args);
     case "doctor":
       return cmdDoctor(L, args);
     case "rm":

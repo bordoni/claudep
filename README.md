@@ -60,6 +60,8 @@ claudep env <name> [--shell <sh>]    print the CLAUDE_CONFIG_DIR pin for eval, s
 claudep vars <name> [KEY=VALUE…]     list or set the variables a profile exports (see below)
 claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
 claudep handoff <name> [session-id]  carry this directory's latest session on under another profile
+claudep usage [name…] [--json]       five-hour and weekly usage for every profile
+claudep statusline                   statusline segment with the profile and its usage (reads stdin)
 claudep current [--json|--name]      which profile this shell is on, and why
 claudep doctor [name]                verify symlinks, keychain entry, unclassified files, Claude Code version
 claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
@@ -163,6 +165,25 @@ function fish_prompt; set -q CLAUDE_CONFIG_DIR; and echo -n "[$(string replace -
 ```
 
 In scripts, and in the shared `statusline-command.sh`, `claudep current --name` prints exactly one word: the profile name, `default` for `~/.claude`, or `custom` for a `CLAUDE_CONFIG_DIR` outside the profiles root. The statusline script inherits Claude Code's environment, so it sees the profile the session was started with.
+
+To show usage too, pipe the statusline input to `claudep statusline`. It prints `work · 5h 23% · 7d 41%` from the `rate_limits` Claude Code hands every statusline, and remembers the numbers for `claudep usage`:
+
+```sh
+# in statusline-command.sh
+input=$(cat)
+segment=$(printf '%s' "$input" | claudep statusline)
+```
+
+It starts bun on every render, about 30 ms here, and writes `~/.claudep/.usage/<name>.json` only when the numbers change. API-key, Bedrock and Vertex sessions get no `rate_limits`, so the segment is just the name.
+
+## Usage limits per profile
+
+```sh
+claudep usage                # every profile: five-hour and weekly use, when each resets, how fresh
+claudep usage work --json    # one profile, with the per-model weekly windows
+```
+
+From Claude Code 2.1.301 on, `claudep usage` asks each profile with `claude -p /usage`, which reports usage without running the model and, with `--no-session-persistence`, writes no transcript. Older versions can sign a profile out on a short command like that ([anthropics/claude-code#95822](https://github.com/anthropics/claude-code/issues/95822)), so there it shows the numbers last seen by `claudep statusline` or an earlier run instead. `--live` asks anyway, `--cached` never asks. claudep never reads a token: Claude Code makes every request.
 
 ## Hand a session to another profile
 

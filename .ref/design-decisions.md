@@ -80,7 +80,7 @@ The 2026-09-06 decision said `claudep env` has no `--shell` flag because `MSYSTE
 
 Cost: `completion` became a reserved word, so a profile literally named `completion` stops resolving. Called out under **Breaking** in the 0.4.0 changelog even though 0.x permits it. PowerShell gets no completions; its `Register-ArgumentCompleter` would be a fourth generator for the one shell that has no hook test off Windows. Rejected: reading names by running `claudep list` inside the completer (a bun start per Tab), and a third-party completion framework (a dependency).
 
-## 2026-09-07: Usage windows are not shown
+## 2026-09-07: Usage windows are not shown (reopened 2026-10-17)
 
 claude-swap and clauth show each account's 5-hour and 7-day usage and rotate accounts near the limit. Rejected for claudep: the only source is Anthropic's usage endpoint, which needs the account's OAuth token, and reading that token is against Never 3. Claude Code's `/usage` is interactive only, so there is nothing to shell out to. Reopen if `claude auth status --json` or another non-interactive command ever reports usage.
 
@@ -144,6 +144,15 @@ Before Claude Code 2.1.301 a short `claude auth status` can sign a profile out (
 - **Refused when `projects/` is not shared with the target**, since the other profile could not read the transcript.
 
 Cost: `handoff` became a reserved word. The first turn under the new account is uncached.
+
+## 2026-10-17: Usage windows, from what Claude Code already reports
+
+The 2026-09-07 entry rejected usage because the only source needed the account's OAuth token, and said to reopen when a non-interactive command reported usage. Two now do, and neither involves a token in claudep:
+
+- **The statusline input.** Claude Code hands every statusline command `rate_limits.five_hour` and `rate_limits.seven_day`, each `{used_percentage 0-100, resets_at epoch seconds}`, for claude.ai subscriptions after the first response. `claudep statusline` prints a segment from it and caches the numbers in `<profiles root>/.usage/<name>.json`, never under `~/.claude`, and only when they change, since it runs on every render.
+- **`claude -p /usage --output-format json`**, which on 2.1.286 answered in 1.6 s with `num_turns: 0` and `total_cost_usd: 0`. `--no-session-persistence` keeps it from writing a transcript. The numbers are display text ("Current session: 2% used · resets Oct 17 at 1:59pm (America/New_York)"), so the parser keeps the reset as text and reads only the percentages, and a change in wording shows as no data rather than wrong data.
+
+`claudep usage` asks live only when `claude auth status` would be safe (2.1.301, see the entry above): `-p /usage` is a short command too. Below that it shows the cache. Still rejected: rotating accounts on its own, and anything that reads the token.
 
 ## Not built, on purpose
 

@@ -47,6 +47,8 @@ export type RunOptions = {
   /** A bin dir to prepend to PATH; defaults to fakeBin(home). */
   bin?: string;
   cwd?: string;
+  /** Text for the command's stdin; nothing by default. */
+  stdin?: string;
 };
 
 /** Windows environment blocks are case-insensitive and the runner's PATH is
@@ -70,7 +72,7 @@ export async function runCli(args: string[], opts: RunOptions): Promise<CliResul
   const proc = Bun.spawn([process.execPath, SCRIPT, ...args], {
     env: env as Record<string, string>,
     cwd: opts.cwd ?? opts.home,
-    stdin: "ignore",
+    stdin: opts.stdin === undefined ? "ignore" : new Blob([opts.stdin]),
     stdout: "pipe",
     stderr: "pipe",
   });
