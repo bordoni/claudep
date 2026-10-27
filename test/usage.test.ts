@@ -34,12 +34,44 @@ Approximate, based on local sessions on this machine — does not include other 
 Last 24h · 809 requests · 3 sessions
   100% of your usage came from subagent-heavy sessions`;
 
+/** The window lines are 2.1.311's exact format on Linux, where the reset
+ *  text has a comma; the behaviour lines come from the server. */
+const USAGE_2_1_311 = `You are currently using your subscription to power your Claude Code usage
+
+Current session: 7% used · resets Oct 27, 5:59pm (America/New_York)
+Current week (all models): 23% used · resets Oct 30, 10:59pm (America/New_York)
+Current week (Sonnet only): 4% used · resets Oct 30, 11pm (America/New_York)
+Current week (Fable): 0% used · resets Oct 30, 11pm (America/New_York)
+
+What's contributing to your limits usage?
+Approximate · sessions on this machine only · shares overlap
+
+Last 24h · 412 requests · 5 sessions
+  64%  Subagent-heavy sessions · 3 sessions ran 10+ subagents
+  Top skills: /fetch 40%, /hourly 22%
+
+Last 7d · 2931 requests · 31 sessions
+  51%  Subagent-heavy sessions`;
+
 describe("parseUsageText", () => {
   test("reads the session, the week and each model's week", () => {
     expect(parseUsageText(USAGE_2_1_286, 100)).toEqual({
       fiveHour: { usedPercentage: 2, resets: "Oct 17 at 1:59pm (America/New_York)" },
       sevenDay: { usedPercentage: 2, resets: "Oct 23 at 10:59pm (America/New_York)" },
       models: { Fable: { usedPercentage: 0, resets: "Oct 23 at 11pm (America/New_York)" } },
+      at: 100,
+      source: "usage",
+    });
+  });
+
+  test("reads 2.1.311, with the Sonnet-only week as a model and the behaviour lines ignored", () => {
+    expect(parseUsageText(USAGE_2_1_311, 100)).toEqual({
+      fiveHour: { usedPercentage: 7, resets: "Oct 27, 5:59pm (America/New_York)" },
+      sevenDay: { usedPercentage: 23, resets: "Oct 30, 10:59pm (America/New_York)" },
+      models: {
+        "Sonnet only": { usedPercentage: 4, resets: "Oct 30, 11pm (America/New_York)" },
+        Fable: { usedPercentage: 0, resets: "Oct 30, 11pm (America/New_York)" },
+      },
       at: 100,
       source: "usage",
     });

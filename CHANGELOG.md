@@ -8,7 +8,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
-- `claudep doctor` says when the running Claude Code is newer than a config dir's last update record (`; running 2.1.311, updated outside Claude Code since`), as happens when npm, a package manager or another config dir updates it. The record alone looked like the dir was weeks behind.
+- Caught up with Claude Code 2.1.311. `remote-settings.json.synced-at`, `ccr-home-seed.json`, `remote-control/` and `.device-keys.json` are known-private, and so is any top-level name ending in `.lock` or `.lock.owner`, such as the `*.signature-iat.json.lock` directories and `.update.lock`. `claudep doctor` stops calling them unclassified in the base or unexpected in a profile.
+- `claudep doctor` compares the running Claude Code with each config dir's last update record. When it is newer, the line says whether another config dir updated it or something outside Claude Code did (npm, a package manager): `; running 2.1.311, updated outside Claude Code since`. When it is older than the last successful update, it says so. A failed update is measured from the version it started on, and it is shown even when Claude Code recorded no target.
+- `claudep doctor` counts `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` as switching the auto-updater off when it is set to anything, even `0`, as Claude Code 2.1.311 does. `DISABLE_UPDATES` and `DISABLE_AUTOUPDATER` still need 1, true, yes or on.
 
 ## [0.7.0] - 2026-10-17
 

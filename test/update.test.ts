@@ -13,8 +13,9 @@ import {
   findAllClaude,
   installKind,
   lastUpdate,
+  newestUpdate,
   UPDATE_LOCK_STALE_MS,
-  updatedOutside,
+  updateNote,
   type WaitDeps,
   waitForClaude,
 } from "../claudep.ts";
@@ -98,6 +99,14 @@ describe("autoUpdateState", () => {
     expect(autoUpdateState([["this shell", { DISABLE_AUTOUPDATER: "0" }]], undefined).enabled).toBe(true);
   });
 
+  test("counts CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC set to anything, as Claude Code 2.1.311 does", () => {
+    const off = (v: string) =>
+      autoUpdateState([["this shell", { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: v }]], undefined).enabled;
+    expect(off("0")).toBe(false);
+    expect(off(" ")).toBe(false);
+    expect(off("")).toBe(true);
+  });
+
   test("honours autoUpdates: false unless a native install protects itself", () => {
     expect(autoUpdateState([], { autoUpdates: false })).toEqual({ enabled: false, by: "autoUpdates in .claude.json" });
     expect(
@@ -137,19 +146,49 @@ describe("lastUpdate", () => {
   });
 });
 
-describe("updatedOutside", () => {
-  const last = { from: "2.1.289", to: "2.1.291", outcome: "success" };
+describe("updateNote", () => {
+  const ok = { from: "2.1.289", to: "2.1.291", outcome: "success" };
 
-  test("is true when the running version is newer than the record", () => {
-    expect(updatedOutside(last, [2, 1, 311])).toBe(true);
+  test("says nothing when the running version is the one the record left", () => {
+    expect(updateNote(ok, [2, 1, 291], [2, 1, 291])).toBe("");
+    expect(updateNote(ok, undefined, [2, 1, 291])).toBe("");
+    expect(updateNote(undefined, [2, 1, 311], undefined)).toBe("");
   });
 
-  test("is false at the same version, an older one, or with anything unknown", () => {
-    expect(updatedOutside(last, [2, 1, 291])).toBe(false);
-    expect(updatedOutside(last, [2, 1, 290])).toBe(false);
-    expect(updatedOutside(last, undefined)).toBe(false);
-    expect(updatedOutside(undefined, [2, 1, 311])).toBe(false);
-    expect(updatedOutside({ outcome: "failed" }, [2, 1, 311])).toBe(false);
+  test("blames something outside Claude Code when no config dir updated that far", () => {
+    expect(updateNote(ok, [2, 1, 311], [2, 1, 291])).toBe("; running 2.1.311, updated outside Claude Code since");
+    expect(updateNote(ok, [2, 1, 311], undefined)).toBe("; running 2.1.311, updated outside Claude Code since");
+  });
+
+  test("names another config dir when one updated to the running version", () => {
+    expect(updateNote(ok, [2, 1, 311], [2, 1, 311])).toBe("; running 2.1.311, updated since by another config dir");
+  });
+
+  test("measures a failed update from where it started", () => {
+    const npm = { from: "2.1.300", to: "2.1.305", outcome: "failed" };
+    expect(updateNote(npm, [2, 1, 300], undefined)).toBe("");
+    expect(updateNote(npm, [2, 1, 311], undefined)).toBe("; running 2.1.311, updated outside Claude Code since");
+    expect(updateNote({ from: "2.1.300", outcome: "failed" }, [2, 1, 299], undefined)).toBe("");
+  });
+
+  test("notes a running version older than the last successful update", () => {
+    expect(updateNote(ok, [2, 1, 290], [2, 1, 291])).toBe(
+      "; running 2.1.290 is older (a downgrade, or another claude is first on PATH)",
+    );
+  });
+});
+
+describe("newestUpdate", () => {
+  test("takes the highest successful target and skips failures", () => {
+    expect(
+      newestUpdate([
+        { to: "2.1.291", outcome: "success" },
+        undefined,
+        { to: "2.1.305", outcome: "failed" },
+        { to: "2.1.300", outcome: "success" },
+      ]),
+    ).toEqual([2, 1, 300]);
+    expect(newestUpdate([undefined])).toBeUndefined();
   });
 });
 

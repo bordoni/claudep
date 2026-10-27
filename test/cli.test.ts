@@ -408,6 +408,29 @@ describe("doctor", () => {
     expect(existsSync(join(h.profilesRoot, "smoke", "state"))).toBe(false);
   });
 
+  test("classifies what Claude Code 2.1.311 writes, and lock files, in the base and a profile", async () => {
+    using h = fakeHome();
+    const write = (dir: string) => {
+      writeFileSync(join(dir, "remote-settings.json.synced-at"), "1");
+      writeFileSync(join(dir, "ccr-home-seed.json"), "{}");
+      mkdirSync(join(dir, "remote-control"));
+      mkdirSync(join(dir, "remote-settings.json.signature-iat.json.lock"));
+      writeFileSync(join(dir, ".update.lock"), "123");
+      writeFileSync(join(dir, ".oauth_refresh.lock.owner"), "{}");
+    };
+    write(h.base);
+    writeFileSync(join(h.base, ".device-keys.json"), "{}");
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    write(dir);
+    writeFileSync(join(dir, "stray.lockfile"), "");
+    const r = await runCli(["doctor", "smoke"], { home: h.home });
+    expect(r.stdout).not.toContain("neither shared nor known-private");
+    expect(r.stdout).toContain("unexpected private items: stray.lockfile");
+    expect(existsSync(join(dir, "remote-control"))).toBe(true);
+    expect(lstatSync(join(dir, ".device-keys.json"), { throwIfNoEntry: false })).toBeUndefined();
+  });
+
   test("flags a loop.md an older claudep linked, as a problem", async () => {
     using h = fakeHome();
     writeFileSync(join(h.base, "loop.md"), "# loop\n");
