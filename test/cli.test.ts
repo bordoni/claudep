@@ -481,6 +481,33 @@ describe("doctor", () => {
     else expect(r.stdout).toContain("install: unknown");
   });
 
+  test("says who updated Claude Code past each dir's last update record", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    await runCli(["init", "other", "--no-login"], { home: h.home });
+    const record = (dir: string, rec: object) =>
+      writeFileSync(
+        join(dir, ".last-update-result.json"),
+        JSON.stringify({ timestamp: "2026-10-06T12:45:00.000Z", path: "npm-global", ...rec }),
+      );
+    record(h.base, { outcome: "success", version_from: "2.1.290", version_to: "2.1.291" });
+    record(join(h.profilesRoot, "smoke"), { outcome: "failed", version_from: "2.1.300", version_to: null });
+    const env = { FAKE_CLAUDE_VERSION: "2.1.311 (Claude Code)" };
+    const outside = await runCli(["doctor"], { home: h.home, env });
+    expect(outside.stdout).toContain(
+      "default: last update 2.1.290 → 2.1.291 (success, npm-global, 2026-10-06); running 2.1.311, updated outside Claude Code since",
+    );
+    expect(outside.stdout).toContain(
+      "last update 2.1.300 → ? (failed, npm-global, 2026-10-06); running 2.1.311, updated outside Claude Code since",
+    );
+    record(join(h.profilesRoot, "other"), { outcome: "success", version_from: "2.1.291", version_to: "2.1.311" });
+    const another = await runCli(["doctor"], { home: h.home, env });
+    expect(another.stdout).toContain(
+      "2.1.291 (success, npm-global, 2026-10-06); running 2.1.311, updated since by another config dir",
+    );
+    expect(another.stdout).toContain("last update 2.1.291 → 2.1.311 (success, npm-global, 2026-10-06)\n");
+  });
+
   test("warns about auto-memory prompts from Claude Code 2.1.280 on, without failing", async () => {
     using h = fakeHome();
     await runCli(["init", "smoke", "--no-login"], { home: h.home });

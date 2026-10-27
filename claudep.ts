@@ -523,7 +523,7 @@ export function keychainService(dir: string): string {
 
 /** Claude Code 2.1.311 guards its state with `<file>.lock` directories
  *  (proper-lockfile), plain lock files such as `.update.lock`, and
- *  `.oauth_refresh.lock.owner`; it sweeps any `*.lock` itself. None is shared. */
+ *  `.oauth_refresh.lock.owner`, each next to the state it guards. None is shared. */
 const LOCK_RE = /\.lock(\.owner)?$/;
 
 /** A top-level name that is per-profile state: listed in KNOWN_PRIVATE, or a lock. */
@@ -968,7 +968,11 @@ export async function settingsEnvConfigDir(settingsPath: string): Promise<string
 /** The string values of a settings file's `env` block. Claude Code copies
  *  them into its own environment at start. */
 export async function settingsEnv(settingsPath: string): Promise<Env> {
-  const env = (await readJson(settingsPath))?.env;
+  return stringValues((await readJson(settingsPath))?.env);
+}
+
+/** The string values of an `env` object, as Claude Code applies them. */
+export function stringValues(env: unknown): Env {
   if (!env || typeof env !== "object" || Array.isArray(env)) return {};
   const out: Env = {};
   for (const [k, v] of Object.entries(env as JsonObject)) if (typeof v === "string") out[k] = v;
@@ -980,15 +984,17 @@ export type AutoUpdate = { enabled: boolean; by?: string };
 /** Whether Claude Code's background updater runs for a config dir, in the
  *  order Claude Code 2.1.311 checks: three variables, then `autoUpdates` in
  *  .claude.json, which a native install ignores once it has set
- *  `autoUpdatesProtectedForNative`. The first two count when they are 1, true,
- *  yes or on; CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC counts when it is set to
- *  anything, even 0. `sources` are labelled environments, strongest first. */
+ *  `autoUpdatesProtectedForNative`. `sources` are labelled environments,
+ *  strongest first, and the first one that defines a variable decides it, as
+ *  Claude Code copies settings `env` over the shell before it looks. The first
+ *  two count when they are 1, true, yes or on; CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+ *  counts when it is set to anything, even 0. Managed settings are not read. */
 export function autoUpdateState(sources: readonly [string, Env][], globalJson: JsonObject | undefined): AutoUpdate {
   for (const key of ["DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]) {
-    const set = (v: string | undefined) =>
-      key === "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" ? !!v : /^(1|true|yes|on)$/i.test((v ?? "").trim());
-    const hit = sources.find(([, env]) => set(env[key]));
-    if (hit) return { enabled: false, by: `${key} in ${hit[0]}` };
+    const hit = sources.find(([, env]) => env[key] !== undefined);
+    const v = hit?.[1][key];
+    const set = key === "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" ? !!v : /^(1|true|yes|on)$/i.test((v ?? "").trim());
+    if (hit && set) return { enabled: false, by: `${key} in ${hit[0]}` };
   }
   const protectedNative = globalJson?.installMethod === "native" && globalJson.autoUpdatesProtectedForNative === true;
   if (globalJson?.autoUpdates === false && !protectedNative)
@@ -1015,13 +1021,13 @@ export async function lastUpdate(dir: string): Promise<LastUpdate | undefined> {
 /** The clause `doctor` adds to a config dir's last-update line when the
  *  running Claude Code is not the version that record leaves behind: the
  *  target of a successful update, or the starting version of a failed one.
- *  `newest` is the highest version any config dir's successful update ended
- *  on; when it reaches the running version, another config dir did the update,
+ *  `targets` are the versions successful updates in any config dir ended on;
+ *  when one is the running version, another config dir did the update,
  *  otherwise something outside Claude Code did (npm, a package manager). */
 export function updateNote(
   last: LastUpdate | undefined,
   running: Version | undefined,
-  newest: Version | undefined,
+  targets: readonly Version[],
 ): string {
   if (!last || !running) return "";
   const failed = last.outcome === "failed";
@@ -1031,19 +1037,17 @@ export function updateNote(
   if (!failed && versionBelow(running, left))
     return `; running ${r} is older (a downgrade, or another claude is first on PATH)`;
   if (!versionBelow(left, running)) return "";
-  return newest && !versionBelow(newest, running)
+  return targets.some((v) => !versionBelow(v, running) && !versionBelow(running, v))
     ? `; running ${r}, updated since by another config dir`
     : `; running ${r}, updated outside Claude Code since`;
 }
 
-/** The highest version a successful update record ends on. */
-export function newestUpdate(records: readonly (LastUpdate | undefined)[]): Version | undefined {
-  let best: Version | undefined;
-  for (const rec of records) {
+/** The versions successful update records end on. */
+export function updateTargets(records: readonly (LastUpdate | undefined)[]): Version[] {
+  return records.flatMap((rec) => {
     const v = rec?.outcome === "success" && rec.to ? parseVersion(rec.to) : undefined;
-    if (v && (!best || versionBelow(best, v))) best = v;
-  }
-  return best;
+    return v ? [v] : [];
+  });
 }
 
 export type SeedResult = "seeded" | "exists" | "no-base";
@@ -2938,29 +2942,28 @@ function msysConfigDirWarning(L: Layout, env: Env = process.env): string | undef
 
 /** Prints whether Claude Code's updater runs for a config dir (undefined is
  *  the base) and its last update next to the running version; true when the
- *  updater is on. `newest` is what newestUpdate() found across every dir. */
+ *  updater is on. `targets` is what updateTargets() found across every dir. */
 async function reportUpdates(
   L: Layout,
   dir: string | undefined,
   running: Version | undefined,
-  newest: Version | undefined,
+  targets: readonly Version[],
 ): Promise<boolean> {
   const d = dir ?? L.base;
+  const globalJson = await readJson(dir === undefined ? L.baseGlobalJson : join(dir, ".claude.json"));
   const sources: [string, Env][] = [
     ["settings.json env", await settingsEnv(join(d, "settings.json"))],
+    [".claude.json env", stringValues(globalJson?.env)],
     ["this shell", baseEnv(L)],
   ];
   if (dir !== undefined) sources.push([ENV_FILE, Object.fromEntries(readProfileEnv(dir).vars)]);
-  const state = autoUpdateState(
-    sources,
-    await readJson(dir === undefined ? L.baseGlobalJson : join(dir, ".claude.json")),
-  );
+  const state = autoUpdateState(sources, globalJson);
   const who = dir === undefined ? "default: " : "";
   console.log(`${c.dim("·")} ${who}auto-update ${state.enabled ? "on" : `off (${state.by})`}`);
   const last = await lastUpdate(d);
   if (last?.to || last?.outcome === "failed")
     console.log(
-      `${c.dim("·")} ${who}last update ${last.from ?? "?"} → ${last.to ?? "?"} (${last.outcome ?? "?"}, ${last.path ?? "?"}, ${(last.at ?? "").slice(0, 10)})${updateNote(last, running, newest)}`,
+      `${c.dim("·")} ${who}last update ${last.from ?? "?"} → ${last.to ?? "?"} (${last.outcome ?? "?"}, ${last.path ?? "?"}, ${(last.at ?? "").slice(0, 10)})${updateNote(last, running, targets)}`,
     );
   return state.enabled;
 }
@@ -3023,8 +3026,8 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       `Claude Code ${v?.join(".") ?? "of unknown version"} can sign a profile out on a short \`claude auth status\` (${AUTH_STATUS_ISSUE}). claudep reads logins from .claude.json instead until Claude Code is ${SAFE_AUTH_STATUS_FROM} or newer: claude update`,
     );
   let updaters: string[] = [];
-  const newest = newestUpdate(await Promise.all(configDirs(L).map((d) => lastUpdate(d))));
-  if (await reportUpdates(L, undefined, v, newest)) updaters.push("default");
+  const targets = updateTargets(await Promise.all(configDirs(L).map((d) => lastUpdate(d))));
+  if (await reportUpdates(L, undefined, v, targets)) updaters.push("default");
 
   const shared = sharedItems(L.base);
   const sharedNames = new Set(shared.map((s) => s.name));
@@ -3099,7 +3102,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       }
     }
     if (s.apiKeySource) warn(`Claude Code uses an API key from ${s.apiKeySource} instead of the profile login`);
-    if (await reportUpdates(L, dir, v, newest)) updaters.push(name);
+    if (await reportUpdates(L, dir, v, targets)) updaters.push(name);
     const env = readProfileEnv(dir);
     if (env.vars.length) ok(`${ENV_FILE}: ${env.vars.map(([k]) => k).join(", ")}`);
     const overlay = readProfileSettings(dir);
