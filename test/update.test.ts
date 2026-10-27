@@ -14,6 +14,7 @@ import {
   installKind,
   lastUpdate,
   UPDATE_LOCK_STALE_MS,
+  updatedOutside,
   type WaitDeps,
   waitForClaude,
 } from "../claudep.ts";
@@ -133,6 +134,22 @@ describe("lastUpdate", () => {
       at: "2026-10-06T12:45:00.000Z",
       path: "npm-global",
     });
+  });
+});
+
+describe("updatedOutside", () => {
+  const last = { from: "2.1.289", to: "2.1.291", outcome: "success" };
+
+  test("is true when the running version is newer than the record", () => {
+    expect(updatedOutside(last, [2, 1, 311])).toBe(true);
+  });
+
+  test("is false at the same version, an older one, or with anything unknown", () => {
+    expect(updatedOutside(last, [2, 1, 291])).toBe(false);
+    expect(updatedOutside(last, [2, 1, 290])).toBe(false);
+    expect(updatedOutside(last, undefined)).toBe(false);
+    expect(updatedOutside(undefined, [2, 1, 311])).toBe(false);
+    expect(updatedOutside({ outcome: "failed" }, [2, 1, 311])).toBe(false);
   });
 });
 

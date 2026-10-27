@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Changed
+
+- `claudep doctor` says when the running Claude Code is newer than a config dir's last update record (`; running 2.1.311, updated outside Claude Code since`), as happens when npm, a package manager or another config dir updates it. The record alone looked like the dir was weeks behind.
+
 ## [0.7.0] - 2026-10-17
 
 ### Added

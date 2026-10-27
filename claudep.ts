@@ -992,6 +992,14 @@ export async function lastUpdate(dir: string): Promise<LastUpdate | undefined> {
   };
 }
 
+/** True when the running Claude Code is newer than the version a config dir's
+ *  last update record ends on, so something other than its own updater (npm,
+ *  a package manager, another config dir) moved it since. */
+export function updatedOutside(last: LastUpdate | undefined, running: Version | undefined): boolean {
+  const to = last?.to ? parseVersion(last.to) : undefined;
+  return !!to && !!running && versionBelow(to, running);
+}
+
 export type SeedResult = "seeded" | "exists" | "no-base";
 
 export async function seedGlobalJson(baseGlobalJson: string, dir: string, copyMcp: boolean): Promise<SeedResult> {
@@ -2884,7 +2892,7 @@ function msysConfigDirWarning(L: Layout, env: Env = process.env): string | undef
 
 /** Prints whether Claude Code's updater runs for a config dir (undefined is
  *  the base) and its last update; true when the updater is on. */
-async function reportUpdates(L: Layout, dir: string | undefined): Promise<boolean> {
+async function reportUpdates(L: Layout, dir: string | undefined, running: Version | undefined): Promise<boolean> {
   const d = dir ?? L.base;
   const sources: [string, Env][] = [
     ["settings.json env", await settingsEnv(join(d, "settings.json"))],
@@ -2900,7 +2908,7 @@ async function reportUpdates(L: Layout, dir: string | undefined): Promise<boolea
   const last = await lastUpdate(d);
   if (last?.to)
     console.log(
-      `${c.dim("·")} ${who}last update ${last.from ?? "?"} → ${last.to} (${last.outcome ?? "?"}, ${last.path ?? "?"}, ${(last.at ?? "").slice(0, 10)})`,
+      `${c.dim("·")} ${who}last update ${last.from ?? "?"} → ${last.to} (${last.outcome ?? "?"}, ${last.path ?? "?"}, ${(last.at ?? "").slice(0, 10)})${updatedOutside(last, running) ? `; running ${running?.join(".")}, updated outside Claude Code since` : ""}`,
     );
   return state.enabled;
 }
@@ -2963,7 +2971,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       `Claude Code ${v?.join(".") ?? "of unknown version"} can sign a profile out on a short \`claude auth status\` (${AUTH_STATUS_ISSUE}). claudep reads logins from .claude.json instead until Claude Code is ${SAFE_AUTH_STATUS_FROM} or newer: claude update`,
     );
   let updaters: string[] = [];
-  if (await reportUpdates(L, undefined)) updaters.push("default");
+  if (await reportUpdates(L, undefined, v)) updaters.push("default");
 
   const shared = sharedItems(L.base);
   const sharedNames = new Set(shared.map((s) => s.name));
@@ -3038,7 +3046,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       }
     }
     if (s.apiKeySource) warn(`Claude Code uses an API key from ${s.apiKeySource} instead of the profile login`);
-    if (await reportUpdates(L, dir)) updaters.push(name);
+    if (await reportUpdates(L, dir, v)) updaters.push(name);
     const env = readProfileEnv(dir);
     if (env.vars.length) ok(`${ENV_FILE}: ${env.vars.map(([k]) => k).join(", ")}`);
     const overlay = readProfileSettings(dir);
