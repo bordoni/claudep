@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Changed
+
+- Caught up with Claude Code 2.1.311. `remote-settings.json.synced-at`, `ccr-home-seed.json`, `remote-control/` and `.device-keys.json` are known-private, and so is any top-level name ending in `.lock` or `.lock.owner`, such as the `*.signature-iat.json.lock` directories and `.update.lock`. `claudep doctor` stops calling them unclassified in the base or unexpected in a profile.
+- `claudep doctor` compares the running Claude Code with each config dir's last update record. When it is newer, the line says whether another config dir updated it or something outside Claude Code did (npm, a package manager): `; running 2.1.311, updated outside Claude Code since`. When it is older than the last successful update, it says so. A failed update is measured from the version it started on, and it is shown even when Claude Code recorded no target.
+- `claudep doctor` counts `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` as switching the auto-updater off when it is set to anything, even `0`, as Claude Code 2.1.311 does. `DISABLE_UPDATES` and `DISABLE_AUTOUPDATER` still need 1, true, yes or on.
+
+### Fixed
+
+- `claudep doctor` decides each auto-update variable from the first place that sets it, the way Claude Code does: a config dir's `settings.json` `env`, then the `env` block in its `.claude.json`, then your shell, then `claudep.env`. A `DISABLE_AUTOUPDATER=0` in `settings.json` used to lose to a `1` in the shell, so doctor said the updater was off when it ran. Managed settings are not read yet.
+
 ## [0.7.0] - 2026-10-17
 
 ### Added

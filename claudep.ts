@@ -251,8 +251,9 @@ export const SHARED_DIRS = [
 ] as const;
 
 /** Per-profile state. First block is Claude Code's own runtime-state list as of
- *  2.1.263, then observed extras, then what 2.1.280 added to that list. Never
- *  shared, and a name here is never shared by the top-level *.md rule either. */
+ *  2.1.263, then observed extras, then what 2.1.280 and 2.1.311 added to that
+ *  list. Never shared, and a name here is never shared by the top-level *.md
+ *  rule either. Lock files are private by pattern; see isKnownPrivate(). */
 export const KNOWN_PRIVATE = new Set<string>([
   ".claude.json",
   ".claude.json.backup",
@@ -338,6 +339,12 @@ export const KNOWN_PRIVATE = new Set<string>([
   "antproto.json",
   ".cc-writes",
   "loop.md",
+  // Added to Claude Code's runtime-state list by 2.1.311 (checked 2026-10-27).
+  "remote-settings.json.synced-at",
+  "ccr-home-seed.json",
+  "remote-control",
+  // Trusted-device keys; 2.1.311 writes them to ~/.claude whatever the config dir.
+  ".device-keys.json",
   // claudep's own per-profile files.
   "claudep.env",
   "claudep.settings.json",
@@ -512,6 +519,16 @@ export function listProfileNames(L: Layout): string[] {
 export function keychainService(dir: string): string {
   const hash = createHash("sha256").update(dir).digest("hex").slice(0, 8);
   return `Claude Code-credentials-${hash}`;
+}
+
+/** Claude Code 2.1.311 guards its state with `<file>.lock` directories
+ *  (proper-lockfile), plain lock files such as `.update.lock`, and
+ *  `.oauth_refresh.lock.owner`, each next to the state it guards. None is shared. */
+const LOCK_RE = /\.lock(\.owner)?$/;
+
+/** A top-level name that is per-profile state: listed in KNOWN_PRIVATE, or a lock. */
+export function isKnownPrivate(name: string): boolean {
+  return KNOWN_PRIVATE.has(name) || LOCK_RE.test(name);
 }
 
 export type SharedItem = { name: string; kind: "file" | "dir" };
@@ -951,7 +968,11 @@ export async function settingsEnvConfigDir(settingsPath: string): Promise<string
 /** The string values of a settings file's `env` block. Claude Code copies
  *  them into its own environment at start. */
 export async function settingsEnv(settingsPath: string): Promise<Env> {
-  const env = (await readJson(settingsPath))?.env;
+  return stringValues((await readJson(settingsPath))?.env);
+}
+
+/** The string values of an `env` object, as Claude Code applies them. */
+export function stringValues(env: unknown): Env {
   if (!env || typeof env !== "object" || Array.isArray(env)) return {};
   const out: Env = {};
   for (const [k, v] of Object.entries(env as JsonObject)) if (typeof v === "string") out[k] = v;
@@ -961,14 +982,19 @@ export async function settingsEnv(settingsPath: string): Promise<Env> {
 export type AutoUpdate = { enabled: boolean; by?: string };
 
 /** Whether Claude Code's background updater runs for a config dir, in the
- *  order Claude Code 2.1.286 checks: three variables, then `autoUpdates` in
+ *  order Claude Code 2.1.311 checks: three variables, then `autoUpdates` in
  *  .claude.json, which a native install ignores once it has set
  *  `autoUpdatesProtectedForNative`. `sources` are labelled environments,
- *  strongest first. */
+ *  strongest first, and the first one that defines a variable decides it, as
+ *  Claude Code copies settings `env` over the shell before it looks. The first
+ *  two count when they are 1, true, yes or on; CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+ *  counts when it is set to anything, even 0. Managed settings are not read. */
 export function autoUpdateState(sources: readonly [string, Env][], globalJson: JsonObject | undefined): AutoUpdate {
   for (const key of ["DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]) {
-    const hit = sources.find(([, env]) => /^(1|true|yes|on)$/i.test((env[key] ?? "").trim()));
-    if (hit) return { enabled: false, by: `${key} in ${hit[0]}` };
+    const hit = sources.find(([, env]) => env[key] !== undefined);
+    const v = hit?.[1][key];
+    const set = key === "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" ? !!v : /^(1|true|yes|on)$/i.test((v ?? "").trim());
+    if (hit && set) return { enabled: false, by: `${key} in ${hit[0]}` };
   }
   const protectedNative = globalJson?.installMethod === "native" && globalJson.autoUpdatesProtectedForNative === true;
   if (globalJson?.autoUpdates === false && !protectedNative)
@@ -990,6 +1016,38 @@ export async function lastUpdate(dir: string): Promise<LastUpdate | undefined> {
     at: str("timestamp"),
     path: str("path"),
   };
+}
+
+/** The clause `doctor` adds to a config dir's last-update line when the
+ *  running Claude Code is not the version that record leaves behind: the
+ *  target of a successful update, or the starting version of a failed one.
+ *  `targets` are the versions successful updates in any config dir ended on;
+ *  when one is the running version, another config dir did the update,
+ *  otherwise something outside Claude Code did (npm, a package manager). */
+export function updateNote(
+  last: LastUpdate | undefined,
+  running: Version | undefined,
+  targets: readonly Version[],
+): string {
+  if (!last || !running) return "";
+  const failed = last.outcome === "failed";
+  const left = parseVersion((failed ? last.from : last.to) ?? "");
+  if (!left) return "";
+  const r = running.join(".");
+  if (!failed && versionBelow(running, left))
+    return `; running ${r} is older (a downgrade, or another claude is first on PATH)`;
+  if (!versionBelow(left, running)) return "";
+  return targets.some((v) => !versionBelow(v, running) && !versionBelow(running, v))
+    ? `; running ${r}, updated since by another config dir`
+    : `; running ${r}, updated outside Claude Code since`;
+}
+
+/** The versions successful update records end on. */
+export function updateTargets(records: readonly (LastUpdate | undefined)[]): Version[] {
+  return records.flatMap((rec) => {
+    const v = rec?.outcome === "success" && rec.to ? parseVersion(rec.to) : undefined;
+    return v ? [v] : [];
+  });
 }
 
 export type SeedResult = "seeded" | "exists" | "no-base";
@@ -2883,24 +2941,29 @@ function msysConfigDirWarning(L: Layout, env: Env = process.env): string | undef
 }
 
 /** Prints whether Claude Code's updater runs for a config dir (undefined is
- *  the base) and its last update; true when the updater is on. */
-async function reportUpdates(L: Layout, dir: string | undefined): Promise<boolean> {
+ *  the base) and its last update next to the running version; true when the
+ *  updater is on. `targets` is what updateTargets() found across every dir. */
+async function reportUpdates(
+  L: Layout,
+  dir: string | undefined,
+  running: Version | undefined,
+  targets: readonly Version[],
+): Promise<boolean> {
   const d = dir ?? L.base;
+  const globalJson = await readJson(dir === undefined ? L.baseGlobalJson : join(dir, ".claude.json"));
   const sources: [string, Env][] = [
     ["settings.json env", await settingsEnv(join(d, "settings.json"))],
+    [".claude.json env", stringValues(globalJson?.env)],
     ["this shell", baseEnv(L)],
   ];
   if (dir !== undefined) sources.push([ENV_FILE, Object.fromEntries(readProfileEnv(dir).vars)]);
-  const state = autoUpdateState(
-    sources,
-    await readJson(dir === undefined ? L.baseGlobalJson : join(dir, ".claude.json")),
-  );
+  const state = autoUpdateState(sources, globalJson);
   const who = dir === undefined ? "default: " : "";
   console.log(`${c.dim("·")} ${who}auto-update ${state.enabled ? "on" : `off (${state.by})`}`);
   const last = await lastUpdate(d);
-  if (last?.to)
+  if (last?.to || last?.outcome === "failed")
     console.log(
-      `${c.dim("·")} ${who}last update ${last.from ?? "?"} → ${last.to} (${last.outcome ?? "?"}, ${last.path ?? "?"}, ${(last.at ?? "").slice(0, 10)})`,
+      `${c.dim("·")} ${who}last update ${last.from ?? "?"} → ${last.to ?? "?"} (${last.outcome ?? "?"}, ${last.path ?? "?"}, ${(last.at ?? "").slice(0, 10)})${updateNote(last, running, targets)}`,
     );
   return state.enabled;
 }
@@ -2963,13 +3026,14 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       `Claude Code ${v?.join(".") ?? "of unknown version"} can sign a profile out on a short \`claude auth status\` (${AUTH_STATUS_ISSUE}). claudep reads logins from .claude.json instead until Claude Code is ${SAFE_AUTH_STATUS_FROM} or newer: claude update`,
     );
   let updaters: string[] = [];
-  if (await reportUpdates(L, undefined)) updaters.push("default");
+  const targets = updateTargets(await Promise.all(configDirs(L).map((d) => lastUpdate(d))));
+  if (await reportUpdates(L, undefined, v, targets)) updaters.push("default");
 
   const shared = sharedItems(L.base);
   const sharedNames = new Set(shared.map((s) => s.name));
   const unclassified = existsSync(L.base)
     ? readdirSync(L.base)
-        .filter((n) => !sharedNames.has(n) && !KNOWN_PRIVATE.has(n) && !n.endsWith(".md"))
+        .filter((n) => !sharedNames.has(n) && !isKnownPrivate(n) && !n.endsWith(".md"))
         .sort()
     : [];
   if (unclassified.length) {
@@ -3006,7 +3070,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
         `${c.dim("·")} Windows creates symlinks only with Developer Mode on; claudep init ${name} says so when it is off`,
       );
     ok(`${shared.length} shared item(s) checked`);
-    const strays = readdirSync(dir).filter((n) => !sharedNames.has(n) && !KNOWN_PRIVATE.has(n) && !n.endsWith(".md"));
+    const strays = readdirSync(dir).filter((n) => !sharedNames.has(n) && !isKnownPrivate(n) && !n.endsWith(".md"));
     if (strays.length) warn(`unexpected private items: ${strays.join(", ")}`);
     for (const n of staleSharedLinks(L.base, dir, L.platform)) {
       bad(
@@ -3038,7 +3102,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       }
     }
     if (s.apiKeySource) warn(`Claude Code uses an API key from ${s.apiKeySource} instead of the profile login`);
-    if (await reportUpdates(L, dir)) updaters.push(name);
+    if (await reportUpdates(L, dir, v, targets)) updaters.push(name);
     const env = readProfileEnv(dir);
     if (env.vars.length) ok(`${ENV_FILE}: ${env.vars.map(([k]) => k).join(", ")}`);
     const overlay = readProfileSettings(dir);

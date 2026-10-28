@@ -14,6 +14,8 @@ import {
   installKind,
   lastUpdate,
   UPDATE_LOCK_STALE_MS,
+  updateNote,
+  updateTargets,
   type WaitDeps,
   waitForClaude,
 } from "../claudep.ts";
@@ -97,6 +99,33 @@ describe("autoUpdateState", () => {
     expect(autoUpdateState([["this shell", { DISABLE_AUTOUPDATER: "0" }]], undefined).enabled).toBe(true);
   });
 
+  test("counts CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC set to anything, as Claude Code 2.1.311 does", () => {
+    const off = (v: string) =>
+      autoUpdateState([["this shell", { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: v }]], undefined).enabled;
+    expect(off("0")).toBe(false);
+    expect(off(" ")).toBe(false);
+    expect(off("")).toBe(true);
+  });
+
+  test("lets the first source that sets a variable decide it, as Claude Code does", () => {
+    const shellOn: [string, Record<string, string>] = ["this shell", { DISABLE_AUTOUPDATER: "1" }];
+    expect(autoUpdateState([["settings.json env", { DISABLE_AUTOUPDATER: "0" }], shellOn], undefined).enabled).toBe(
+      true,
+    );
+    expect(
+      autoUpdateState(
+        [
+          ["settings.json env", { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "" }],
+          ["this shell", { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" }],
+        ],
+        undefined,
+      ).enabled,
+    ).toBe(true);
+    expect(autoUpdateState([["settings.json env", {}], shellOn], undefined).by).toBe(
+      "DISABLE_AUTOUPDATER in this shell",
+    );
+  });
+
   test("honours autoUpdates: false unless a native install protects itself", () => {
     expect(autoUpdateState([], { autoUpdates: false })).toEqual({ enabled: false, by: "autoUpdates in .claude.json" });
     expect(
@@ -133,6 +162,75 @@ describe("lastUpdate", () => {
       at: "2026-10-06T12:45:00.000Z",
       path: "npm-global",
     });
+  });
+});
+
+describe("updateNote", () => {
+  const ok = { from: "2.1.289", to: "2.1.291", outcome: "success" };
+
+  test("says nothing when the running version is the one the record left", () => {
+    expect(updateNote(ok, [2, 1, 291], [[2, 1, 291]])).toBe("");
+    expect(updateNote(ok, undefined, [])).toBe("");
+    expect(updateNote(undefined, [2, 1, 311], [])).toBe("");
+  });
+
+  test("blames something outside Claude Code when no config dir updated to the running version", () => {
+    const outside = "; running 2.1.311, updated outside Claude Code since";
+    expect(updateNote(ok, [2, 1, 311], [[2, 1, 291]])).toBe(outside);
+    expect(updateNote(ok, [2, 1, 311], [])).toBe(outside);
+    // A dir that updated past the running version went to another install.
+    expect(
+      updateNote(
+        ok,
+        [2, 1, 311],
+        [
+          [2, 1, 291],
+          [2, 1, 315],
+        ],
+      ),
+    ).toBe(outside);
+  });
+
+  test("names another config dir when one updated to the running version", () => {
+    expect(
+      updateNote(
+        ok,
+        [2, 1, 311],
+        [
+          [2, 1, 291],
+          [2, 1, 311],
+        ],
+      ),
+    ).toBe("; running 2.1.311, updated since by another config dir");
+  });
+
+  test("measures a failed update from where it started", () => {
+    const npm = { from: "2.1.300", to: "2.1.305", outcome: "failed" };
+    expect(updateNote(npm, [2, 1, 300], [])).toBe("");
+    expect(updateNote(npm, [2, 1, 311], [])).toBe("; running 2.1.311, updated outside Claude Code since");
+    expect(updateNote({ from: "2.1.300", outcome: "failed" }, [2, 1, 299], [])).toBe("");
+  });
+
+  test("notes a running version older than the last successful update", () => {
+    expect(updateNote(ok, [2, 1, 290], [[2, 1, 291]])).toBe(
+      "; running 2.1.290 is older (a downgrade, or another claude is first on PATH)",
+    );
+  });
+});
+
+describe("updateTargets", () => {
+  test("takes the targets of successful records and skips failures", () => {
+    expect(
+      updateTargets([
+        { to: "2.1.291", outcome: "success" },
+        undefined,
+        { to: "2.1.305", outcome: "failed" },
+        { to: "2.1.300", outcome: "success" },
+      ]),
+    ).toEqual([
+      [2, 1, 291],
+      [2, 1, 300],
+    ]);
   });
 });
 

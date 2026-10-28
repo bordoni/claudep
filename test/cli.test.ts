@@ -408,6 +408,29 @@ describe("doctor", () => {
     expect(existsSync(join(h.profilesRoot, "smoke", "state"))).toBe(false);
   });
 
+  test("classifies what Claude Code 2.1.311 writes, and lock files, in the base and a profile", async () => {
+    using h = fakeHome();
+    const write = (dir: string) => {
+      writeFileSync(join(dir, "remote-settings.json.synced-at"), "1");
+      writeFileSync(join(dir, "ccr-home-seed.json"), "{}");
+      mkdirSync(join(dir, "remote-control"));
+      mkdirSync(join(dir, "remote-settings.json.signature-iat.json.lock"));
+      writeFileSync(join(dir, ".update.lock"), "123");
+      writeFileSync(join(dir, ".oauth_refresh.lock.owner"), "{}");
+    };
+    write(h.base);
+    writeFileSync(join(h.base, ".device-keys.json"), "{}");
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    write(dir);
+    writeFileSync(join(dir, "stray.lockfile"), "");
+    const r = await runCli(["doctor", "smoke"], { home: h.home });
+    expect(r.stdout).not.toContain("neither shared nor known-private");
+    expect(r.stdout).toContain("unexpected private items: stray.lockfile");
+    expect(existsSync(join(dir, "remote-control"))).toBe(true);
+    expect(lstatSync(join(dir, ".device-keys.json"), { throwIfNoEntry: false })).toBeUndefined();
+  });
+
   test("flags a loop.md an older claudep linked, as a problem", async () => {
     using h = fakeHome();
     writeFileSync(join(h.base, "loop.md"), "# loop\n");
@@ -456,6 +479,33 @@ describe("doctor", () => {
     // On Windows the fake claude is a .cmd shim, which is how npm installs it there.
     if (WIN) expect(r.stdout).toContain("claude is an npm-global install");
     else expect(r.stdout).toContain("install: unknown");
+  });
+
+  test("says who updated Claude Code past each dir's last update record", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    await runCli(["init", "other", "--no-login"], { home: h.home });
+    const record = (dir: string, rec: object) =>
+      writeFileSync(
+        join(dir, ".last-update-result.json"),
+        JSON.stringify({ timestamp: "2026-10-06T12:45:00.000Z", path: "npm-global", ...rec }),
+      );
+    record(h.base, { outcome: "success", version_from: "2.1.290", version_to: "2.1.291" });
+    record(join(h.profilesRoot, "smoke"), { outcome: "failed", version_from: "2.1.300", version_to: null });
+    const env = { FAKE_CLAUDE_VERSION: "2.1.311 (Claude Code)" };
+    const outside = await runCli(["doctor"], { home: h.home, env });
+    expect(outside.stdout).toContain(
+      "default: last update 2.1.290 → 2.1.291 (success, npm-global, 2026-10-06); running 2.1.311, updated outside Claude Code since",
+    );
+    expect(outside.stdout).toContain(
+      "last update 2.1.300 → ? (failed, npm-global, 2026-10-06); running 2.1.311, updated outside Claude Code since",
+    );
+    record(join(h.profilesRoot, "other"), { outcome: "success", version_from: "2.1.291", version_to: "2.1.311" });
+    const another = await runCli(["doctor"], { home: h.home, env });
+    expect(another.stdout).toContain(
+      "2.1.291 (success, npm-global, 2026-10-06); running 2.1.311, updated since by another config dir",
+    );
+    expect(another.stdout).toContain("last update 2.1.291 → 2.1.311 (success, npm-global, 2026-10-06)\n");
   });
 
   test("warns about auto-memory prompts from Claude Code 2.1.280 on, without failing", async () => {
