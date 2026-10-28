@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-28
+
 ### Changed
 
 - Caught up with Claude Code 2.1.311. `remote-settings.json.synced-at`, `ccr-home-seed.json`, `remote-control/` and `.device-keys.json` are known-private, and so is any top-level name ending in `.lock` or `.lock.owner`, such as the `*.signature-iat.json.lock` directories and `.update.lock`. `claudep doctor` stops calling them unclassified in the base or unexpected in a profile.
@@ -157,7 +159,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
-[Unreleased]: https://github.com/bordoni/claudep/compare/0.7.0...HEAD
+[Unreleased]: https://github.com/bordoni/claudep/compare/0.7.1...HEAD
+[0.7.1]: https://github.com/bordoni/claudep/compare/0.7.0...0.7.1
 [0.7.0]: https://github.com/bordoni/claudep/compare/0.6.0...0.7.0
 [0.6.0]: https://github.com/bordoni/claudep/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/bordoni/claudep/compare/0.4.2...0.5.0
