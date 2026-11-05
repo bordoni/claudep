@@ -2,11 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  aliasShim,
+  builtOnOtherBase,
   canonicalGitRoot,
+  findShims,
   gitRoot,
+  hasStoredLogin,
+  healLinks,
   type LinkDeps,
   link,
   linkState,
+  managedSettingsEnv,
   memoryDirOverride,
   projectSlug,
   readJson,
@@ -27,6 +33,7 @@ import {
   PRIVATE_FILES,
   SEEDABLE,
 } from "./lib/home.ts";
+import { norm } from "./lib/paths.ts";
 
 describe("sharedItems", () => {
   test("returns exactly the allowlist entries that exist, plus every top-level *.md", () => {
@@ -360,5 +367,134 @@ describe("memoryDirOverride", () => {
     const dir = join(h.home, ".claudep", "own");
     mkdirSync(join(dir, "projects"), { recursive: true });
     expect(memoryDirOverride(dir, h.home, [], {})).toBeUndefined();
+  });
+});
+
+describe("healLinks", () => {
+  test("links only allowlisted items the profile is missing", () => {
+    using h = fakeHome();
+    const dir = join(h.home, "p");
+    mkdirSync(dir);
+    const linked = healLinks(h.base, dir);
+    expect(linked).toContain("CLAUDE.md");
+    expect(linked).toContain("skills");
+    expect(linked).not.toContain("RTK.md");
+    expect(existsSync(join(dir, "RTK.md"))).toBe(false);
+    expect(healLinks(h.base, dir)).toEqual([]);
+  });
+
+  test("leaves real items, wrong targets and accepted items alone", () => {
+    using h = fakeHome();
+    const dir = join(h.home, "p");
+    mkdirSync(dir);
+    mkdirSync(join(dir, "plans"));
+    symlinkSync(join(h.home, "elsewhere"), join(dir, "skills"), "dir");
+    symlinkSync(join(h.base, "hooks"), join(dir, "hooks"), "dir");
+    const linked = healLinks(h.base, dir, new Set(["CLAUDE.md"]));
+    expect(linked).toContain("agents");
+    expect(linked).not.toContain("plans");
+    expect(linked).not.toContain("skills");
+    expect(linked).not.toContain("CLAUDE.md");
+    expect(lstatSync(join(dir, "plans")).isDirectory()).toBe(true);
+    expect(norm(readlinkSync(join(dir, "skills")))).toBe(join(h.home, "elsewhere"));
+  });
+
+  test("a profile whose links all point at another base gets none from this one", () => {
+    using h = fakeHome();
+    const dir = join(h.home, "p");
+    mkdirSync(dir);
+    symlinkSync(join(h.home, "custom", "skills"), join(dir, "skills"), "dir");
+    expect(builtOnOtherBase(h.base, dir)).toBe(true);
+    expect(healLinks(h.base, dir)).toEqual([]);
+    expect(existsSync(join(dir, "CLAUDE.md"))).toBe(false);
+
+    symlinkSync(join(h.base, "plans"), join(dir, "plans"), "dir");
+    expect(builtOnOtherBase(h.base, dir)).toBe(false);
+    expect(healLinks(h.base, dir)).toContain("CLAUDE.md");
+    expect(norm(readlinkSync(join(dir, "skills")))).toBe(join(h.home, "custom", "skills"));
+  });
+
+  test("a link another launch created first, or any other error, is skipped", () => {
+    using h = fakeHome();
+    const dir = join(h.home, "p");
+    mkdirSync(dir);
+    const deps: LinkDeps = {
+      platform: process.platform,
+      readlink: readlinkSync,
+      symlink: () => {
+        throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      },
+    };
+    expect(healLinks(h.base, dir, new Set(), deps)).toEqual([]);
+    const denied: LinkDeps = {
+      ...deps,
+      symlink: () => {
+        throw Object.assign(new Error("denied"), { code: "EPERM" });
+      },
+    };
+    expect(healLinks(h.base, dir, new Set(), denied)).toEqual([]);
+    expect(healLinks(join(h.home, "no-base"), dir)).toEqual([]);
+  });
+});
+
+describe("hasStoredLogin", () => {
+  const account = { oauthAccount: { emailAddress: "me@example.com", organizationName: "Org" } };
+  const keychain = (code: number) => ({
+    platform: "darwin" as const,
+    username: "me",
+    spawn: () => ({ exited: Promise.resolve(code) }),
+  });
+
+  test("needs the account record and, per platform, the credential", async () => {
+    using h = fakeHome();
+    const dir = join(h.home, "p");
+    mkdirSync(dir);
+    expect(await hasStoredLogin(dir, "linux")).toBeUndefined();
+    expect(await hasStoredLogin(dir, "win32")).toBeUndefined();
+    writeFileSync(join(dir, ".claude.json"), JSON.stringify(account));
+    expect(await hasStoredLogin(dir, "linux")).toBeUndefined();
+    expect((await hasStoredLogin(dir, "win32"))?.email).toBe("me@example.com");
+    expect(await hasStoredLogin(dir, "darwin", keychain(44))).toBeUndefined();
+    expect((await hasStoredLogin(dir, "darwin", keychain(0)))?.orgName).toBe("Org");
+    writeFileSync(join(dir, ".credentials.json"), "{}");
+    expect((await hasStoredLogin(dir, "linux"))?.email).toBe("me@example.com");
+  });
+});
+
+describe("managedSettingsEnv", () => {
+  test("merges the file and sorted drop-ins, skipping dotfiles and anything broken", async () => {
+    using h = fakeHome();
+    const m = join(h.home, "m");
+    const d = join(m, "managed-settings.d");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(m, "managed-settings.json"), JSON.stringify({ env: { A: "file", B: "file", N: 1 } }));
+    writeFileSync(join(d, "20.json"), JSON.stringify({ env: { A: "twenty" } }));
+    writeFileSync(join(d, "10.json"), JSON.stringify({ env: { A: "ten", C: "ten" } }));
+    writeFileSync(join(d, ".99.json"), JSON.stringify({ env: { A: "hidden" } }));
+    writeFileSync(join(d, "30.txt"), JSON.stringify({ env: { A: "text" } }));
+    writeFileSync(join(d, "40.json"), "{not json");
+    expect(await managedSettingsEnv(m)).toEqual({ A: "twenty", B: "file", C: "ten" });
+    expect(await managedSettingsEnv(join(h.home, "none"))).toEqual({});
+  });
+});
+
+describe("findShims", () => {
+  test("finds generated shims once per real directory and skips everything else", () => {
+    using h = fakeHome();
+    const a = join(h.home, "a");
+    const b = join(h.home, "b");
+    mkdirSync(a);
+    mkdirSync(b);
+    writeFileSync(join(a, "eone"), aliasShim("sh", "/x/claudep.ts", "one"));
+    writeFileSync(join(a, "other"), "#!/bin/sh\necho hi\n");
+    writeFileSync(join(a, "big"), `# generated by claudep\nbun "/x" run one -- \n${"x".repeat(2000)}`);
+    writeFileSync(join(a, "with.dot"), aliasShim("sh", "/x/claudep.ts", "one"));
+    mkdirSync(join(a, "edir"));
+    writeFileSync(join(b, "etwo"), aliasShim("sh", "/y/claudep.ts", "two"));
+    const shims = findShims([a, a, join(h.home, "missing"), b], process.platform);
+    expect(shims.map((s) => [s.command, s.profile, s.target, s.kind])).toEqual([
+      ["eone", "one", "/x/claudep.ts", "sh"],
+      ["etwo", "two", "/y/claudep.ts", "sh"],
+    ]);
   });
 });

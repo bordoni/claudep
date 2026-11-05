@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  type Dirent,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -129,8 +130,14 @@ export function deleteEnv(env: Env, name: string, platform: NodeJS.Platform = pr
 export type Layout = {
   platform: NodeJS.Platform;
   home: string;
-  /** CLAUDE_CONFIG_DIR as set in the caller's shell, if any. */
+  /** CLAUDE_CONFIG_DIR as set in the caller's shell, if any. An empty value is
+   *  not a directory; it is reported through `emptyConfigDir` instead. */
   callerConfigDir: string | undefined;
+  /** CLAUDE_CONFIG_DIR is set but empty. Claude Code then uses the current
+   *  directory as its config dir (anthropics/claude-code#104629). */
+  emptyConfigDir: boolean;
+  /** Where Claude Code reads managed settings on this machine. */
+  managedDir: string;
   /** True when the caller's CLAUDE_CONFIG_DIR points inside the profiles root,
    *  i.e. a claudep profile is active in this shell (pinned by hand or by the hook). */
   managed: boolean;
@@ -144,10 +151,18 @@ export type Layout = {
   profilesRoot: string;
 };
 
+/** Claude Code's managed settings folder, fixed per platform as of 2.1.318. */
+export function managedSettingsDir(platform: NodeJS.Platform = process.platform): string {
+  if (platform === "darwin") return "/Library/Application Support/ClaudeCode";
+  if (platform === "win32") return "C:\\Program Files\\ClaudeCode";
+  return "/etc/claude-code";
+}
+
 export function layout(env: Env = process.env, platform: NodeJS.Platform = process.platform): Layout {
   const P = pathApi(platform);
   const home = homeDir(env, platform);
-  const callerConfigDir = env.CLAUDE_CONFIG_DIR;
+  const emptyConfigDir = env.CLAUDE_CONFIG_DIR === "";
+  const callerConfigDir = emptyConfigDir ? undefined : env.CLAUDE_CONFIG_DIR;
   const profilesRoot = canon(env.CLAUDE_PROFILES_DIR ?? P.join(home, ".claudep"), home, platform);
   const callerCanon = callerConfigDir !== undefined ? canon(callerConfigDir, home, platform) : undefined;
   const managed = callerCanon !== undefined && isInside(profilesRoot, callerCanon, platform);
@@ -161,6 +176,8 @@ export function layout(env: Env = process.env, platform: NodeJS.Platform = proce
     platform,
     home,
     callerConfigDir,
+    emptyConfigDir,
+    managedDir: env.CLAUDEP_MANAGED_DIR || managedSettingsDir(platform),
     managed,
     activeProfile,
     base,
@@ -348,6 +365,8 @@ export const KNOWN_PRIVATE = new Set<string>([
   // claudep's own per-profile files.
   "claudep.env",
   "claudep.settings.json",
+  "claudep.login",
+  "claudep.doctor",
 ]);
 
 /** Keys copied from the base .claude.json into a fresh profile so first-run
@@ -394,7 +413,7 @@ export type Command = {
 export const COMMANDS: readonly Command[] = [
   {
     name: "init",
-    desc: "create or update a profile and log in",
+    desc: "create or update a profile and log in if it has no login",
     arg: "profile",
     flags: ["--sso", "--console", "--copy-mcp", "--no-login", "--force"],
     valueFlags: [{ name: "--email" }, { name: "--alias" }, { name: "--env" }],
@@ -427,7 +446,12 @@ export const COMMANDS: readonly Command[] = [
     arg: "profile",
     flags: ["--unset", "--json"],
   },
-  { name: "alias", desc: "write a shim command that runs claudep with a profile", arg: "profile" },
+  {
+    name: "alias",
+    desc: "list the shim commands on PATH, or write one that runs claudep with a profile",
+    arg: "profile",
+    flags: ["--json"],
+  },
   { name: "handoff", desc: "resume this directory's latest session under another profile", arg: "profile" },
   { name: "statusline", desc: "print the profile and its usage from the statusline JSON on stdin" },
   {
@@ -436,7 +460,12 @@ export const COMMANDS: readonly Command[] = [
     arg: "profile",
     flags: ["--json", "--live", "--cached"],
   },
-  { name: "doctor", desc: "verify symlinks, keychain entry, unclassified files, Claude Code version", arg: "profile" },
+  {
+    name: "doctor",
+    desc: "verify symlinks, keychain entry, unclassified files, Claude Code version",
+    arg: "profile",
+    flags: ["--json", "--accept", "--unaccept"],
+  },
   {
     name: "rm",
     desc: "log out and delete a profile",
@@ -642,6 +671,159 @@ export function linkState(
   return existsSync(dest) ? "ok" : "broken";
 }
 
+/** Link the allowlisted items a profile is missing, and return their names.
+ *  `claudep run` calls this before every launch, so an item that appeared in
+ *  the base after `init` reaches the profile. Only SHARED_FILES and SHARED_DIRS
+ *  qualify: a new top-level *.md could be per-instance state, as loop.md was in
+ *  2.1.280, so those wait for `init`. Items the user accepted as different stay
+ *  as they are. Any failure, such as two launches racing for one link, is
+ *  skipped: this must never stop claude from starting. */
+export function healLinks(
+  base: string,
+  dir: string,
+  accepted: ReadonlySet<string> = new Set(),
+  deps: LinkDeps = defaultLinkDeps(),
+): string[] {
+  const linked: string[] = [];
+  try {
+    if (builtOnOtherBase(base, dir, deps)) return linked;
+    for (const item of sharedItems(base)) {
+      if (!isLaunchLinked(item.name) || accepted.has(item.name)) continue;
+      try {
+        if (linkState(base, dir, item, deps) === "missing" && link(base, dir, item, false, deps) === "linked")
+          linked.push(item.name);
+      } catch {}
+    }
+  } catch {}
+  return linked;
+}
+
+/** True when a profile's shared symlinks all point away from `base`, as they do
+ *  after `init` ran with a custom CLAUDE_CONFIG_DIR. New links from `base` would
+ *  mix two bases in one profile. One link into `base` is enough to say otherwise,
+ *  so a single item the user repointed does not stop the rest. */
+export function builtOnOtherBase(
+  base: string,
+  dir: string,
+  deps: Pick<LinkDeps, "platform" | "readlink"> = defaultLinkDeps(),
+): boolean {
+  let here = false;
+  let away = false;
+  for (const name of [...SHARED_FILES, ...SHARED_DIRS]) {
+    const dest = join(dir, name);
+    try {
+      if (!lstatSync(dest).isSymbolicLink()) continue;
+      if (samePath(deps.readlink(dest), join(base, name), deps.platform)) here = true;
+      else away = true;
+    } catch {}
+  }
+  return away && !here;
+}
+
+/** True for the items healLinks() links on launch. */
+export function isLaunchLinked(name: string): boolean {
+  return (SHARED_FILES as readonly string[]).includes(name) || (SHARED_DIRS as readonly string[]).includes(name);
+}
+
+/** Why a real file or directory in a profile differs from the shared one, for
+ *  the doctor line: what links into the base and what only the profile has for
+ *  a directory, and for settings.json the top-level key names that differ. Key
+ *  names only; a settings value can hold a secret. */
+export function shadowDetail(
+  base: string,
+  dir: string,
+  item: SharedItem,
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const P = pathApi(platform);
+  const own = P.join(dir, item.name);
+  const shared = P.join(base, item.name);
+  if (item.kind === "dir") return shadowDirDetail(base, own, shared, platform);
+  if (item.name !== "settings.json") return "";
+  const diff = settingsKeyDiff(readTrimmed(shared), readTrimmed(own));
+  if (!diff) return "one of the two is not a JSON object";
+  if (!diff.differ.length) return "no top-level key differs";
+  const carry = diff.carry.length ? `; claudep settings ${name} <key>=<value> can carry ${diff.carry.join(", ")}` : "";
+  return `keys that differ: ${diff.differ.join(", ")}${carry}`;
+}
+
+const NAMES_SHOWN = 10;
+
+function shadowDirDetail(base: string, own: string, shared: string, platform: NodeJS.Platform): string {
+  const P = pathApi(platform);
+  let entries: string[];
+  try {
+    entries = readdirSync(own);
+  } catch {
+    return "";
+  }
+  let inBase = new Set<string>();
+  try {
+    inBase = new Set(readdirSync(shared));
+  } catch {}
+  let links = 0;
+  const only: string[] = [];
+  const copies: string[] = [];
+  for (const entry of entries.sort()) {
+    const p = P.join(own, entry);
+    let intoBase = false;
+    try {
+      if (lstatSync(p).isSymbolicLink()) intoBase = isInside(base, P.resolve(own, readlinkSync(p)), platform);
+    } catch {}
+    if (intoBase) links++;
+    else if (inBase.has(entry)) copies.push(entry);
+    else only.push(entry);
+  }
+  const names = (list: string[]) => {
+    const more = list.length > NAMES_SHOWN ? ` and ${list.length - NAMES_SHOWN} more` : "";
+    return `${list.slice(0, NAMES_SHOWN).join(", ")}${more}`;
+  };
+  const copied = copies.length ? `; its own copy of: ${names(copies)}` : "";
+  return `${links} of ${entries.length} entries link into the base${copied}; only here: ${only.length ? names(only) : "nothing"}`;
+}
+
+/** The top-level keys two settings.json texts disagree on, and those a profile
+ *  can move to claudep.settings.json. undefined when either is not an object. */
+export function settingsKeyDiff(
+  baseText: string | undefined,
+  profileText: string | undefined,
+): { differ: string[]; carry: string[] } | undefined {
+  const parse = (text: string | undefined): JsonObject | undefined => {
+    try {
+      const j: unknown = JSON.parse(text ?? "");
+      return j && typeof j === "object" && !Array.isArray(j) ? (j as JsonObject) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const a = parse(baseText);
+  const b = parse(profileText);
+  if (!a || !b) return undefined;
+  const differ = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => !Bun.deepEquals(a[k], b[k])).sort();
+  return { differ, carry: differ.filter((k) => k in b && !refusedSettingKey(k)) };
+}
+
+/** The file holding the differences a profile's owner meant to have. Plain
+ *  text, one shared item per line, because claudep.settings.json is handed to
+ *  Claude Code. */
+export const ACCEPT_FILE = "claudep.doctor";
+
+export function readAccepted(dir: string): Set<string> {
+  const text = readTrimmed(join(dir, ACCEPT_FILE)) ?? "";
+  return new Set(
+    text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== "" && !l.startsWith("#")),
+  );
+}
+
+export function acceptedText(name: string, items: Iterable<string>): string {
+  const head = `# Differences "claudep doctor" accepts for the profile "${name}". Edit with: claudep doctor --accept ${name} <item>\n`;
+  return head + [...items].map((i) => `${i}\n`).join("");
+}
+
 /** Known-private names in a profile that are still symlinks into the base.
  *  An older claudep linked every top-level *.md, which once included loop.md;
  *  link() never deletes, so doctor names them for the user to remove. */
@@ -691,6 +873,76 @@ export function authEnvOverrides(env: Env = process.env, platform: NodeJS.Platfo
   });
 }
 
+/** Every variable that holds a credential Claude Code reads, as of 2.1.318:
+ *  AUTH_ENV, Claude Code's own scrub list, and the cloud provider secrets.
+ *  claudep.env refuses them all. Names that hold a path or a file descriptor,
+ *  such as ANTHROPIC_IDENTITY_TOKEN_FILE, hold no secret and stay allowed.
+ *  ANTHROPIC_CUSTOM_HEADERS is here because it can carry auth headers. Only
+ *  AUTH_ENV makes Claude Code ignore the stored login; the refresh token writes
+ *  a new login through `claude auth login` instead. */
+export const CREDENTIAL_ENV = [
+  ...AUTH_ENV,
+  "ANTHROPIC_CUSTOM_HEADERS",
+  "ANTHROPIC_FOUNDRY_API_KEY",
+  "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+  "ANTHROPIC_AWS_API_KEY",
+  "ANTHROPIC_IDENTITY_TOKEN",
+  "ANTHROPIC_WORK_SECRET",
+  "CLAUDE_API_KEY",
+  "CLAUDE_BRIDGE_OAUTH_TOKEN",
+  "CLAUDE_TRUSTED_DEVICE_TOKEN",
+  "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+  "CLAUDE_CODE_SESSIONS_OAUTH_TOKEN",
+  "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+  "CLAUDE_CODE_ARTIFACTS_API_TOKEN",
+  "CLAUDE_CODE_MEMORY_API_TOKEN",
+  "CLAUDE_CODE_SLACK_TAG_TOKEN",
+  "CLAUDE_CODE_GATEWAY_TOKEN",
+  "CLAUDE_CODE_HFI_BEARER_TOKEN",
+  "CLAUDE_CODE_MCP_SERVE_AUTH_TOKEN",
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+  "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+  "AZURE_CLIENT_SECRET",
+  "AZURE_PASSWORD",
+  "AZURE_CLIENT_CERTIFICATE_PASSWORD",
+  "GOOGLE_OAUTH_ACCESS_TOKEN",
+  "CLOUDSDK_AUTH_ACCESS_TOKEN",
+  "CLOUDSDK_PROXY_PASSWORD",
+  "ANTHROPIC_ENVIRONMENT_KEY",
+  "ENVIRONMENT_SERVICE_KEY",
+  "MCP_CLIENT_SECRET",
+  "MCP_XAA_IDP_CLIENT_SECRET",
+] as const;
+
+/** Moves Claude Code's credential store away from the config dir: the Keychain
+ *  hash on macOS and `.credentials.json` on Linux and Windows. One inherited
+ *  value puts every profile on one login. */
+export const SECURE_STORAGE_ENV = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
+
+/** Where an inherited CLAUDE_SECURESTORAGE_CONFIG_DIR puts this config dir's
+ *  login, or undefined when it is unset or names `dir` itself. Claude Code reads
+ *  an empty value as ~/.claude. */
+export function secureStorageOverride(
+  dir: string,
+  env: Env = process.env,
+  home: string = homeDir(env),
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  const key = Object.keys(env).find((k) => (platform === "win32" ? k.toUpperCase() : k) === SECURE_STORAGE_ENV);
+  const value = key === undefined ? undefined : env[key];
+  if (value === undefined) return undefined;
+  const target = value === "" ? pathApi(platform).join(home, ".claude") : canon(value, home, platform);
+  return samePath(target, dir, platform) ? undefined : target;
+}
+
+/** The fix for an empty CLAUDE_CONFIG_DIR, shared by every command that stops on it. */
+export const EMPTY_CONFIG_DIR_MESSAGE =
+  "CLAUDE_CONFIG_DIR is set but empty, so Claude Code uses the current directory as its config dir (https://github.com/anthropics/claude-code/issues/104629). Fix it: unset CLAUDE_CONFIG_DIR";
+
 // ---------------------------------------------------------------------------
 // Per-profile variables: <profile>/claudep.env
 // ---------------------------------------------------------------------------
@@ -713,12 +965,13 @@ export type EnvVar = [key: string, value: string];
 export function refusedEnvKey(key: string): string | undefined {
   const k = key.toUpperCase();
   if (k === "CLAUDE_CONFIG_DIR") return "claudep sets CLAUDE_CONFIG_DIR itself";
+  if (k === SECURE_STORAGE_ENV) return "it moves the profile's login out of the profile";
   if (k.startsWith("CLAUDEP_")) return "CLAUDEP_ variables belong to claudep";
-  if ((AUTH_ENV as readonly string[]).includes(k)) return "claudep never stores credentials";
+  if ((CREDENTIAL_ENV as readonly string[]).includes(k)) return "claudep never stores credentials";
   return undefined;
 }
 
-const REFUSED_ENV = ["CLAUDE_CONFIG_DIR", "CLAUDEP_*", ...AUTH_ENV];
+const REFUSED_ENV = ["CLAUDE_CONFIG_DIR", SECURE_STORAGE_ENV, "CLAUDEP_*", ...CREDENTIAL_ENV];
 
 /** refusedEnvKey as a case-insensitive regex, for the fish and PowerShell hooks.
  *  Anchored alternatives, no group: every ( in the fish hook is a string call. */
@@ -979,6 +1232,28 @@ export function stringValues(env: unknown): Env {
   return out;
 }
 
+/** The `env` block of the machine's managed settings: managed-settings.json,
+ *  then each *.json in managed-settings.d in sorted order, a later file winning,
+ *  as Claude Code 2.1.318 merges them. Dotfiles are skipped, as it does.
+ *  Server-managed settings, the macOS plist and the Windows registry are not read. */
+export async function managedSettingsEnv(
+  managedDir: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<Env> {
+  const P = pathApi(platform);
+  const dropIns = P.join(managedDir, "managed-settings.d");
+  let names: string[] = [];
+  try {
+    names = readdirSync(dropIns)
+      .filter((n) => n.endsWith(".json") && !n.startsWith("."))
+      .sort();
+  } catch {}
+  const files = [P.join(managedDir, "managed-settings.json"), ...names.map((n) => P.join(dropIns, n))];
+  const merged: Env = {};
+  for (const file of files) Object.assign(merged, await settingsEnv(file));
+  return merged;
+}
+
 export type AutoUpdate = { enabled: boolean; by?: string };
 
 /** Whether Claude Code's background updater runs for a config dir, in the
@@ -988,7 +1263,7 @@ export type AutoUpdate = { enabled: boolean; by?: string };
  *  strongest first, and the first one that defines a variable decides it, as
  *  Claude Code copies settings `env` over the shell before it looks. The first
  *  two count when they are 1, true, yes or on; CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
- *  counts when it is set to anything, even 0. Managed settings are not read. */
+ *  counts when it is set to anything, even 0. */
 export function autoUpdateState(sources: readonly [string, Env][], globalJson: JsonObject | undefined): AutoUpdate {
   for (const key of ["DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]) {
     const hit = sources.find(([, env]) => env[key] !== undefined);
@@ -1286,6 +1561,7 @@ export function baseEnv(L: Layout, env: Env = process.env): Env {
     deleteEnv(out, "CLAUDE_CONFIG_DIR", L.platform);
     deleteEnv(out, "CLAUDEP_AUTO", L.platform);
   }
+  if (L.emptyConfigDir) deleteEnv(out, "CLAUDE_CONFIG_DIR", L.platform);
   // Variables a profile's claudep.env put in this shell are not the base's.
   for (const k of exportedEnvKeys(env)) deleteEnv(out, k, L.platform);
   deleteEnv(out, ENV_KEYS_VAR, L.platform);
@@ -1395,6 +1671,50 @@ async function loginOf(L: Layout, dir: string | undefined, live: boolean): Promi
   return cachedAuthStatus(await readJson(dir === undefined ? L.baseGlobalJson : join(dir, ".claude.json")));
 }
 
+/** The login flags a profile was created with: `--sso --email you@company.com`
+ *  on one line. Flags and an address, never a credential. */
+export const LOGIN_FILE = "claudep.login";
+const LOGIN_EMAIL_RE = /^[A-Za-z0-9._%+@-]+$/;
+
+/** The `auth login` flags in a claudep.login text. Only flags claudep itself
+ *  writes survive, so a hand-edited file cannot put anything else in a printed
+ *  command or a login. */
+export function parseLoginFlags(text: string): string[] {
+  const words = text.trim().split(/\s+/);
+  const out: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] as string;
+    if (w === "--sso" || w === "--console") out.push(w);
+    else if (w === "--email" && LOGIN_EMAIL_RE.test(words[i + 1] ?? "")) out.push(w, words[++i] as string);
+  }
+  return out;
+}
+
+export function readLoginFlags(dir: string): string[] {
+  return parseLoginFlags(readTrimmed(join(dir, LOGIN_FILE)) ?? "");
+}
+
+/** The command that logs a profile in with its saved flags. */
+export function loginCommand(name: string, flags: readonly string[]): string {
+  return ["claudep", name, "auth", "login", ...flags].join(" ");
+}
+
+/** Whether a profile already holds a login. Existence checks only (Never 3):
+ *  the account recorded in .claude.json, plus the Keychain item on macOS or
+ *  .credentials.json on Linux. On Windows the login may live in Credential
+ *  Manager, so the account record is enough there. */
+export async function hasStoredLogin(
+  dir: string,
+  platform: NodeJS.Platform = process.platform,
+  deps: KeychainDeps = defaultKeychainDeps(),
+): Promise<{ email?: string; orgName?: string } | undefined> {
+  const account = cachedAuthStatus(await readJson(join(dir, ".claude.json")));
+  if (!account.loggedIn) return undefined;
+  if (platform === "darwin") return (await keychainHas(keychainService(dir), deps)) ? account : undefined;
+  if (platform === "win32") return account;
+  return credentialsFileHas(dir) ? account : undefined;
+}
+
 /** Minimal spawner shape so the keychain check can be exercised without a real `security`. */
 export type Spawner = (cmd: string[]) => { exited: Promise<number> };
 
@@ -1469,7 +1789,12 @@ async function cmdInit(L: Layout, args: string[]): Promise<void> {
   console.log(`${c.bold(fresh ? "Creating" : "Updating")} profile ${c.bold(name)} at ${dir}`);
 
   let conflicts = 0;
+  const accepted = readAccepted(dir);
   for (const item of sharedItems(L.base)) {
+    if (accepted.has(item.name) && !f.bools.has("--force")) {
+      console.log(`${c.dim("·")} ${item.name} ${c.dim("left as it is; doctor accepts it (--force links it)")}`);
+      continue;
+    }
     const r = link(L.base, dir, item, f.bools.has("--force"));
     if (r === "linked") ok(`${item.name} → shared`);
     else if (r === "ok") console.log(`${c.dim("·")} ${item.name} ${c.dim("already shared")}`);
@@ -1499,15 +1824,29 @@ async function cmdInit(L: Layout, args: string[]): Promise<void> {
 
   if (conflicts) warn(`${conflicts} item(s) need attention, see above`);
 
-  if (f.bools.has("--no-login")) {
-    console.log(`\nNext: ${c.bold(`claudep ${name} auth login`)}`);
+  const given: string[] = [];
+  if (f.bools.has("--sso")) given.push("--sso");
+  if (f.bools.has("--console")) given.push("--console");
+  const email = f.strs.get("--email");
+  if (email !== undefined) given.push("--email", email);
+  // Saved even with --no-login, so the login that follows uses the same flags.
+  const saved = parseLoginFlags(given.join(" "));
+  if (saved.length) writeFileSync(join(dir, LOGIN_FILE), `${saved.join(" ")}\n`);
+  const flags = saved.length ? saved : readLoginFlags(dir);
+
+  const account = fresh ? undefined : await hasStoredLogin(dir, L.platform);
+  if (account && (f.bools.has("--no-login") || !given.length)) {
+    console.log(
+      `\n${c.dim("·")} already logged in as ${account.email ?? "?"} (${account.orgName ?? "?"}). To log in again: ${loginCommand(name, flags)}`,
+    );
     return;
   }
-  const loginArgs = ["auth", "login"];
-  if (f.bools.has("--sso")) loginArgs.push("--sso");
-  if (f.bools.has("--console")) loginArgs.push("--console");
-  const email = f.strs.get("--email");
-  if (email !== undefined) loginArgs.push("--email", email);
+  if (f.bools.has("--no-login")) {
+    console.log(`\nNext: ${c.bold(loginCommand(name, flags))}`);
+    return;
+  }
+  // An address the saved file refuses still goes to this login as it was typed.
+  const loginArgs = ["auth", "login", ...(given.length ? given : flags)];
   console.log(`\n${c.bold("Logging in")} to profile ${name} …`);
   await execClaude(L, dir, loginArgs);
 }
@@ -1568,30 +1907,238 @@ export function aliasFiles(
   return [{ path: P.join(dir, `${cmd}.cmd`), kind: "cmd" as const }, sh];
 }
 
-/** Write the shim(s) for `<cmd>` next to the claudep on PATH: `claudep run <name> -- "$@"`. */
+export type ShimInfo = { profile: string; target: string };
+
+/** The profile and claudep.ts a generated shim runs, or undefined for any other
+ *  file. Both shim kinds carry the marker and `bun "<target>" run <name> -- `. */
+export function parseShim(text: string): ShimInfo | undefined {
+  if (!text.includes("generated by claudep")) return undefined;
+  const m = /bun "([^"]+)" run ([a-z0-9][a-z0-9_-]*) -- /.exec(text);
+  return m ? { target: m[1] as string, profile: m[2] as string } : undefined;
+}
+
+export type Shim = ShimInfo & { command: string; path: string; dir: string; kind: AliasKind };
+
+/** Shims stay this small; a larger file is not read. Directories on PATH can
+ *  hold thousands of binaries. */
+const SHIM_MAX_BYTES = 1024;
+
+/** PATH directories, first spelling of each real directory, in order. */
+export function uniquePathDirs(dirs: readonly string[], platform: NodeJS.Platform = process.platform): string[] {
+  const seen: string[] = [];
+  const out: string[] = [];
+  for (const dir of dirs) {
+    let real = dir;
+    try {
+      real = realpathSync(dir);
+    } catch {}
+    if (seen.some((s) => samePath(s, real, platform))) continue;
+    seen.push(real);
+    out.push(dir);
+  }
+  return out;
+}
+
+/** Every claudep shim in `dirs`, in order. */
+export function findShims(dirs: readonly string[], platform: NodeJS.Platform = process.platform): Shim[] {
+  const P = pathApi(platform);
+  const shims: Shim[] = [];
+  for (const dir of uniquePathDirs(dirs, platform)) {
+    let entries: Dirent[] = [];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      if (!entry.isFile()) continue;
+      const name = entry.name;
+      const isCmd = platform === "win32" && /\.cmd$/i.test(name);
+      if (name.includes(".") && !isCmd) continue;
+      const path = P.join(dir, name);
+      try {
+        if (statSync(path).size > SHIM_MAX_BYTES) continue;
+        const info = parseShim(readFileSync(path, "utf8"));
+        if (info)
+          shims.push({
+            ...info,
+            command: isCmd ? name.slice(0, -4) : name,
+            path,
+            dir,
+            kind: isCmd ? "cmd" : "sh",
+          });
+      } catch {}
+    }
+  }
+  return shims;
+}
+
+export type ShimState = "ok" | "missing-target" | "other-target" | "missing-profile" | "shadowed";
+
+export type ShimDeps = {
+  /** The PATH directories, in order. */
+  dirs: readonly string[];
+  /** The claudep.ts that is running. */
+  self: string;
+  platform: NodeJS.Platform;
+  exists: (p: string) => boolean;
+  profileExists: (name: string) => boolean;
+  realpath: (p: string) => string;
+};
+
+/** What is wrong with a shim, the worst first: a target gone or a profile gone
+ *  cannot start claude; another target quietly runs another claudep; a shim
+ *  behind an earlier PATH entry never runs at all. */
+export function shimState(shim: Shim, deps: ShimDeps): ShimState {
+  const P = pathApi(deps.platform);
+  if (!deps.exists(shim.target)) return "missing-target";
+  if (!deps.profileExists(shim.profile)) return "missing-profile";
+  if (!samePath(deps.realpath(shim.target), deps.self, deps.platform)) return "other-target";
+  const names =
+    deps.platform === "win32"
+      ? [shim.command, `${shim.command}.exe`, `${shim.command}.cmd`, `${shim.command}.bat`]
+      : [shim.command];
+  for (const dir of uniquePathDirs(deps.dirs, deps.platform)) {
+    if (samePath(dir, shim.dir, deps.platform)) break;
+    if (names.some((n) => deps.exists(P.join(dir, n)))) return "shadowed";
+  }
+  return "ok";
+}
+
+/** The directories `alias` and `rm` look in: PATH, then where a new shim would go. */
+function shimDirs(L: Layout): string[] {
+  return uniquePathDirs([...splitPathVar(process.env.PATH ?? "", L.platform), aliasDir()], L.platform);
+}
+
+function shimDeps(L: Layout): ShimDeps {
+  return {
+    dirs: shimDirs(L),
+    self: realpathSync(Bun.main),
+    platform: L.platform,
+    exists: existsSync,
+    profileExists: (n) => n === "default" || n === "base" || profileExists(L, n),
+    realpath: (p) => {
+      try {
+        return realpathSync(p);
+      } catch {
+        return p;
+      }
+    },
+  };
+}
+
+/** Write the shim(s) for `<cmd>`: `claudep run <name> -- "$@"`. Rewrites a
+ *  generated shim of that name wherever it sits on PATH, because after an
+ *  install switch the stale one is in the old directory and would keep winning.
+ *  A new shim goes next to the claudep on PATH. Any other file is left alone. */
 function writeAlias(L: Layout, name: string, cmd: string): void {
   if (!NAME_RE.test(cmd)) die(`invalid alias command name "${cmd}"`);
+  if (cmd === "claude" || cmd === "claudep") die(`"${cmd}" is the command a shim runs; pick another name`);
   const self = realpathSync(Bun.main);
-  for (const { path: dest, kind } of aliasFiles(aliasDir(), cmd, L.platform)) {
-    if (existsSync(dest)) {
-      const current = Bun.file(dest);
-      if (!lstatSync(dest).isSymbolicLink() && current.size > 0) {
-        warn(`${dest} already exists. Not overwriting; remove it first to regenerate`);
-        continue;
+  const found = findShims(shimDirs(L), L.platform).filter((s) => s.command === cmd);
+  const dirs = found.length
+    ? uniquePathDirs(
+        found.map((s) => s.dir),
+        L.platform,
+      )
+    : [aliasDir()];
+  for (const dir of dirs) {
+    for (const { path: dest, kind } of aliasFiles(dir, cmd, L.platform)) {
+      const text = aliasShim(kind, self, name);
+      try {
+        let rewrite = false;
+        let st: ReturnType<typeof lstatSync> | undefined;
+        try {
+          st = lstatSync(dest);
+        } catch {}
+        // A symlink, dangling or not, is someone's command: writing would follow it.
+        if (st && !st.isFile()) {
+          warn(`${dest} already exists. Not overwriting; remove it first to regenerate`);
+          continue;
+        }
+        if (st && st.size > 0) {
+          const current = readFileSync(dest, "utf8");
+          if (current === text) {
+            console.log(`${c.dim("·")} alias ${cmd} ${c.dim(`already runs profile ${name} (${dest})`)}`);
+            continue;
+          }
+          if (!parseShim(current)) {
+            warn(`${dest} already exists. Not overwriting; remove it first to regenerate`);
+            continue;
+          }
+          rewrite = true;
+        }
+        writeFileSync(dest, text);
+        if (kind === "sh") chmodSync(dest, 0o755);
+        ok(`alias ${c.bold(cmd)} → profile ${name} (${rewrite ? "rewrote " : ""}${dest})`);
+      } catch (e) {
+        warn(`could not write ${dest}: ${(e as Error).message}`);
+        process.exitCode = 1;
       }
     }
-    writeFileSync(dest, aliasShim(kind, self, name));
-    if (kind === "sh") chmodSync(dest, 0o755);
-    ok(`alias ${c.bold(cmd)} → profile ${name} (${dest})`);
   }
   if (!onPath(aliasDir(), undefined, L.platform)) warn(`${aliasDir()} is not on your PATH`);
 }
 
+function printAliases(L: Layout, json: boolean): void {
+  const deps = shimDeps(L);
+  const rows = findShims(deps.dirs, L.platform).map((s) => ({ ...s, state: shimState(s, deps) }));
+  if (json) {
+    const out = rows.map(({ command, profile, target, path, kind, state }) => ({
+      command,
+      profile,
+      target,
+      path,
+      kind,
+      state,
+    }));
+    console.log(JSON.stringify(out, null, 2));
+    return;
+  }
+  if (!rows.length) {
+    console.log(c.dim("No alias shims on PATH. Create one: claudep alias <profile> <command>"));
+    return;
+  }
+  const cols = ["COMMAND", "PROFILE", "STATE", "TARGET", "FILE"];
+  const data = rows.map((r) => [
+    r.command,
+    r.profile,
+    r.state,
+    shortHome(r.target, L.home, L.platform),
+    shortHome(r.path, L.home, L.platform),
+  ]);
+  const widths = cols.map((h, i) => Math.max(h.length, ...data.map((d) => (d[i] as string).length)));
+  const fmt = (cells: string[]) => cells.map((v, i) => v.padEnd(widths[i] as number)).join("  ");
+  console.log(c.bold(fmt(cols)));
+  for (const d of data) console.log(fmt(d));
+}
+
 async function cmdAlias(L: Layout, args: string[]): Promise<void> {
-  const [name, cmd] = args;
-  if (!name || !cmd) die("usage: claudep alias <profile> <command>   e.g. claudep alias enterprise eclaude");
+  const f = parseFlags(args, ...flagSpec("alias"));
+  const [name, cmd] = f.rest;
+  if (!name) return printAliases(L, f.bools.has("--json"));
+  if (!cmd)
+    die(
+      "usage: claudep alias [--json]   or   claudep alias <profile> <command>   e.g. claudep alias enterprise eclaude",
+    );
   if (!profileExists(L, name)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
   writeAlias(L, name, cmd);
+}
+
+function warnSecureStorage(L: Layout, dir: string, name: string): void {
+  const target = secureStorageOverride(dir, process.env, L.home, L.platform);
+  if (target !== undefined)
+    console.error(
+      `claudep: ${SECURE_STORAGE_ENV} is set, so Claude Code keeps the "${name}" login in ${target}. Unset it to use the profile's own`,
+    );
+}
+
+function warnSkippedEnv(dir: string): void {
+  const { skipped } = readProfileEnv(dir);
+  if (skipped.length)
+    console.error(
+      `claudep: ${join(dir, ENV_FILE)}: lines ${skipped.join(", ")} are not KEY=VALUE with an allowed name and a value; nothing reads them`,
+    );
 }
 
 async function cmdRun(L: Layout, args: string[]): Promise<never> {
@@ -1599,11 +2146,21 @@ async function cmdRun(L: Layout, args: string[]): Promise<never> {
   if (!name) die("usage: claudep run <name> [claude args…]");
   const rest = args.slice(1);
   if (rest[0] === "--") rest.shift();
-  if (name === "default" || name === "base") return execClaude(L, undefined, rest);
+  if (name === "default" || name === "base") {
+    if (L.emptyConfigDir) die(EMPTY_CONFIG_DIR_MESSAGE);
+    warnSecureStorage(L, L.base, name);
+    return execClaude(L, undefined, rest);
+  }
   const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
   for (const v of authEnvOverrides(process.env, L.platform))
     console.error(`claudep: ${v} is set; Claude Code will use it instead of the "${name}" login`);
+  warnSecureStorage(L, dir, name);
+  warnSkippedEnv(dir);
+  // A base that came from a custom CLAUDE_CONFIG_DIR in this shell is not the
+  // one this profile was built on, so it does not get new links from a launch.
+  if (L.callerConfigDir === undefined || L.managed)
+    for (const item of healLinks(L.base, dir, readAccepted(dir))) console.error(`claudep: linked ${item} into ${name}`);
   const overlay = readProfileSettings(dir);
   if (overlay.error)
     die(`${join(dir, SETTINGS_FILE)}: ${overlay.error}. Fix it, or: claudep settings ${name} --unset <key>`);
@@ -1748,8 +2305,13 @@ async function cmdStatus(L: Layout, args: string[]): Promise<void> {
     v,
   } = await collectRows(L, [name], f.bools.has("--live"));
   if (!row) return;
-  if (f.bools.has("--json")) console.log(JSON.stringify(rowJson(row), null, 2));
-  else printTable([row], L.home, L.platform, v);
+  if (f.bools.has("--json")) {
+    console.log(JSON.stringify(rowJson(row), null, 2));
+    return;
+  }
+  printTable([row], L.home, L.platform, v);
+  if (!row.status.loggedIn && name !== "default")
+    console.log(c.dim(`\nLog in: ${loginCommand(name, readLoginFlags(row.dir))}`));
 }
 
 function envUsage(syntax: EnvSyntax): string {
@@ -1780,6 +2342,7 @@ function cmdEnv(L: Layout, args: string[]): void {
   if (!name) die(envUsage(syntax));
   const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist`);
+  warnSkippedEnv(dir);
   const { vars } = readProfileEnv(dir);
   const plan = envPlan(vars, process.env, L.platform);
   for (const [k] of vars)
@@ -2199,6 +2762,7 @@ async function cmdStatusline(L: Layout): Promise<void> {
 
 function cmdCurrent(L: Layout, args: string[]): void {
   const f = parseFlags(args, ...flagSpec("current"));
+  if (L.emptyConfigDir) die(EMPTY_CONFIG_DIR_MESSAGE);
   const cur = currentProfile(L);
   const label = currentLabel(cur);
   if (f.bools.has("--name")) {
@@ -2940,11 +3504,61 @@ function msysConfigDirWarning(L: Layout, env: Env = process.env): string | undef
   return `CLAUDE_CONFIG_DIR is a POSIX-style path (${cfg}); claude.exe will not read it. Set it with: eval "$(claudep env <name>)"`;
 }
 
-/** Prints whether Claude Code's updater runs for a config dir (undefined is
+export type CheckLevel = "ok" | "info" | "warn" | "fail";
+
+/** One line of `claudep doctor`. `problem` is what the count and the exit code
+ *  read; a warning does not always count, and neither does an accepted item. */
+export type Check = {
+  item: string;
+  state: string;
+  level: CheckLevel;
+  message: string;
+  fix?: string;
+  problem: boolean;
+};
+
+/** Collects every check, and in text mode prints it the moment it is known, so
+ *  a slow `claude auth status` does not hold back the lines before it. */
+class DoctorReport {
+  problems = 0;
+  private list: Check[] = [];
+  constructor(private text: boolean) {}
+
+  /** Later checks go to `list` until the next call. */
+  section(list: Check[]): void {
+    this.list = list;
+  }
+
+  /** Text only: a blank line and a heading, or a line that is not a check. */
+  say(line: string): void {
+    if (this.text) console.log(line);
+  }
+
+  add(
+    item: string,
+    state: string,
+    level: CheckLevel,
+    message: string,
+    opts: { problem?: boolean; fix?: string; lead?: string } = {},
+  ): void {
+    const problem = opts.problem ?? false;
+    if (problem) this.problems++;
+    this.list.push({ item, state, level, message, ...(opts.fix ? { fix: opts.fix } : {}), problem });
+    if (!this.text) return;
+    if (opts.lead !== undefined) console.log(opts.lead);
+    if (level === "ok") ok(message);
+    else if (level === "info") console.log(`${c.dim("·")} ${message}`);
+    else if (level === "warn") warn(message);
+    else bad(message);
+  }
+}
+
+/** Reports whether Claude Code's updater runs for a config dir (undefined is
  *  the base) and its last update next to the running version; true when the
  *  updater is on. `targets` is what updateTargets() found across every dir. */
 async function reportUpdates(
   L: Layout,
+  report: DoctorReport,
   dir: string | undefined,
   running: Version | undefined,
   targets: readonly Version[],
@@ -2952,6 +3566,7 @@ async function reportUpdates(
   const d = dir ?? L.base;
   const globalJson = await readJson(dir === undefined ? L.baseGlobalJson : join(dir, ".claude.json"));
   const sources: [string, Env][] = [
+    ["managed settings env", await managedSettingsEnv(L.managedDir, L.platform)],
     ["settings.json env", await settingsEnv(join(d, "settings.json"))],
     [".claude.json env", stringValues(globalJson?.env)],
     ["this shell", baseEnv(L)],
@@ -2959,75 +3574,207 @@ async function reportUpdates(
   if (dir !== undefined) sources.push([ENV_FILE, Object.fromEntries(readProfileEnv(dir).vars)]);
   const state = autoUpdateState(sources, globalJson);
   const who = dir === undefined ? "default: " : "";
-  console.log(`${c.dim("·")} ${who}auto-update ${state.enabled ? "on" : `off (${state.by})`}`);
+  report.add(
+    "auto-update",
+    state.enabled ? "on" : "off",
+    "info",
+    `${who}auto-update ${state.enabled ? "on" : `off (${state.by})`}`,
+  );
   const last = await lastUpdate(d);
   if (last?.to || last?.outcome === "failed")
-    console.log(
-      `${c.dim("·")} ${who}last update ${last.from ?? "?"} → ${last.to ?? "?"} (${last.outcome ?? "?"}, ${last.path ?? "?"}, ${(last.at ?? "").slice(0, 10)})${updateNote(last, running, targets)}`,
+    report.add(
+      "last-update",
+      last.outcome ?? "unknown",
+      "info",
+      `${who}last update ${last.from ?? "?"} → ${last.to ?? "?"} (${last.outcome ?? "?"}, ${last.path ?? "?"}, ${(last.at ?? "").slice(0, 10)})${updateNote(last, running, targets)}`,
     );
   return state.enabled;
 }
 
+/** The commands that move a real item aside and link the shared one. PowerShell
+ *  5.1 has no `&&`, and a path can hold a space. */
+export function shareFixCommand(path: string, name: string, powershell: boolean): string {
+  if (powershell) {
+    const q = (p: string) => `'${p.replace(/'/g, "''")}'`;
+    return `Move-Item ${q(path)} ${q(`${path}.old`)}; claudep init ${name} --no-login`;
+  }
+  const q = (p: string) => (/^[\w@%+=:,./~-]+$/.test(p) ? p : `'${p.replace(/'/g, "'\\''")}'`);
+  return `mv ${q(path)} ${q(`${path}.old`)} && claudep init ${name} --no-login`;
+}
+
+/** One shared item that is not the plain symlink it should be. */
+function reportLink(
+  report: DoctorReport,
+  L: Layout,
+  name: string,
+  dir: string,
+  item: SharedItem,
+  state: Exclude<LinkState, "ok">,
+  accepted: boolean,
+): void {
+  const P = pathApi(L.platform);
+  const here = P.join(dir, item.name);
+  if (state === "shadowed") {
+    const what = `${item.name}: real ${item.kind} shadows the shared one`;
+    if (accepted) {
+      report.add(item.name, "accepted", "info", `${what} (accepted)`);
+      return;
+    }
+    const detail = shadowDetail(L.base, dir, item, name, L.platform);
+    const fix = shareFixCommand(here, name, L.platform === "win32" && !process.env.MSYSTEM);
+    report.add(
+      item.name,
+      state,
+      "warn",
+      `${what}${detail ? `; ${detail}` : ""}. A launch never replaces it. To share it: ${fix}. To keep it: claudep doctor --accept ${name} ${item.name}`,
+      { problem: true, fix },
+    );
+    return;
+  }
+  if (state === "missing") {
+    const heals =
+      isLaunchLinked(item.name) && (L.callerConfigDir === undefined || L.managed) && !builtOnOtherBase(L.base, dir);
+    const what = heals
+      ? `${item.name}: not linked yet; the next claudep run links it`
+      : `${item.name}: not linked (run: claudep init ${name})`;
+    if (accepted) report.add(item.name, "accepted", "info", `${item.name}: not linked (accepted)`);
+    else report.add(item.name, state, "warn", what, { problem: true, fix: `claudep init ${name}` });
+    return;
+  }
+  const what =
+    state === "wrong-target"
+      ? `${item.name}: symlink points elsewhere (${readlinkSync(here)})`
+      : `${item.name}: broken symlink`;
+  if (accepted) report.add(item.name, "accepted", "info", `${what} (accepted)`);
+  else report.add(item.name, state, "fail", what, { problem: true });
+}
+
+/** `doctor --accept <name> <item>` and `--unaccept`: record one intended difference. */
+function acceptItem(L: Layout, rest: readonly string[], on: boolean): void {
+  const flag = on ? "--accept" : "--unaccept";
+  const [name, item] = rest;
+  if (!name || !item || rest.length > 2) die(`usage: claudep doctor ${flag} <name> <item>`);
+  const dir = profileDir(L, name);
+  if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
+  const accepted = readAccepted(dir);
+  if (on) {
+    const known = new Set<string>([...SHARED_FILES, ...SHARED_DIRS, ...sharedItems(L.base).map((s) => s.name)]);
+    if (!known.has(item)) die(`"${item}" is not a shared item; doctor only accepts those`);
+    accepted.add(item);
+  } else accepted.delete(item);
+  const file = join(dir, ACCEPT_FILE);
+  if (accepted.size) writeFileSync(file, acceptedText(name, accepted));
+  else rmSync(file, { force: true });
+  ok(on ? `${name}: doctor accepts ${item} as it is` : `${name}: doctor reports ${item} again`);
+}
+
 async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
-  const names = args[0] ? [args[0]] : listProfileNames(L);
-  let problems = 0;
+  const f = parseFlags(args, ...flagSpec("doctor"));
+  const accept = f.bools.has("--accept");
+  if (accept && f.bools.has("--unaccept")) die("use --accept or --unaccept, not both");
+  if (accept || f.bools.has("--unaccept")) return acceptItem(L, f.rest, accept);
+  const only = f.rest[0];
+  const names = only ? [only] : listProfileNames(L);
+  const json = f.bools.has("--json");
+  const report = new DoctorReport(!json);
+  const baseChecks: Check[] = [];
+  const profiles: { name: string; dir: string; checks: Check[] }[] = [];
+  const aliases: Check[] = [];
+  report.section(baseChecks);
+  const claude: { bin?: string; version?: string; install?: string } = {};
   let v: Version | undefined;
   let kind: InstallKind | undefined;
   const launch = findClaude();
   if (launch && launch.kind !== "ps1") {
     const { out } = await captureClaude(L, undefined, ["--version"]);
-    ok(`claude: ${launch.bin} (${out.trim() || "version unknown"})`);
+    report.add("claude", "found", "ok", `claude: ${launch.bin} (${out.trim() || "version unknown"})`);
     let real = launch.bin;
     try {
       real = realpathSync(launch.bin);
     } catch {}
     kind = installKind(launch.bin, real, L.platform);
+    claude.bin = launch.bin;
+    claude.install = kind;
     if (launch.kind === "cmd")
-      console.log(
-        `${c.dim("·")} claude is the npm cmd shim and runs through cmd.exe; the native installer's claude.exe avoids that hop`,
+      report.add(
+        "claude",
+        "cmd-shim",
+        "info",
+        "claude is the npm cmd shim and runs through cmd.exe; the native installer's claude.exe avoids that hop",
       );
     v = parseVersion(out);
+    if (v) claude.version = v.join(".");
     const floor = parseVersion(MIN_CLAUDE_VERSION);
-    if (L.platform === "darwin" && v && floor && versionBelow(v, floor)) {
-      bad(
+    if (L.platform === "darwin" && v && floor && versionBelow(v, floor))
+      report.add(
+        "claude",
+        "too-old",
+        "fail",
         `Claude Code ${v.join(".")} is older than ${MIN_CLAUDE_VERSION}; every config dir shares one Keychain item there, so profiles cannot hold separate logins. Update Claude Code`,
+        { problem: true },
       );
-      problems++;
-    }
-  } else if (launch) bad(`only ${launch.bin} found; claudep needs claude.exe or claude.cmd`);
-  else bad("claude binary not found on PATH");
+  } else if (launch)
+    report.add("claude", "ps1-only", "fail", `only ${launch.bin} found; claudep needs claude.exe or claude.cmd`);
+  else report.add("claude", "missing", "fail", "claude binary not found on PATH");
   if (kind === "npm" || kind === "bun")
-    warn(
+    report.add(
+      "install",
+      kind,
+      "warn",
       `claude is ${kind === "npm" ? "an" : "a"} ${kind}-global install. Every profile runs its own auto-updater against it, and a reinstall removes claude while it runs, so a launch can find nothing (${NPM_RACE_ISSUE}). claudep run waits for an update it can see; the native installer swaps versions in one step: claude install`,
+      { fix: "claude install" },
     );
-  else if (kind) console.log(`${c.dim("·")} install: ${kind}`);
+  else if (kind) report.add("install", kind, "info", `install: ${kind}`);
   const all = findAllClaude();
   if (all.length > 1)
-    warn(
+    report.add(
+      "path",
+      "several-claude",
+      "warn",
       `more than one claude on PATH; the first one runs, and a later one starts if it goes missing: ${all.join(", ")}`,
     );
-  ok(`base: ${L.base}${L.callerConfigDir && !L.managed ? c.yellow("  (from CLAUDE_CONFIG_DIR in your shell)") : ""}`);
+  report.add(
+    "base",
+    "found",
+    "ok",
+    `base: ${L.base}${L.callerConfigDir && !L.managed ? "  (from CLAUDE_CONFIG_DIR in your shell)" : ""}`,
+  );
+  if (L.emptyConfigDir)
+    report.add("CLAUDE_CONFIG_DIR", "empty", "fail", EMPTY_CONFIG_DIR_MESSAGE, {
+      problem: true,
+      fix: "unset CLAUDE_CONFIG_DIR",
+    });
   const msysWarning = msysConfigDirWarning(L);
-  if (msysWarning) warn(msysWarning);
+  if (msysWarning) report.add("CLAUDE_CONFIG_DIR", "posix-path", "warn", msysWarning);
   const settingsFile = join(L.base, "settings.json");
   const pinnedInSettings = await settingsEnvConfigDir(settingsFile);
-  if (pinnedInSettings !== undefined) {
-    bad(
+  if (pinnedInSettings !== undefined)
+    report.add(
+      "settings.json",
+      "pins-config-dir",
+      "fail",
       `${settingsFile} sets env.CLAUDE_CONFIG_DIR (${pinnedInSettings}). Claude Code disables features when that differs from the active dir, which it does in every profile. Remove it; pin shells with claudep env or a ${PIN_FILE} file instead`,
+      { problem: true },
     );
-    problems++;
-  }
-  for (const v of authEnvOverrides(process.env, L.platform))
-    warn(`${v} is set in this shell; Claude Code uses it instead of the profile login, always in -p mode`);
-  ok(`profiles root: ${L.profilesRoot}`);
+  for (const name of authEnvOverrides(process.env, L.platform))
+    report.add(
+      name,
+      "set",
+      "warn",
+      `${name} is set in this shell; Claude Code uses it instead of the profile login, always in -p mode`,
+    );
+  report.add("profiles-root", "found", "ok", `profiles root: ${L.profilesRoot}`);
   const ask = authStatusSafe(v);
   if (launch && !ask)
-    warn(
+    report.add(
+      "claude",
+      "unsafe-auth-status",
+      "warn",
       `Claude Code ${v?.join(".") ?? "of unknown version"} can sign a profile out on a short \`claude auth status\` (${AUTH_STATUS_ISSUE}). claudep reads logins from .claude.json instead until Claude Code is ${SAFE_AUTH_STATUS_FROM} or newer: claude update`,
     );
   let updaters: string[] = [];
   const targets = updateTargets(await Promise.all(configDirs(L).map((d) => lastUpdate(d))));
-  if (await reportUpdates(L, undefined, v, targets)) updaters.push("default");
+  if (await reportUpdates(L, report, undefined, v, targets)) updaters.push("default");
 
   const shared = sharedItems(L.base);
   const sharedNames = new Set(shared.map((s) => s.name));
@@ -3036,98 +3783,222 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
         .filter((n) => !sharedNames.has(n) && !isKnownPrivate(n) && !n.endsWith(".md"))
         .sort()
     : [];
-  if (unclassified.length) {
-    warn(`base items neither shared nor known-private (they stay per-profile): ${unclassified.join(", ")}`);
-  }
+  if (unclassified.length)
+    report.add(
+      "base",
+      "unclassified",
+      "warn",
+      `base items neither shared nor known-private (they stay per-profile): ${unclassified.join(", ")}`,
+    );
   if (memoryWritesPrompt(v, shared))
-    warn(
+    report.add(
+      "auto-memory",
+      "prompts",
+      "warn",
       `Claude Code ${v?.join(".")} asks for approval on every auto-memory write in a profile, because projects/ is shared through a symlink; auto mode cannot approve it. claudep run and alias commands pass the real memory path and avoid it; plain claude in a hooked shell still asks. Known upstream bug: ${MEMORY_SYMLINK_ISSUE}`,
     );
 
   for (const name of names) {
     const dir = profileDir(L, name);
-    console.log(`\n${c.bold(name)}  ${c.dim(dir)}`);
+    const checks: Check[] = [];
+    profiles.push({ name, dir, checks });
+    report.section(checks);
+    report.say(`\n${c.bold(name)}  ${c.dim(dir)}`);
     if (!existsSync(dir)) {
-      bad("profile dir missing");
-      problems++;
+      report.add("profile", "missing", "fail", "profile dir missing", { problem: true });
       continue;
     }
+    const accepted = readAccepted(dir);
     let missing = 0;
     for (const item of shared) {
       const state = linkState(L.base, dir, item);
       if (state === "ok") continue;
-      problems++;
-      if (state === "missing") {
-        missing++;
-        warn(`${item.name}: not linked (run: claudep init ${name})`);
-      } else if (state === "shadowed") warn(`${item.name}: real ${item.kind} shadows the shared one`);
-      else if (state === "wrong-target")
-        bad(`${item.name}: symlink points elsewhere (${readlinkSync(join(dir, item.name))})`);
-      else bad(`${item.name}: broken symlink`);
+      if (state === "missing" && !accepted.has(item.name)) missing++;
+      reportLink(report, L, name, dir, item, state, accepted.has(item.name));
     }
     if (missing && L.platform === "win32")
-      console.log(
-        `${c.dim("·")} Windows creates symlinks only with Developer Mode on; claudep init ${name} says so when it is off`,
+      report.add(
+        "symlinks",
+        "windows",
+        "info",
+        `Windows creates symlinks only with Developer Mode on; claudep init ${name} says so when it is off`,
       );
-    ok(`${shared.length} shared item(s) checked`);
+    report.add("shared", "checked", "ok", `${shared.length} shared item(s) checked`);
     const strays = readdirSync(dir).filter((n) => !sharedNames.has(n) && !isKnownPrivate(n) && !n.endsWith(".md"));
-    if (strays.length) warn(`unexpected private items: ${strays.join(", ")}`);
-    for (const n of staleSharedLinks(L.base, dir, L.platform)) {
-      bad(
+    if (strays.length) report.add("private", "unexpected", "warn", `unexpected private items: ${strays.join(", ")}`);
+    for (const n of staleSharedLinks(L.base, dir, L.platform))
+      report.add(
+        n,
+        "stale-link",
+        "fail",
         `${n}: linked to the base by an older claudep, but it is per-profile state now. Remove the symlink: ${join(dir, n)}`,
+        { problem: true },
       );
-      problems++;
-    }
     const s = await loginOf(L, dir, ask);
+    const login = loginCommand(name, readLoginFlags(dir));
     if (L.platform === "darwin") {
       const svc = keychainService(dir);
-      if (await keychainHas(svc)) ok(`keychain item "${svc}" present`);
-      else warn(`no keychain item "${svc}". Not logged in yet (claudep ${name} auth login)`);
-    } else if (credentialsFileHas(dir)) ok(".credentials.json present");
+      if (await keychainHas(svc)) report.add("keychain", "present", "ok", `keychain item "${svc}" present`);
+      else
+        report.add("keychain", "absent", "warn", `no keychain item "${svc}". Not logged in yet (${login})`, {
+          fix: login,
+        });
+    } else if (credentialsFileHas(dir)) report.add("credentials", "present", "ok", ".credentials.json present");
     else if (s.loggedIn)
-      console.log(
-        `${c.dim("·")} no .credentials.json in the profile; Claude Code keeps this login elsewhere (on Windows, possibly Credential Manager)`,
+      report.add(
+        "credentials",
+        "elsewhere",
+        "info",
+        "no .credentials.json in the profile; Claude Code keeps this login elsewhere (on Windows, possibly Credential Manager)",
       );
-    else warn(`no .credentials.json in the profile. Not logged in yet (claudep ${name} auth login)`);
-    if (s.cached && s.loggedIn) ok(`last known account: ${s.email ?? "?"} (${s.orgName ?? "?"}), from .claude.json`);
-    else if (s.cached) warn("no account recorded in .claude.json");
-    else if (s.loggedIn) ok(`logged in as ${s.email ?? "?"} (${s.orgName ?? "?"}, ${s.subscriptionType ?? "?"})`);
-    else warn("not logged in");
+    else
+      report.add("credentials", "absent", "warn", `no .credentials.json in the profile. Not logged in yet (${login})`, {
+        fix: login,
+      });
+    if (s.cached && s.loggedIn)
+      report.add(
+        "login",
+        "cached",
+        "ok",
+        `last known account: ${s.email ?? "?"} (${s.orgName ?? "?"}), from .claude.json`,
+      );
+    else if (s.cached)
+      report.add("login", "cached-none", "warn", "no account recorded in .claude.json", { fix: login });
+    else if (s.loggedIn)
+      report.add(
+        "login",
+        "logged-in",
+        "ok",
+        `logged in as ${s.email ?? "?"} (${s.orgName ?? "?"}, ${s.subscriptionType ?? "?"})`,
+      );
+    else report.add("login", "logged-out", "warn", `not logged in (${login})`, { fix: login });
     if (s.configDirectory !== undefined) {
       if (samePath(canon(s.configDirectory, L.home, L.platform), dir, L.platform))
-        ok(`Claude Code reports this config dir`);
-      else {
-        bad(`Claude Code reports config dir ${s.configDirectory}, not ${dir}`);
-        problems++;
-      }
+        report.add("config-dir", "matches", "ok", "Claude Code reports this config dir");
+      else
+        report.add("config-dir", "differs", "fail", `Claude Code reports config dir ${s.configDirectory}, not ${dir}`, {
+          problem: true,
+        });
     }
-    if (s.apiKeySource) warn(`Claude Code uses an API key from ${s.apiKeySource} instead of the profile login`);
-    if (await reportUpdates(L, dir, v, targets)) updaters.push(name);
-    const env = readProfileEnv(dir);
-    if (env.vars.length) ok(`${ENV_FILE}: ${env.vars.map(([k]) => k).join(", ")}`);
-    const overlay = readProfileSettings(dir);
-    if (overlay.error) {
-      bad(`${join(dir, SETTINGS_FILE)}: ${overlay.error}; claudep run refuses to start this profile until it is fixed`);
-      problems++;
-    } else if (Object.keys(overlay.settings).length)
-      ok(`${SETTINGS_FILE}: ${Object.keys(overlay.settings).join(", ")} (claudep run and alias commands only)`);
-    if (env.skipped.length) {
-      bad(
-        `${join(dir, ENV_FILE)}: lines ${env.skipped.join(", ")} are not KEY=VALUE with an allowed name and a value; nothing reads them`,
+    const secure = secureStorageOverride(dir, process.env, L.home, L.platform);
+    if (secure !== undefined)
+      report.add(
+        SECURE_STORAGE_ENV,
+        "elsewhere",
+        "warn",
+        `${SECURE_STORAGE_ENV} is set in this shell, so Claude Code keeps this profile's login in ${secure}. Unset it`,
+        { fix: `unset ${SECURE_STORAGE_ENV}` },
       );
-      problems++;
-    }
+    if (s.apiKeySource)
+      report.add(
+        "login",
+        "api-key",
+        "warn",
+        `Claude Code uses an API key from ${s.apiKeySource} instead of the profile login`,
+      );
+    if (await reportUpdates(L, report, dir, v, targets)) updaters.push(name);
+    const env = readProfileEnv(dir);
+    if (env.vars.length) report.add(ENV_FILE, "read", "ok", `${ENV_FILE}: ${env.vars.map(([k]) => k).join(", ")}`);
+    const overlay = readProfileSettings(dir);
+    if (overlay.error)
+      report.add(
+        SETTINGS_FILE,
+        "broken",
+        "fail",
+        `${join(dir, SETTINGS_FILE)}: ${overlay.error}; claudep run refuses to start this profile until it is fixed`,
+        { problem: true },
+      );
+    else if (Object.keys(overlay.settings).length)
+      report.add(
+        SETTINGS_FILE,
+        "read",
+        "ok",
+        `${SETTINGS_FILE}: ${Object.keys(overlay.settings).join(", ")} (claudep run and alias commands only)`,
+      );
+    if (env.skipped.length)
+      report.add(
+        ENV_FILE,
+        "skipped-lines",
+        "fail",
+        `${join(dir, ENV_FILE)}: lines ${env.skipped.join(", ")} are not KEY=VALUE with an allowed name and a value; nothing reads them`,
+        { problem: true },
+      );
   }
-  if (!names.length) console.log(c.dim("\nNo profiles to check."));
-  if (args[0]) updaters = [];
+  if (!names.length) report.say(c.dim("\nNo profiles to check."));
+
+  report.section(aliases);
+  const deps = shimDeps(L);
+  const reported = new Set<string>();
+  for (const shim of findShims(deps.dirs, L.platform)) {
+    if (only && shim.profile !== only) continue;
+    const state = shimState(shim, deps);
+    // On Windows one alias is two files, x.cmd and x. Same finding, one check.
+    const finding = [shim.dir, shim.command, shim.profile, shim.target, state].join("|");
+    if (reported.has(finding)) continue;
+    reported.add(finding);
+    const rewrite = `claudep alias ${shim.profile} ${shim.command}`;
+    const lead = aliases.length ? undefined : "";
+    if (state === "missing-target")
+      report.add(
+        shim.command,
+        state,
+        "fail",
+        `alias ${shim.command} (${shim.path}) runs ${shim.target}, which is gone. Rewrite it: ${rewrite}`,
+        { problem: true, fix: rewrite, lead },
+      );
+    else if (state === "missing-profile")
+      report.add(
+        shim.command,
+        state,
+        "fail",
+        `alias ${shim.command} (${shim.path}) runs the profile "${shim.profile}", which does not exist. Create it (claudep init ${shim.profile}) or delete the file`,
+        { problem: true, fix: `claudep init ${shim.profile}`, lead },
+      );
+    else if (state === "other-target")
+      report.add(
+        shim.command,
+        state,
+        "warn",
+        `alias ${shim.command} (${shim.path}) runs another claudep: ${shim.target}. Point it at this one: ${rewrite}`,
+        { fix: rewrite, lead },
+      );
+    else if (state === "shadowed")
+      report.add(
+        shim.command,
+        state,
+        "warn",
+        `alias ${shim.command} (${shim.path}) never runs: an earlier PATH entry has the same name. Delete the file or fix PATH`,
+        { lead },
+      );
+  }
+
+  report.section(baseChecks);
+  if (only) updaters = [];
   if ((kind === "npm" || kind === "bun") && updaters.length > 1)
-    warn(
-      `\n${updaters.length} config dirs run the auto-updater against one ${kind} install (${updaters.join(", ")}). Leave it on in one: claudep vars <name> DISABLE_AUTOUPDATER=1 for each of the others`,
+    report.add(
+      "auto-update",
+      "several-updaters",
+      "warn",
+      `${updaters.length} config dirs run the auto-updater against one ${kind} install (${updaters.join(", ")}). Leave it on in one: claudep vars <name> DISABLE_AUTOUPDATER=1 for each of the others`,
+      { lead: "" },
     );
-  if (problems) {
-    console.log(`\n${c.red(`${problems} problem(s)`)}`);
-    process.exit(1);
-  }
+  if (json)
+    console.log(
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          claude,
+          base: { dir: L.base, checks: baseChecks },
+          profiles,
+          aliases,
+          problems: report.problems,
+        },
+        null,
+        2,
+      ),
+    );
+  else if (report.problems) console.log(`\n${c.red(`${report.problems} problem(s)`)}`);
+  if (report.problems) process.exit(1);
 }
 
 async function cmdRm(L: Layout, args: string[]): Promise<void> {
@@ -3175,18 +4046,8 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
   }
   rmSync(dir, { recursive: true, force: true });
   ok(`removed ${dir}`);
-  const shims = aliasDir();
-  for (const entry of readdirSync(shims)) {
-    const p = join(shims, entry);
-    try {
-      if (!lstatSync(p).isFile()) continue;
-      const txt = await Bun.file(p).text();
-      if (txt.includes("generated by claudep") && txt.includes(` run ${name} -- `))
-        warn(`alias shim ${p} still points at this profile. Remove it if unused`);
-    } catch {
-      /* ignore unreadable entries */
-    }
-  }
+  for (const shim of findShims(shimDirs(L), L.platform))
+    if (shim.profile === name) warn(`alias shim ${shim.path} still points at this profile. Remove it if unused`);
 }
 
 function help(L: Layout): void {
@@ -3201,7 +4062,7 @@ export function helpText(L: Layout): string {
 
 ${c.bold("USAGE")}
   claudep <name> [claude args…]        run claude with profile <name>  (alias for "run")
-  claudep init <name> [options]        create/update a profile and log in
+  claudep init <name> [options]        create/update a profile; logs in when it has no login yet
   claudep list [--json] [--live]       show every profile and who it is logged in as
   claudep status <name> [--json] [--live]   login state for one profile ("default" = ~/.claude);
                                        before Claude Code 2.1.301 both read .claude.json unless --live
@@ -3210,7 +4071,8 @@ ${c.bold("USAGE")}
                                        --shell sh|fish|powershell picks the syntax when the shell was not detected
   claudep vars <name> [KEY=VALUE…]     list or set the variables the profile exports; --unset KEY… removes,
                                        --json lists as JSON
-  claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
+  claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"; rewrites one claudep wrote
+  claudep alias [--json]               list every shim on PATH and its state
   claudep settings <name> [key=value…] settings claudep run gives <name> on top of the shared settings.json
                                        (values are JSON or a string); --unset key…, --json
   claudep handoff <name> [session-id]  resume this directory's latest session under <name>, as a fork;
@@ -3219,7 +4081,8 @@ ${c.bold("USAGE")}
                                        Claude Code 2.1.301+, else last seen (--live asks, --cached never does)
   claudep statusline                   pipe the statusline JSON in: prints "work · 5h 23% · 7d 41%" and
                                        remembers the numbers for claudep usage
-  claudep doctor [name]                verify symlinks, keychain entry, unclassified files, Claude Code version
+  claudep doctor [name] [--json]       verify symlinks, keychain entry, unclassified files, shims, Claude Code version
+  claudep doctor --accept <name> <item>   stop counting one shared item as a problem; --unaccept undoes it
   claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
   claudep help                         show this text
   claudep --version                    print the version
@@ -3241,7 +4104,9 @@ ${c.bold("INIT OPTIONS")}
   --copy-mcp          copy user-scope MCP servers from the base .claude.json
   --alias <command>   also create a shim command, e.g. --alias eclaude
   --env KEY=VALUE     a variable the profile exports, as with claudep vars; repeat for more
-  --no-login          set up files only; log in later with: claudep <name> auth login
+  --no-login          set up files only; log in later with the command it prints
+  A signed-in profile skips the login unless you pass --sso, --console or --email. Login flags are
+  remembered in <profile>/claudep.login, so the next login uses them.
   --force             relink shared items whose symlinks point elsewhere
 
 ${c.bold("EXAMPLES")}
@@ -3266,6 +4131,8 @@ ${c.bold("HOW IT WORKS")}
     ${[...SHARED_FILES, "*.md", ...SHARED_DIRS].join("  ")}
   Everything account-specific is real and per profile: .claude.json (login identity, MCP
   servers, folder trust), org-pushed remote-settings.json, history, todos, caches.
+  "claudep <name>" links any of the listed files and directories the profile is missing before it
+  starts claude, except a *.md outside that list, which waits for claudep init.
   On macOS credentials never touch the profile dir: Claude Code stores them in the Keychain under
   "Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[0:8]>", so every profile has its own
   login and refresh token and they cannot clobber each other. On Linux and Windows the login is
@@ -3280,12 +4147,13 @@ ${c.bold("PIN RULES")}
 ${c.bold("PROFILE VARIABLES")}
   <profile>/${ENV_FILE} holds KEY=VALUE lines that "claudep <name>", "claudep env" and the hook
   export with the profile, e.g. CLAUDE_CODE_USE_BEDROCK=1 or ANTHROPIC_PROFILE=work. It is read as
-  data, never run. A variable you set yourself always wins. CLAUDE_CONFIG_DIR, CLAUDEP_* and
-  credential variables are refused.
+  data, never run. A variable you set yourself always wins. CLAUDE_CONFIG_DIR,
+  CLAUDE_SECURESTORAGE_CONFIG_DIR, CLAUDEP_* and credential variables are refused.
 
 ${c.bold("ENVIRONMENT")}
   CLAUDE_PROFILES_DIR   where profiles live (default ~/.claudep; keep it out of iCloud/Dropbox)
   CLAUDEP_AUTO          set by the hook next to CLAUDE_CONFIG_DIR; marks the pin as hook-managed
+  CLAUDEP_MANAGED_DIR   where doctor reads managed settings (default ${managedSettingsDir(L.platform)})
   ${ENV_KEYS_VAR}      the variables a ${ENV_FILE} put in this shell, cleared again on leaving
 
 ${c.dim("claudep is an independent, unofficial tool. It is not affiliated with, endorsed by or supported by Anthropic.")}

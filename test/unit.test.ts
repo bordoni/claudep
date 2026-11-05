@@ -4,11 +4,13 @@ import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import {
   AUTH_ENV,
+  aliasShim,
   authEnvOverrides,
   authStatusSafe,
   baseEnv,
   COMMANDS,
   COMPLETION_SHELLS,
+  CREDENTIAL_ENV,
   cachedAuthStatus,
   canon,
   commandWords,
@@ -35,11 +37,14 @@ import {
   homeDir,
   hookHint,
   isInside,
+  isKnownPrivate,
   isMsysPath,
   keychainService,
   layout,
+  loginCommand,
   MEMORY_SYMLINK_PROMPT_FROM,
   MIN_CLAUDE_VERSION,
+  managedSettingsDir,
   memoryWritesPrompt,
   NAME_RE,
   onPath,
@@ -48,7 +53,9 @@ import {
   parseAuthStatus,
   parseEnvFile,
   parseFlags,
+  parseLoginFlags,
   parseSettingEntry,
+  parseShim,
   parseVersion,
   pathKey,
   projectSlug,
@@ -61,11 +68,17 @@ import {
   runSettings,
   SHELLS,
   type Shell,
+  type Shim,
+  type ShimDeps,
   samePath,
+  secureStorageOverride,
   settingsEnvConfigDir,
+  settingsKeyDiff,
+  shareFixCommand,
   shellInit,
   shellNameOf,
   shellSyntax,
+  shimState,
   shortHome,
   splitPathVar,
   toNativePath,
@@ -232,6 +245,8 @@ describe("layout", () => {
   test("defaults everything under HOME", () => {
     const L = layout({ HOME: "/home/me" }, "linux");
     expect(L).toEqual({
+      emptyConfigDir: false,
+      managedDir: "/etc/claude-code",
       platform: "linux",
       home: "/home/me",
       callerConfigDir: undefined,
@@ -280,6 +295,8 @@ describe("layout on win32", () => {
   test("defaults everything under USERPROFILE with backslashes", () => {
     const L = layout({ USERPROFILE: "C:\\Users\\me" }, "win32");
     expect(L).toEqual({
+      emptyConfigDir: false,
+      managedDir: "C:\\Program Files\\ClaudeCode",
       platform: "win32",
       home: "C:\\Users\\me",
       callerConfigDir: undefined,
@@ -1148,5 +1165,175 @@ describe("settings overlay helpers", () => {
     expect(refusedSettingKey("model")).toBeUndefined();
     expect(refusedSettingKey("env")).toContain("claudep vars");
     expect(refusedSettingKey("1x")).toContain("not a settings key");
+  });
+});
+
+describe("login flags", () => {
+  test("parseLoginFlags keeps only what claudep writes", () => {
+    expect(parseLoginFlags("--sso --email me@corp.example\n")).toEqual(["--sso", "--email", "me@corp.example"]);
+    expect(parseLoginFlags("--console")).toEqual(["--console"]);
+    expect(parseLoginFlags("")).toEqual([]);
+    expect(parseLoginFlags("--email $(rm) --force; --sso")).toEqual(["--sso"]);
+    expect(parseLoginFlags("--email")).toEqual([]);
+  });
+
+  test("loginCommand prints the full command", () => {
+    expect(loginCommand("work", [])).toBe("claudep work auth login");
+    expect(loginCommand("work", ["--sso", "--email", "a@b.c"])).toBe("claudep work auth login --sso --email a@b.c");
+  });
+
+  test("claudep's files are private", () => {
+    for (const f of ["claudep.login", "claudep.doctor", "claudep.env", "claudep.settings.json"])
+      expect(isKnownPrivate(f)).toBe(true);
+  });
+});
+
+describe("credential variables", () => {
+  test("every one is refused, in any case, and paths and file descriptors are not", () => {
+    for (const k of CREDENTIAL_ENV) {
+      expect(refusedEnvKey(k)).toContain("never stores credentials");
+      expect(refusedEnvKey(k.toLowerCase())).toContain("never stores credentials");
+    }
+    expect(CREDENTIAL_ENV).toContain("CLAUDE_CODE_OAUTH_REFRESH_TOKEN");
+    expect(CREDENTIAL_ENV).toContain("MCP_CLIENT_SECRET");
+    expect(refusedEnvKey("CLAUDE_SECURESTORAGE_CONFIG_DIR")).toContain("moves the profile's login");
+    for (const k of ["ANTHROPIC_IDENTITY_TOKEN_FILE", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "AWS_PROFILE"])
+      expect(refusedEnvKey(k)).toBeUndefined();
+  });
+
+  test("the hook patterns cover the whole list", () => {
+    const re = new RegExp(refusedEnvRegex(), "i");
+    for (const k of [...CREDENTIAL_ENV, "CLAUDE_SECURESTORAGE_CONFIG_DIR"]) {
+      expect(re.test(k)).toBe(true);
+      expect(refusedEnvCase()).toContain(k.replace(/[A-Za-z]/g, (ch) => `[${ch.toUpperCase()}${ch.toLowerCase()}]`));
+    }
+    expect(refusedEnvRegex()).not.toContain("(");
+  });
+
+  test("AUTH_ENV stays the list that overrides the login", () => {
+    expect(authEnvOverrides({ CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "x" }, "linux")).toEqual([]);
+    expect(authEnvOverrides({ ANTHROPIC_API_KEY: "x" }, "linux")).toEqual(["ANTHROPIC_API_KEY"]);
+  });
+
+  test("secureStorageOverride names where the login went", () => {
+    const f = (env: Record<string, string>, platform: NodeJS.Platform = "linux") =>
+      secureStorageOverride(
+        platform === "win32" ? "C:\\p\\work" : "/p/work",
+        env,
+        platform === "win32" ? "C:\\h" : "/h",
+        platform,
+      );
+    expect(f({})).toBeUndefined();
+    expect(f({ CLAUDE_SECURESTORAGE_CONFIG_DIR: "/p/work" })).toBeUndefined();
+    expect(f({ CLAUDE_SECURESTORAGE_CONFIG_DIR: "/p/work/" })).toBeUndefined();
+    expect(f({ CLAUDE_SECURESTORAGE_CONFIG_DIR: "/other" })).toBe("/other");
+    expect(f({ CLAUDE_SECURESTORAGE_CONFIG_DIR: "" })).toBe("/h/.claude");
+    expect(f({ claude_securestorage_config_dir: "/other" })).toBeUndefined();
+    expect(f({ claude_securestorage_config_dir: "D:\\x" }, "win32")).toBe("D:\\x");
+    expect(f({ CLAUDE_SECURESTORAGE_CONFIG_DIR: "c:\\P\\WORK" }, "win32")).toBeUndefined();
+  });
+});
+
+describe("an empty CLAUDE_CONFIG_DIR", () => {
+  test("is its own state in layout, never the current directory", () => {
+    const L = layout({ HOME: "/home/me", CLAUDE_CONFIG_DIR: "" }, "linux");
+    expect(L.emptyConfigDir).toBe(true);
+    expect(L.callerConfigDir).toBeUndefined();
+    expect(L.base).toBe("/home/me/.claude");
+    expect(L.baseGlobalJson).toBe("/home/me/.claude.json");
+    expect(L.managed).toBe(false);
+    expect(layout({ HOME: "/home/me" }, "linux").emptyConfigDir).toBe(false);
+  });
+
+  test("baseEnv drops it so a base call means the base", () => {
+    const L = layout({ HOME: "/home/me", CLAUDE_CONFIG_DIR: "" }, "linux");
+    expect(baseEnv(L, { HOME: "/home/me", CLAUDE_CONFIG_DIR: "" }).CLAUDE_CONFIG_DIR).toBeUndefined();
+  });
+});
+
+describe("managed settings location", () => {
+  test("is fixed per platform and redirected only by CLAUDEP_MANAGED_DIR", () => {
+    expect(managedSettingsDir("linux")).toBe("/etc/claude-code");
+    expect(managedSettingsDir("darwin")).toBe("/Library/Application Support/ClaudeCode");
+    expect(managedSettingsDir("win32")).toBe("C:\\Program Files\\ClaudeCode");
+    expect(layout({ HOME: "/h" }, "linux").managedDir).toBe("/etc/claude-code");
+    expect(layout({ HOME: "/h", CLAUDEP_MANAGED_DIR: "/t/m" }, "linux").managedDir).toBe("/t/m");
+  });
+});
+
+describe("shims", () => {
+  test("parseShim reads both shim kinds and refuses other files", () => {
+    expect(parseShim(aliasShim("sh", "/x/claudep.ts", "work"))).toEqual({ target: "/x/claudep.ts", profile: "work" });
+    expect(parseShim(aliasShim("cmd", "C:\\x\\claudep.ts", "work"))).toEqual({
+      target: "C:\\x\\claudep.ts",
+      profile: "work",
+    });
+    expect(parseShim('#!/bin/sh\nexec bun "/x" run work -- "$@"\n')).toBeUndefined();
+    expect(parseShim("# generated by claudep, edited by hand\n")).toBeUndefined();
+  });
+
+  const shim: Shim = { command: "ew", profile: "work", target: "/x/claudep.ts", path: "/b/ew", dir: "/b", kind: "sh" };
+  const deps = (over: Partial<ShimDeps> = {}): ShimDeps => ({
+    dirs: ["/a", "/b"],
+    self: "/x/claudep.ts",
+    platform: "linux",
+    exists: (p) => p === "/x/claudep.ts" || p === "/b/ew",
+    profileExists: () => true,
+    realpath: (p) => p,
+    ...over,
+  });
+
+  test("shimState names the worst thing first", () => {
+    expect(shimState(shim, deps())).toBe("ok");
+    expect(shimState(shim, deps({ exists: () => false }))).toBe("missing-target");
+    expect(shimState(shim, deps({ profileExists: () => false }))).toBe("missing-profile");
+    expect(shimState(shim, deps({ self: "/y/claudep.ts" }))).toBe("other-target");
+    expect(shimState(shim, deps({ realpath: () => "/y/claudep.ts", self: "/y/claudep.ts" }))).toBe("ok");
+    const shadow = (p: string) => p === "/x/claudep.ts" || p === "/a/ew";
+    expect(shimState(shim, deps({ exists: shadow }))).toBe("shadowed");
+    expect(shimState(shim, deps({ exists: shadow, dirs: ["/b", "/a"] }))).toBe("ok");
+  });
+
+  test("on win32 a .cmd or .exe earlier on PATH shadows too", () => {
+    const win: Shim = { ...shim, target: "C:\\x\\claudep.ts", path: "C:\\b\\ew.cmd", dir: "C:\\b", kind: "cmd" };
+    const d = (hit: string) =>
+      deps({
+        dirs: ["C:\\a", "C:\\b"],
+        self: "c:\\X\\claudep.ts",
+        platform: "win32",
+        exists: (p) => p === "C:\\x\\claudep.ts" || p === hit,
+      });
+    expect(shimState(win, d("C:\\none"))).toBe("ok");
+    expect(shimState(win, d("C:\\a\\ew.exe"))).toBe("shadowed");
+    expect(shimState(win, d("C:\\a\\ew.cmd"))).toBe("shadowed");
+  });
+});
+
+describe("shareFixCommand", () => {
+  test("quotes only what needs it, for each shell", () => {
+    expect(shareFixCommand("/h/p/skills", "work", false)).toBe(
+      "mv /h/p/skills /h/p/skills.old && claudep init work --no-login",
+    );
+    expect(shareFixCommand("/h/my dir/it's", "work", false)).toBe(
+      "mv '/h/my dir/it'\\''s' '/h/my dir/it'\\''s.old' && claudep init work --no-login",
+    );
+    expect(shareFixCommand("C:\\Users\\me\\p", "work", true)).toBe(
+      "Move-Item 'C:\\Users\\me\\p' 'C:\\Users\\me\\p.old'; claudep init work --no-login",
+    );
+  });
+});
+
+describe("settingsKeyDiff", () => {
+  test("names the top-level keys that differ and those claudep settings can carry", () => {
+    const base = JSON.stringify({ model: "a", env: { A: "1" }, gone: true, same: { x: [1] } });
+    const mine = JSON.stringify({ model: "b", env: { A: "2" }, extra: 1, same: { x: [1] } });
+    expect(settingsKeyDiff(base, mine)).toEqual({
+      differ: ["env", "extra", "gone", "model"],
+      carry: ["extra", "model"],
+    });
+    expect(settingsKeyDiff("{}", "{}")).toEqual({ differ: [], carry: [] });
+    expect(settingsKeyDiff("{not", "{}")).toBeUndefined();
+    expect(settingsKeyDiff("[]", "{}")).toBeUndefined();
+    expect(settingsKeyDiff(undefined, "{}")).toBeUndefined();
   });
 });

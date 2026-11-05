@@ -46,6 +46,8 @@ The base `.claude.json` lives at `~/.claude.json` when `CLAUDE_CONFIG_DIR` is un
 
 `claudep.env` is claudep's own per-profile file of variables (see `design-decisions.md`, 2026-10-05). It is in `KNOWN_PRIVATE` so `doctor` never calls it a stray, and it never exists in the base.
 
+`claudep.login` (the login flags `init` was given: `--sso`, `--console`, `--email <addr>`, never a credential) and `claudep.doctor` (the shared items `doctor --accept` records) are the same kind of file, added in 0.8.0.
+
 ## Classifying a new file
 
 When `doctor` reports an unclassified base item, ask in order:

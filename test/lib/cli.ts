@@ -4,6 +4,7 @@
  */
 import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
+import { findShims, splitPathVar } from "../../claudep.ts";
 
 export const REPO = resolve(import.meta.dir, "..", "..");
 export const SCRIPT = join(REPO, "claudep.ts");
@@ -38,6 +39,12 @@ export function fakeBin(home: string, opts: { withClaudep?: boolean } = {}): str
   return bin;
 }
 
+/** The developer's PATH without any directory holding real claudep shims, so
+ *  `alias` and `doctor` only ever see the ones a test wrote. */
+const HOST_PATH = splitPathVar(process.env.PATH ?? "")
+  .filter((dir) => findShims([dir]).length === 0)
+  .join(delimiter);
+
 export type CliResult = { exitCode: number; stdout: string; stderr: string };
 
 export type RunOptions = {
@@ -63,7 +70,8 @@ export async function runCli(args: string[], opts: RunOptions): Promise<CliResul
   const env: Record<string, string | undefined> = { ...process.env };
   setEnv(env, "HOME", opts.home);
   setEnv(env, "USERPROFILE", opts.home);
-  setEnv(env, "PATH", `${bin}${delimiter}${process.env.PATH ?? ""}`);
+  setEnv(env, "PATH", `${bin}${delimiter}${HOST_PATH}`);
+  setEnv(env, "CLAUDEP_MANAGED_DIR", join(opts.home, "no-managed-settings"));
   setEnv(env, "NO_COLOR", "1");
   setEnv(env, "CLAUDE_CONFIG_DIR", undefined);
   setEnv(env, "CLAUDE_PROFILES_DIR", undefined);
