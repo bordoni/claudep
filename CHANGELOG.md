@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-05
+
 ### Added
 
 - `claudep alias` lists every shim claudep wrote on PATH, with its profile, target and state: `ok`, `missing-target`, `other-target`, `missing-profile` or `shadowed`. `--json` prints the same rows.
@@ -185,7 +187,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
-[Unreleased]: https://github.com/bordoni/claudep/compare/0.7.1...HEAD
+[Unreleased]: https://github.com/bordoni/claudep/compare/0.8.0...HEAD
+[0.8.0]: https://github.com/bordoni/claudep/compare/0.7.1...0.8.0
 [0.7.1]: https://github.com/bordoni/claudep/compare/0.7.0...0.7.1
 [0.7.0]: https://github.com/bordoni/claudep/compare/0.6.0...0.7.0
 [0.6.0]: https://github.com/bordoni/claudep/compare/0.5.0...0.6.0
