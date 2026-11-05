@@ -53,18 +53,20 @@ Two things differ from macOS:
 
 ```
 claudep <name> [claude args…]        run claude with profile <name>
-claudep init <name> [options]        create/update a profile and log in
+claudep init <name> [options]        create/update a profile; logs in when it has no login yet
 claudep list [--json] [--live]       every profile and who it is logged in as
 claudep status <name> [--json] [--live]   login state for one profile ("default" = ~/.claude)
 claudep env <name> [--shell <sh>]    print the CLAUDE_CONFIG_DIR pin for eval, source or Invoke-Expression
 claudep vars <name> [KEY=VALUE…]     list or set the variables a profile exports (see below)
-claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"
+claudep alias <name> <command>       write a shim so "<command>" == "claudep <name>"; rewrites one claudep wrote
+claudep alias [--json]               list every shim on PATH and its state
 claudep settings <name> [key=value…] settings one profile gets on top of the shared settings.json (see below)
 claudep handoff <name> [session-id]  carry this directory's latest session on under another profile
 claudep usage [name…] [--json]       five-hour and weekly usage for every profile
 claudep statusline                   statusline segment with the profile and its usage (reads stdin)
 claudep current [--json|--name]      which profile this shell is on, and why
-claudep doctor [name]                verify symlinks, keychain entry, unclassified files, Claude Code version
+claudep doctor [name] [--json]       verify symlinks, keychain entry, unclassified files, shims, Claude Code version
+claudep doctor --accept <name> <item>   stop counting one shared item as a problem; --unaccept undoes it
 claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
 claudep local <name> | --remove      pin the current directory tree to a profile (see below)
 claudep resolve [dir]                print the profile pinned for a directory
@@ -74,6 +76,31 @@ claudep --version
 ```
 
 `init` options: `--sso`, `--email <addr>`, `--console`, `--copy-mcp`, `--alias <command>`, `--env KEY=VALUE` (repeatable), `--no-login`, `--force`. Run `claudep help` for the full text.
+
+`claudep init` on a profile that is already signed in does not start a login. Pass `--sso`, `--console` or `--email` to log in again, or run `claudep <name> auth login`. Login flags are saved in `<profile>/claudep.login`, even with `--no-login`, so the next `init` logs in the same way and `claudep status`, `doctor` and `init --no-login` print the full command.
+
+## Keeping profiles in sync
+
+`claudep <name>`, `claudep run` and alias commands link any shared file or directory the profile is missing before they start claude, and say so on stderr: `claudep: linked CLAUDE.md into work`. That covers `CLAUDE.md`, `settings.json`, `keybindings.json`, `statusline-command.sh` and the shared directories when they appear in `~/.claude` after `init`. Other top-level `*.md` files wait for `claudep init <name>`, because a new one could be per-instance state. A launch never replaces a real file or directory, and a failed link never stops claude from starting. It adds no links when your shell sets `CLAUDE_CONFIG_DIR` to a directory outside the profiles root, or when every shared link in the profile points at another base.
+
+`claudep doctor` explains a real item that hides the shared one. For a directory it counts what links into the base and names what only the profile has. For `settings.json` it lists the top-level keys that differ, by name only, and which ones `claudep settings` can carry. Both print the commands that share it:
+
+```sh
+mv ~/.claudep/work/skills ~/.claudep/work/skills.old && claudep init work --no-login
+```
+
+When the difference is what you want, say so and doctor stops counting it. The choice lives in `<profile>/claudep.doctor`:
+
+```sh
+claudep doctor --accept work settings.json     # shown as info, exit 0
+claudep doctor --unaccept work settings.json   # a problem again
+```
+
+A launch and `claudep init` leave an accepted item as it is; `claudep init --force` links it anyway.
+
+`claudep doctor --json` prints `{schemaVersion, claude, base, profiles, aliases, problems}`, each check as `{item, state, level, message, fix?, problem}`, with the same exit code as the text output: 1 when `problems` is above zero.
+
+`claudep alias` lists every shim on PATH with its profile, target and state: `ok`, `missing-target`, `other-target`, `missing-profile` or `shadowed`. `claudep alias <name> <command>` rewrites a shim claudep wrote, in the directory it already sits in, and leaves any other file alone, including a symlink. The names `claude` and `claudep` are refused. `claudep doctor` fails on a shim that cannot start and warns on one that runs another claudep, with the command that fixes it. After switching how claudep is installed, run the `claudep alias` line it prints for each one.
 
 ## Pin a profile to a directory
 
@@ -126,7 +153,7 @@ They live in `~/.claudep/<name>/claudep.env`, one `KEY=VALUE` per line. `claudep
 
 - A variable you set yourself always wins. The hook and `claudep env` leave it alone, and `claudep <name>` passes your value.
 - `CLAUDEP_ENV_KEYS` lists what a `claudep.env` put in the shell, so moving to another pinned profile or running `claudep env --unset` clears exactly those.
-- `CLAUDE_CONFIG_DIR`, `CLAUDEP_*`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` are refused. claudep never stores credentials.
+- `CLAUDE_CONFIG_DIR`, `CLAUDE_SECURESTORAGE_CONFIG_DIR`, `CLAUDEP_*` and the credential variables in `CREDENTIAL_ENV` are refused, including `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `MCP_CLIENT_SECRET`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` and `AWS_BEARER_TOKEN_BEDROCK`. claudep does not store Claude Code's credentials. General-purpose tokens such as `GITHUB_TOKEN` are not on the list. Variables that hold a path or a profile name, such as `AWS_PROFILE` or `ANTHROPIC_IDENTITY_TOKEN_FILE`, are fine. A refused line in an existing file is skipped, and `claudep <name>`, `claudep env`, `claudep vars` and `claudep doctor` name its line number.
 - Values are one line, not empty, with no spaces at either end. `claudep vars` edits the file in place and keeps your comments. `claudep doctor` lists each profile's variable names and reports lines nothing reads.
 - A shell that is already inside a pinned tree picks up a change on the next `cd`.
 
@@ -216,7 +243,7 @@ claudep handoff work -- -p "go on"      # anything after -- goes to claude
 Install Claude Code with the native installer when you use profiles. Each profile is its own config dir, so each runs its own auto-updater. With the native installer an update unpacks a new version and swaps one symlink, so `claude` is always there. With an npm or bun global install every profile reinstalls the same package, and `claude` is gone while the reinstall runs ([anthropics/claude-code#93197](https://github.com/anthropics/claude-code/issues/93197)). Move with `claude install`.
 
 - `claudep <name>`, `claudep run` and alias commands wait when `claude` is missing: up to five minutes while any config dir holds a fresh `.update.lock`, five seconds otherwise.
-- `claudep doctor` names the install method, every `claude` on PATH, whether each config dir runs the updater and why, and each one's last update. On npm or bun it warns when more than one config dir updates. Leave one on and turn the rest off with `claudep vars <name> DISABLE_AUTOUPDATER=1`.
+- `claudep doctor` names the install method, every `claude` on PATH, whether each config dir runs the updater and why, including `env` in managed settings (`managed-settings.json` and `managed-settings.d/`), and each one's last update. On npm or bun it warns when more than one config dir updates. Leave one on and turn the rest off with `claudep vars <name> DISABLE_AUTOUPDATER=1`.
 - `DISABLE_AUTOUPDATER=1` in the shared `settings.json` `env` turns the updater off in every profile at once. `claude update` still works by hand.
 
 ## How it works
@@ -246,6 +273,9 @@ The shared list is an allowlist, so an account-specific file cannot leak across 
 - Set `CLAUDE_PROFILES_DIR` to move the profiles root. Keep it out of iCloud or Dropbox; `.claude.json` is rewritten constantly and sync tools create conflict copies.
 - Never put `CLAUDE_CONFIG_DIR` in a `settings.json` `env` block. Claude Code detects that mismatch and disables features; `claudep doctor` reports it.
 - `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` override the login in any config dir, always in `-p` mode. `claudep <name>` and `claudep doctor` warn when one is set and leave it alone. `claudep doctor` also names the key source Claude Code reports, and fails when Claude Code reports a config dir other than the profile's.
+- `CLAUDE_SECURESTORAGE_CONFIG_DIR` moves Claude Code's credential store away from the config dir, so one inherited value puts every profile on one login. `claudep <name>`, `claudep run`, alias commands and `claudep doctor` warn when it is set to anything but the profile dir.
+- An empty `CLAUDE_CONFIG_DIR` makes Claude Code use the current directory as its config dir ([anthropics/claude-code#104629](https://github.com/anthropics/claude-code/issues/104629)). `claudep current`, `claudep run default` and `claudep doctor` stop on it and tell you to run `unset CLAUDE_CONFIG_DIR`. Running a named profile still works, because claudep sets the variable itself.
+- With `--add-dir ~/.claude/projects`, Claude Code also loads `~/.claude/CLAUDE.md` as project instructions through the parent walk. Once `CLAUDE.md` is linked into a profile, that session loads it twice. Narrow the `--add-dir` to the folder you need.
 - `claudep doctor` fails on macOS when Claude Code is older than 2.1.144, the first build whose Keychain item is namespaced per config dir.
 - Before Claude Code 2.1.301 a short `claude auth status` can spend a profile's refresh token and sign it out ([anthropics/claude-code#95822](https://github.com/anthropics/claude-code/issues/95822)). On those versions `claudep list`, `status` and `doctor` show the account recorded in the profile's `.claude.json`, marked `*`, and do not ask Claude Code. `--live` asks anyway. Update Claude Code to get live answers back.
 

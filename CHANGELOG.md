@@ -6,6 +6,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- `claudep alias` lists every shim claudep wrote on PATH, with its profile, target and state: `ok`, `missing-target`, `other-target`, `missing-profile` or `shadowed`. `--json` prints the same rows.
+- `claudep doctor --json` prints `{schemaVersion, claude, base, profiles, aliases, problems}` with one object per check. The exit code matches the text output. It used to fail with `invalid profile name "--json"`.
+- `claudep doctor --accept <name> <item>` records one intended difference in `<profile>/claudep.doctor`. It prints as info and stops counting as a problem, so a customised setup can reach exit 0, and a launch or a plain `claudep init` leaves the item as it is. `--unaccept` undoes it.
+- `claudep doctor` checks every shim on PATH: a shim whose target or profile is gone fails, one that runs another claudep or sits behind an earlier PATH entry warns, each with the command that fixes it.
+- `claudep doctor` explains a real item that hides the shared one: how many entries link into the base and what only the profile has, or for `settings.json` the top-level keys that differ (names only) and which ones `claudep settings` can carry, followed by the commands that share it or keep it.
+- `claudep doctor` reads the `env` in managed settings (`managed-settings.json`, then `managed-settings.d/*.json` in sorted order) as the strongest source when it decides whether the auto-updater runs. Server-managed settings, the macOS plist and the Windows registry are not read. `CLAUDEP_MANAGED_DIR` points it at another folder.
+
+### Changed
+
+- `claudep <name>`, `claudep run` and alias commands now create symlinks inside the profile: before starting claude they link any file in `SHARED_FILES` or directory in `SHARED_DIRS` that the base has and the profile lacks, and print `claudep: linked CLAUDE.md into work` to stderr. So a `CLAUDE.md` added to `~/.claude` after `init` now reaches every profile. Other top-level `*.md` files still wait for `claudep init`, a real file or directory is never replaced, a failed link never stops the launch, and neither a shell with a custom `CLAUDE_CONFIG_DIR` nor a profile built on another base gets new links. `claudep doctor` says `not linked yet; the next claudep run links it`.
+- `claudep init <name>` on a profile that already has a login no longer starts one, so the `claudep init` that `doctor` suggests is safe to run. Pass `--sso`, `--console` or `--email` to log in again.
+- `claudep init` saves its login flags in `<profile>/claudep.login`, even with `--no-login`, and a later plain `init` logs in with them. The `Next:` line, `claudep status` and `claudep doctor` print the full command, such as `claudep work auth login --sso --email you@company.com`.
+- `claudep alias <name> <command>` rewrites a shim claudep wrote, in the directory it already sits in, instead of refusing it. A file claudep did not write is still left alone.
+
+### Fixed
+
+- `claudep alias` no longer writes through a symlink. `claudep alias work claudep` used to overwrite `claudep.ts` itself, and any existing symlink's target could be replaced the same way. A symlink is now left alone like any other file claudep did not write, the names `claude` and `claudep` are refused, and a file it cannot write is a message rather than a stack trace.
+- An empty `CLAUDE_CONFIG_DIR` no longer makes claudep treat the current directory as the base. `claudep current`, `claudep run default` and `claudep doctor` stop on it with the fix, `unset CLAUDE_CONFIG_DIR`, because Claude Code would use the current directory as its config dir ([anthropics/claude-code#104629](https://github.com/anthropics/claude-code/issues/104629)).
+
+### Security
+
+- **Breaking:** `claudep vars`, `claudep init --env` and every shell hook refuse more of the credential variables Claude Code 2.1.318 reads, such as `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `MCP_CLIENT_SECRET`, `AWS_SECRET_ACCESS_KEY` and `AWS_BEARER_TOKEN_BEDROCK`. An existing `claudep.env` line with one is skipped, and `claudep <name>`, `claudep env` and `claudep doctor` name the line. Names that hold a path or a file descriptor stay allowed.
+- **Breaking:** `claudep.env` refuses `CLAUDE_SECURESTORAGE_CONFIG_DIR`, which moves a profile's login out of the profile. `claudep <name>`, `claudep run`, alias commands and `claudep doctor` warn when the variable is inherited and names another directory.
+
 ## [0.7.1] - 2026-10-28
 
 ### Changed

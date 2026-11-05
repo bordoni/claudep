@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -8,12 +9,22 @@ import {
   readFileSync,
   readlinkSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
-import { aliasFiles, envScript, fishQuote, keychainService, projectSlug, SHELLS } from "../claudep.ts";
+import { delimiter, dirname, join } from "node:path";
+import {
+  aliasFiles,
+  aliasShim,
+  envScript,
+  fishQuote,
+  keychainService,
+  projectSlug,
+  SHELLS,
+  shareFixCommand,
+} from "../claudep.ts";
 import { fakeBin, REPO, runCli, SCRIPT } from "./lib/cli.ts";
 import { BASE_DIRS, BASE_FILES, fakeHome, PRIVATE_DIRS, PRIVATE_FILES, writeLogin } from "./lib/home.ts";
 import { norm, rx, tilde } from "./lib/paths.ts";
@@ -1348,5 +1359,533 @@ describe("settings", () => {
     expect(doc.exitCode).toBe(1);
     expect(doc.stdout).toContain("claudep run refuses to start this profile");
     expect(doc.stdout).not.toContain("unexpected private items");
+  });
+});
+
+/** Mark a profile as logged in the way Claude Code leaves it on this platform:
+ *  an account in .claude.json plus the credential file, or the Keychain item
+ *  the fake `security` answers for. */
+function seedStoredLogin(dir: string): Record<string, string> {
+  const j = JSON.parse(readFileSync(join(dir, ".claude.json"), "utf8"));
+  j.oauthAccount = { emailAddress: "me@example.com", organizationName: "Me Org" };
+  writeFileSync(join(dir, ".claude.json"), JSON.stringify(j));
+  writeFileSync(join(dir, ".credentials.json"), "{}");
+  return { FAKE_KEYCHAIN: keychainService(dir) };
+}
+
+describe("run links what the profile is missing", () => {
+  test("links an item the base gained after init, once, and says so on stderr", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    writeFileSync(join(h.base, "keybindings.json"), "{}");
+    mkdirSync(join(h.base, "workflows"));
+    const first = await runCli(["smoke", "-p", "hi"], { home: h.home });
+    expect(first.exitCode).toBe(0);
+    expect(first.stderr).toContain("claudep: linked keybindings.json into smoke");
+    expect(first.stderr).toContain("claudep: linked workflows into smoke");
+    expect(norm(readlinkSync(join(dir, "keybindings.json")))).toBe(norm(join(h.base, "keybindings.json")));
+    expect(lstatSync(join(dir, "workflows")).isSymbolicLink()).toBe(true);
+    const second = await runCli(["smoke", "-p", "hi"], { home: h.home });
+    expect(second.stderr).not.toContain("linked");
+  });
+
+  test("leaves a new top-level *.md to init", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    writeFileSync(join(h.base, "foo.md"), "# foo\n");
+    const r = await runCli(["smoke", "-p", "hi"], { home: h.home });
+    expect(r.stderr).not.toContain("linked");
+    expect(existsSync(join(h.profilesRoot, "smoke", "foo.md"))).toBe(false);
+    const doctor = await runCli(["doctor", "smoke"], { home: h.home });
+    expect(doctor.stdout).toContain("foo.md: not linked (run: claudep init smoke)");
+  });
+
+  test("never replaces a real directory the profile made first", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    mkdirSync(join(dir, "workflows"));
+    writeFileSync(join(dir, "workflows", "mine.js"), "");
+    mkdirSync(join(h.base, "workflows"));
+    const r = await runCli(["smoke", "-p", "hi"], { home: h.home });
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr).not.toContain("linked workflows");
+    expect(lstatSync(join(dir, "workflows")).isDirectory()).toBe(true);
+    expect(existsSync(join(dir, "workflows", "mine.js"))).toBe(true);
+  });
+
+  test("does not link from a custom base set in this shell, and skips what doctor accepts", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    const custom = join(h.home, "custom");
+    mkdirSync(custom);
+    writeFileSync(join(custom, "keybindings.json"), "{}");
+    const r = await runCli(["smoke", "-p", "hi"], { home: h.home, env: { CLAUDE_CONFIG_DIR: custom } });
+    expect(r.stderr).not.toContain("linked");
+    expect(existsSync(join(dir, "keybindings.json"))).toBe(false);
+
+    writeFileSync(join(h.base, "keybindings.json"), "{}");
+    await runCli(["doctor", "--accept", "smoke", "keybindings.json"], { home: h.home });
+    await runCli(["smoke", "-p", "hi"], { home: h.home });
+    expect(existsSync(join(dir, "keybindings.json"))).toBe(false);
+  });
+
+  test("doctor says the next run links a missing item", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    writeFileSync(join(h.base, "keybindings.json"), "{}");
+    const r = await runCli(["doctor", "smoke"], { home: h.home });
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("keybindings.json: not linked yet; the next claudep run links it");
+  });
+});
+
+describe("init and the login", () => {
+  test("skips the login on a signed-in profile and starts it when a login flag asks", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    const env = seedStoredLogin(dir);
+    const plain = await runCli(["init", "smoke"], { home: h.home, env });
+    expect(plain.exitCode).toBe(0);
+    expect(plain.stdout).toContain("already logged in as me@example.com (Me Org)");
+    expect(plain.stdout).toContain("To log in again: claudep smoke auth login");
+    expect(plain.stdout).not.toContain("Logging in");
+    expect(existsSync(join(dir, ".fake-login.json"))).toBe(false);
+
+    const sso = await runCli(["init", "smoke", "--sso"], { home: h.home, env });
+    expect(sso.stdout).toContain("Logging in");
+    expect(JSON.parse(readFileSync(join(dir, ".fake-login.json"), "utf8")).sso).toBe(true);
+  });
+
+  test("a recorded account with no credential still logs in", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    seedStoredLogin(dir);
+    rmSync(join(dir, ".credentials.json"));
+    const r = await runCli(["init", "smoke"], { home: h.home, env: { FAKE_KEYCHAIN: "" } });
+    // Windows trusts the account record, because the login can sit in Credential Manager.
+    expect(r.stdout).toContain(WIN ? "already logged in" : "Logging in");
+  });
+
+  test("remembers login flags given with --no-login, prints them, and logs in with them", async () => {
+    using h = fakeHome();
+    const made = await runCli(["init", "corp", "--no-login", "--sso", "--email", "me@corp.example"], { home: h.home });
+    expect(made.stdout).toContain("Next: claudep corp auth login --sso --email me@corp.example");
+    const dir = join(h.profilesRoot, "corp");
+    expect(readFileSync(join(dir, "claudep.login"), "utf8")).toBe("--sso --email me@corp.example\n");
+
+    const status = await runCli(["status", "corp"], { home: h.home });
+    expect(status.stdout).toContain("Log in: claudep corp auth login --sso --email me@corp.example");
+    const doctor = await runCli(["doctor", "corp"], { home: h.home });
+    expect(doctor.stdout).toContain("not logged in (claudep corp auth login --sso --email me@corp.example)");
+    expect(doctor.stdout).not.toContain("claudep.login");
+
+    const r = await runCli(["init", "corp"], { home: h.home });
+    expect(r.stdout).toContain("Logging in");
+    const login = JSON.parse(readFileSync(join(dir, ".fake-login.json"), "utf8"));
+    expect(login.sso).toBe(true);
+    expect(login.email).toBe("me@corp.example");
+  });
+
+  test("a signed-in profile with --no-login says so instead of asking for a login", async () => {
+    using h = fakeHome();
+    await runCli(["init", "corp", "--no-login", "--sso"], { home: h.home });
+    const env = seedStoredLogin(join(h.profilesRoot, "corp"));
+    const r = await runCli(["init", "corp", "--no-login"], { home: h.home, env });
+    expect(r.stdout).toContain("To log in again: claudep corp auth login --sso");
+    expect(r.stdout).not.toContain("Next:");
+  });
+});
+
+describe("credential and config-dir guards", () => {
+  test("vars refuses the refresh token and the secure storage variable; run reports a line it skips", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const refresh = await runCli(["vars", "smoke", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN=x"], { home: h.home });
+    expect(refresh.exitCode).toBe(1);
+    expect(refresh.stderr).toContain("never stores credentials");
+    const secure = await runCli(["vars", "smoke", "CLAUDE_SECURESTORAGE_CONFIG_DIR=/x"], { home: h.home });
+    expect(secure.exitCode).toBe(1);
+    expect(secure.stderr).toContain("moves the profile's login");
+
+    const dir = join(h.profilesRoot, "smoke");
+    writeFileSync(join(dir, "claudep.env"), "A=1\nAWS_SECRET_ACCESS_KEY=x\n");
+    const log = join(h.home, "log.jsonl");
+    const r = await runCli(["smoke", "-p", "hi"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_LOG_ENV: "A,AWS_SECRET_ACCESS_KEY" },
+    });
+    expect(r.stderr).toContain("lines 2 are not KEY=VALUE");
+    expect(r.stderr).not.toContain("=x");
+    expect(JSON.parse(readFileSync(log, "utf8").trim()).env).toEqual({ A: "1", AWS_SECRET_ACCESS_KEY: null });
+    const env = await runCli(["env", "smoke", "--shell", "sh"], { home: h.home });
+    expect(env.stderr).toContain("lines 2");
+    expect(env.stdout).not.toContain("AWS_SECRET_ACCESS_KEY");
+  });
+
+  test("run and doctor warn when an inherited secure storage variable moves the login", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    const elsewhere = join(h.home, "elsewhere");
+    const env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: elsewhere };
+    const run = await runCli(["smoke", "-p", "hi"], { home: h.home, env });
+    expect(run.stderr).toContain(
+      `CLAUDE_SECURESTORAGE_CONFIG_DIR is set, so Claude Code keeps the "smoke" login in ${elsewhere}`,
+    );
+    const doctor = await runCli(["doctor", "smoke"], { home: h.home, env });
+    expect(doctor.stdout).toContain(`keeps this profile's login in ${elsewhere}`);
+    const same = await runCli(["smoke", "-p", "hi"], {
+      home: h.home,
+      env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: dir },
+    });
+    expect(same.stderr).not.toContain("CLAUDE_SECURESTORAGE_CONFIG_DIR");
+  });
+
+  // Windows has no empty environment variable.
+  test.skipIf(WIN)(
+    "an empty CLAUDE_CONFIG_DIR stops current, run default and doctor, and a profile still runs",
+    async () => {
+      using h = fakeHome();
+      await runCli(["init", "smoke", "--no-login"], { home: h.home });
+      const env = { CLAUDE_CONFIG_DIR: "" };
+      for (const args of [["current"], ["run", "default"], ["doctor"]]) {
+        const r = await runCli(args, { home: h.home, env });
+        expect(r.exitCode).toBe(1);
+        expect(r.stdout + r.stderr).toContain("unset CLAUDE_CONFIG_DIR");
+      }
+      const doctor = await runCli(["doctor"], { home: h.home, env });
+      expect(doctor.stdout).toContain(`base: ${h.base}`);
+      const log = join(h.home, "log.jsonl");
+      const r = await runCli(["smoke", "-p", "hi"], { home: h.home, env: { ...env, FAKE_CLAUDE_LOG: log } });
+      expect(r.exitCode).toBe(0);
+      expect(JSON.parse(readFileSync(log, "utf8").trim()).configDir).toBe(join(h.profilesRoot, "smoke"));
+    },
+  );
+});
+
+describe("alias list, rewrite and doctor", () => {
+  function shim(dir: string, cmd: string, target: string, profile: string): string {
+    const [file] = aliasFiles(dir, cmd);
+    if (!file) throw new Error("aliasFiles returned nothing");
+    writeFileSync(file.path, aliasShim(file.kind, target, profile));
+    return file.path;
+  }
+
+  /** PATH holding only the test's own directories, in this order. */
+  const onlyPath = (...dirs: string[]) => ({
+    PATH: [...dirs, ...(WIN ? [join(process.env.SystemRoot ?? "C:\\Windows", "System32")] : [])].join(delimiter),
+  });
+
+  test("lists shims with their state, as text and JSON", async () => {
+    using h = fakeHome();
+    const bin = fakeBin(h.home, { withClaudep: true });
+    await runCli(["init", "smoke", "--no-login", "--alias", "esmoke"], { home: h.home, bin });
+    const gone = shim(bin, "egone", join(h.home, "gone", "claudep.ts"), "smoke");
+    shim(bin, "eghost", SCRIPT, "ghost");
+    const env = onlyPath(bin);
+    const text = await runCli(["alias"], { home: h.home, bin, env });
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toMatch(/^COMMAND\s+PROFILE\s+STATE\s+TARGET\s+FILE/);
+    const json = await runCli(["alias", "--json"], { home: h.home, bin, env });
+    const rows = JSON.parse(json.stdout) as { command: string; state: string; path: string; profile: string }[];
+    const state = (c: string) => rows.find((r) => r.command === c)?.state;
+    expect(state("esmoke")).toBe("ok");
+    expect(state("egone")).toBe("missing-target");
+    expect(state("eghost")).toBe("missing-profile");
+    expect(rows.find((r) => r.command === "egone")?.path).toBe(gone);
+
+    const none = await runCli(["alias"], { home: h.home, bin: join(h.home, "nothing"), env: onlyPath(h.base) });
+    expect(none.stdout).toContain("No alias shims on PATH");
+  });
+
+  test("rewrites a generated shim in place, also in another PATH directory, and leaves other files alone", async () => {
+    using h = fakeHome();
+    const bin = fakeBin(h.home, { withClaudep: true });
+    const old = join(h.home, "oldbin");
+    mkdirSync(old);
+    await runCli(["init", "smoke", "--no-login"], { home: h.home, bin });
+    const stale = shim(old, "esmoke", join(h.home, "gone", "claudep.ts"), "smoke");
+    const env = onlyPath(bin, old);
+    const r = await runCli(["alias", "smoke", "esmoke"], { home: h.home, bin, env });
+    expect(r.stdout).toContain(`rewrote ${stale}`);
+    expect(readFileSync(stale, "utf8")).toContain(realpathSync.native(SCRIPT));
+    const [inBin] = aliasFiles(bin, "esmoke");
+    expect(existsSync(inBin?.path ?? "")).toBe(false);
+    const again = await runCli(["alias", "smoke", "esmoke"], { home: h.home, bin, env });
+    expect(again.stdout).toContain("already runs profile smoke");
+  });
+
+  test("doctor fails on a dead shim, warns on another claudep, and names the fix", async () => {
+    using h = fakeHome();
+    const bin = fakeBin(h.home, { withClaudep: true });
+    await runCli(["init", "smoke", "--no-login"], { home: h.home, bin });
+    const env = onlyPath(bin);
+    const other = join(h.home, "other-claudep.ts");
+    writeFileSync(other, "");
+    shim(bin, "eother", other, "smoke");
+    const warned = await runCli(["doctor", "smoke"], { home: h.home, bin, env });
+    expect(warned.exitCode).toBe(0);
+    expect(warned.stdout).toContain(`runs another claudep: ${other}. Point it at this one: claudep alias smoke eother`);
+
+    const dead = shim(bin, "edead", join(h.home, "gone", "claudep.ts"), "smoke");
+    shim(bin, "eghost", SCRIPT, "ghost");
+    const failed = await runCli(["doctor"], { home: h.home, bin, env });
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stdout).toContain(`alias edead (${dead}) runs`);
+    expect(failed.stdout).toContain("Rewrite it: claudep alias smoke edead");
+    expect(failed.stdout).toContain('runs the profile "ghost", which does not exist');
+    expect(failed.stdout).toContain("2 problem(s)");
+
+    const scoped = await runCli(["doctor", "smoke"], { home: h.home, bin, env });
+    expect(scoped.stdout).not.toContain("ghost");
+  });
+
+  test("a shim behind an earlier PATH entry of the same name is reported as shadowed", async () => {
+    using h = fakeHome();
+    const bin = fakeBin(h.home, { withClaudep: true });
+    const first = join(h.home, "firstbin");
+    mkdirSync(first);
+    await runCli(["init", "smoke", "--no-login", "--alias", "esmoke"], { home: h.home, bin });
+    const [name] = aliasFiles(first, "esmoke");
+    writeFileSync(name?.path ?? "", "not a shim, and far too long to be read as one: ".repeat(40));
+    const r = await runCli(["alias", "--json"], { home: h.home, bin, env: onlyPath(first, bin) });
+    const rows = JSON.parse(r.stdout) as { command: string; state: string }[];
+    expect(rows.map((x) => [x.command, x.state])).toContainEqual(["esmoke", "shadowed"]);
+  });
+});
+
+describe("alias never damages what it did not write", () => {
+  test("a symlink is left alone and its target is untouched, also when dangling", async () => {
+    using h = fakeHome();
+    const bin = fakeBin(h.home, { withClaudep: true });
+    await runCli(["init", "smoke", "--no-login"], { home: h.home, bin });
+    const target = join(h.home, "tool");
+    writeFileSync(target, "mine\n");
+    const [file] = aliasFiles(bin, "mytool");
+    const [gone] = aliasFiles(bin, "gone");
+    if (!file || !gone) throw new Error("aliasFiles returned nothing");
+    symlinkSync(target, file.path);
+    symlinkSync(join(h.home, "nothing-here"), gone.path);
+    for (const cmd of ["mytool", "gone"]) {
+      const r = await runCli(["alias", "smoke", cmd], { home: h.home, bin });
+      expect(r.stdout).toContain("already exists. Not overwriting");
+    }
+    expect(readFileSync(target, "utf8")).toBe("mine\n");
+    expect(existsSync(join(h.home, "nothing-here"))).toBe(false);
+  });
+
+  test("refuses the names a shim runs", async () => {
+    using h = fakeHome();
+    const bin = fakeBin(h.home, { withClaudep: true });
+    await runCli(["init", "smoke", "--no-login"], { home: h.home, bin });
+    const script = readFileSync(SCRIPT, "utf8");
+    for (const cmd of ["claude", "claudep"]) {
+      const r = await runCli(["alias", "smoke", cmd], { home: h.home, bin });
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).toContain("pick another name");
+    }
+    expect(readFileSync(SCRIPT, "utf8")).toBe(script);
+  });
+
+  test("a directory of that name is a warning, not a crash", async () => {
+    using h = fakeHome();
+    const bin = fakeBin(h.home, { withClaudep: true });
+    await runCli(["init", "smoke", "--no-login"], { home: h.home, bin });
+    for (const { path } of aliasFiles(bin, "adir")) mkdirSync(path);
+    const r = await runCli(["alias", "smoke", "adir"], { home: h.home, bin });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("already exists. Not overwriting");
+  });
+
+  // Windows ignores the read-only bit on a directory, and root ignores it everywhere.
+  test.skipIf(WIN || process.getuid?.() === 0)("a shim in a read-only directory fails with a message", async () => {
+    using h = fakeHome();
+    const bin = fakeBin(h.home, { withClaudep: true });
+    const locked = join(h.home, "locked");
+    mkdirSync(locked);
+    await runCli(["init", "smoke", "--no-login"], { home: h.home, bin });
+    writeFileSync(join(locked, "esmoke"), aliasShim("sh", join(h.home, "gone", "claudep.ts"), "smoke"));
+    chmodSync(join(locked, "esmoke"), 0o444);
+    chmodSync(locked, 0o555);
+    try {
+      const r = await runCli(["alias", "smoke", "esmoke"], {
+        home: h.home,
+        bin,
+        env: { PATH: [bin, locked].join(delimiter) },
+      });
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain(`could not write ${join(locked, "esmoke")}`);
+      expect(r.stderr).not.toContain("at ");
+    } finally {
+      chmodSync(locked, 0o755);
+    }
+  });
+});
+
+describe("accepted items and other bases", () => {
+  test("init leaves an accepted item alone until --force", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    rmSync(join(dir, "CLAUDE.md"));
+    await runCli(["doctor", "--accept", "smoke", "CLAUDE.md"], { home: h.home });
+    const r = await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    expect(r.stdout).toContain("CLAUDE.md left as it is; doctor accepts it");
+    expect(existsSync(join(dir, "CLAUDE.md"))).toBe(false);
+    await runCli(["init", "smoke", "--no-login", "--force"], { home: h.home });
+    expect(lstatSync(join(dir, "CLAUDE.md")).isSymbolicLink()).toBe(true);
+  });
+
+  test("a profile built on a custom base gets no links from ~/.claude, and doctor does not promise any", async () => {
+    using h = fakeHome();
+    const custom = join(h.home, "custom");
+    mkdirSync(custom);
+    writeFileSync(join(custom, "keybindings.json"), "{}");
+    await runCli(["init", "cust", "--no-login"], { home: h.home, env: { CLAUDE_CONFIG_DIR: custom } });
+    const dir = join(h.profilesRoot, "cust");
+    const r = await runCli(["cust", "-p", "hi"], { home: h.home });
+    expect(r.stderr).not.toContain("linked");
+    expect(existsSync(join(dir, "CLAUDE.md"))).toBe(false);
+    const doctor = await runCli(["doctor", "cust"], { home: h.home });
+    expect(doctor.stdout).toContain("CLAUDE.md: not linked (run: claudep init cust)");
+    const shell = await runCli(["doctor", "cust"], { home: h.home, env: { CLAUDE_CONFIG_DIR: custom } });
+    expect(shell.stdout).not.toContain("the next claudep run links it");
+  });
+});
+
+describe("doctor --json and --accept", () => {
+  test("--json prints the checks, one schema, and keeps the exit code", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const clean = await runCli(["doctor", "--json"], { home: h.home });
+    expect(clean.exitCode).toBe(0);
+    const j = JSON.parse(clean.stdout);
+    expect(j.schemaVersion).toBe(1);
+    expect(j.claude.version).toBe("9.9.9");
+    expect(j.base.dir).toBe(h.base);
+    expect(j.problems).toBe(0);
+    expect(j.profiles.map((p: { name: string }) => p.name)).toEqual(["smoke"]);
+    const login = j.profiles[0].checks.find((x: { item: string }) => x.item === "login");
+    expect(login).toMatchObject({
+      state: "logged-out",
+      level: "warn",
+      fix: "claudep smoke auth login",
+      problem: false,
+    });
+
+    writeFileSync(join(h.base, "keybindings.json"), "{}");
+    const broken = await runCli(["doctor", "smoke", "--json"], { home: h.home });
+    expect(broken.exitCode).toBe(1);
+    const k = JSON.parse(broken.stdout);
+    expect(k.problems).toBe(1);
+    const item = k.profiles[0].checks.find((x: { item: string }) => x.item === "keybindings.json");
+    expect(item).toMatchObject({ state: "missing", level: "warn", problem: true });
+  });
+
+  test("rejects an unknown flag instead of reading it as a profile", async () => {
+    using h = fakeHome();
+    const r = await runCli(["doctor", "--nope"], { home: h.home });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("unknown flag --nope");
+  });
+
+  test("--accept turns one difference into info and exit 0; --unaccept brings it back", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    rmSync(join(dir, "settings.json"));
+    writeFileSync(join(dir, "settings.json"), "{}");
+    expect((await runCli(["doctor", "smoke"], { home: h.home })).exitCode).toBe(1);
+
+    const accept = await runCli(["doctor", "--accept", "smoke", "settings.json"], { home: h.home });
+    expect(accept.exitCode).toBe(0);
+    expect(readFileSync(join(dir, "claudep.doctor"), "utf8")).toContain("settings.json\n");
+    const r = await runCli(["doctor", "smoke"], { home: h.home });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("settings.json: real file shadows the shared one (accepted)");
+    expect(r.stdout).not.toContain("claudep.doctor");
+    const j = JSON.parse((await runCli(["doctor", "smoke", "--json"], { home: h.home })).stdout);
+    expect(j.profiles[0].checks.find((x: { item: string }) => x.item === "settings.json")).toMatchObject({
+      state: "accepted",
+      level: "info",
+      problem: false,
+    });
+
+    await runCli(["doctor", "--unaccept", "smoke", "settings.json"], { home: h.home });
+    expect(existsSync(join(dir, "claudep.doctor"))).toBe(false);
+    expect((await runCli(["doctor", "smoke"], { home: h.home })).exitCode).toBe(1);
+  });
+
+  test("--accept refuses what is not a shared item and a profile that does not exist", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const item = await runCli(["doctor", "--accept", "smoke", ".credentials.json"], { home: h.home });
+    expect(item.exitCode).toBe(1);
+    expect(item.stderr).toContain("not a shared item");
+    const ghost = await runCli(["doctor", "--accept", "ghost", "skills"], { home: h.home });
+    expect(ghost.stderr).toContain('profile "ghost" does not exist');
+    const both = await runCli(["doctor", "--accept", "--unaccept", "smoke", "skills"], { home: h.home });
+    expect(both.stderr).toContain("not both");
+  });
+
+  test("a shadowing directory and settings.json explain themselves, by key name only", async () => {
+    using h = fakeHome();
+    writeFileSync(join(h.base, "settings.json"), JSON.stringify({ model: "a", theme: "dark", env: { A: "1" } }));
+    writeFileSync(join(h.base, "skills", "shared-skill"), "");
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "smoke");
+    rmSync(join(dir, "settings.json"));
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ model: "secret-value", theme: "dark", env: { A: "2" } }),
+    );
+    rmSync(join(dir, "skills"));
+    mkdirSync(join(dir, "skills"));
+    symlinkSync(join(h.base, "skills", "shared-skill"), join(dir, "skills", "shared-skill"));
+    mkdirSync(join(dir, "skills", "synced"));
+    const r = await runCli(["doctor", "smoke"], { home: h.home });
+    expect(r.stdout).toContain("keys that differ: env, model");
+    expect(r.stdout).toContain("claudep settings smoke <key>=<value> can carry model");
+    expect(r.stdout).not.toContain("secret-value");
+    expect(r.stdout).toContain("1 of 2 entries link into the base; only here: synced");
+    expect(r.stdout).toContain(`To share it: ${shareFixCommand(join(dir, "skills"), "smoke", WIN)}`);
+    expect(r.stdout).toContain("To keep it: claudep doctor --accept smoke skills");
+    expect(r.stdout).toContain("A launch never replaces it");
+  });
+});
+
+describe("doctor reads managed settings", () => {
+  test("the managed env is the strongest source, and a later drop-in wins", async () => {
+    using h = fakeHome();
+    await runCli(["init", "smoke", "--no-login"], { home: h.home });
+    const managed = join(h.home, "managed");
+    mkdirSync(join(managed, "managed-settings.d"), { recursive: true });
+    writeFileSync(join(managed, "managed-settings.json"), JSON.stringify({ env: { DISABLE_AUTOUPDATER: "0" } }));
+    const env = { CLAUDEP_MANAGED_DIR: managed, DISABLE_AUTOUPDATER: "0" };
+    const off = await runCli(["doctor", "smoke"], { home: h.home, env });
+    expect(off.stdout).not.toContain("managed settings env");
+
+    writeFileSync(
+      join(managed, "managed-settings.d", "10-a.json"),
+      JSON.stringify({ env: { DISABLE_AUTOUPDATER: "1" } }),
+    );
+    const on = await runCli(["doctor", "smoke"], { home: h.home, env });
+    expect(on.stdout).toContain("auto-update off (DISABLE_AUTOUPDATER in managed settings env)");
+
+    writeFileSync(
+      join(managed, "managed-settings.d", "20-b.json"),
+      JSON.stringify({ env: { DISABLE_AUTOUPDATER: "0" } }),
+    );
+    writeFileSync(
+      join(managed, "managed-settings.d", ".30-hidden.json"),
+      JSON.stringify({ env: { DISABLE_AUTOUPDATER: "1" } }),
+    );
+    const later = await runCli(["doctor", "smoke"], { home: h.home, env });
+    expect(later.stdout).not.toContain("managed settings env");
   });
 });

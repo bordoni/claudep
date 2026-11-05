@@ -316,6 +316,42 @@ describe.each(all)("$name hook", (d) => {
     ]);
   });
 
+  test("skips the newer credential variables and the secure storage variable", async () => {
+    using h = fakeHome();
+    const { nested, work } = pinnedTree(h.home, h.profilesRoot);
+    writeFileSync(
+      join(work, "claudep.env"),
+      "CLAUDE_CODE_OAUTH_REFRESH_TOKEN=x\nCLAUDE_SECURESTORAGE_CONFIG_DIR=/x\naws_secret_access_key=x\nGOOD=yes\n",
+    );
+    const r = await run(h.home, [
+      d.cd(nested),
+      "tick",
+      d.showVar("GOOD"),
+      d.showVar("CLAUDE_CODE_OAUTH_REFRESH_TOKEN"),
+      d.showVar("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
+      d.showVar("aws_secret_access_key"),
+      d.showVar("CLAUDEP_ENV_KEYS"),
+    ]);
+    expect(lines(r)).toEqual([
+      "GOOD=yes",
+      "CLAUDE_CODE_OAUTH_REFRESH_TOKEN=<unset>",
+      "CLAUDE_SECURESTORAGE_CONFIG_DIR=<unset>",
+      "aws_secret_access_key=<unset>",
+      "CLAUDEP_ENV_KEYS=GOOD",
+    ]);
+  });
+
+  test("never exports an empty CLAUDE_CONFIG_DIR, and pins over one it inherits", async () => {
+    using h = fakeHome();
+    const { nested, work } = pinnedTree(h.home, h.profilesRoot);
+    const r = await run(h.home, [d.cd(nested), "tick", "show", d.cd(h.home), "tick", "show"], {
+      CLAUDE_CONFIG_DIR: "",
+    });
+    const [pinned, left] = lines(r);
+    expect(pinned).toBe(`${work}|${work}`);
+    expect(left?.startsWith(`${work}|`)).toBe(false);
+  });
+
   test("swaps the variables when moving between two pinned profiles", async () => {
     using h = fakeHome();
     const { nested, work } = pinnedTree(h.home, h.profilesRoot);

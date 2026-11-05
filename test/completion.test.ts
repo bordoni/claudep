@@ -115,7 +115,7 @@ describe("completion scripts in real shells", () => {
       const r = await shell("fish", ["-c", lines.join("\n")], h.home);
       expect(r.err).toBe("");
       const [top, rm, init, env] = r.out.trim().split("\n");
-      expect(top).toContain("init\tcreate or update a profile and log in");
+      expect(top).toContain("init\tcreate or update a profile and log in if it has no login");
       expect(top).toContain("work\tprofile");
       expect(top).toContain("vars\tlist, set or unset the variables a profile exports");
       expect(rm).toBe("default personal work");
@@ -165,7 +165,7 @@ describe("completion scripts in real shells", () => {
       expect(env).toBe("sh zsh bash fish powershell");
       expect(comp).toBe("zsh bash fish powershell");
       expect(sta).toBe("status statusline");
-      expect(tip).toBe("create or update a profile and log in");
+      expect(tip).toBe("create or update a profile and log in if it has no login");
     });
   }
 

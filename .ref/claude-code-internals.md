@@ -24,7 +24,7 @@ function HR(n=""){let e=process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR,
 
 - `Se()` is `(CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")).normalize("NFC")`.
 - Result: `Claude Code-credentials` for the default dir, `Claude Code-credentials-<sha256(dir)[0:8]>` otherwise. The hash is over the **literal env string**, so `/a/b` and `/a/b/` are different accounts. claudep's `canon()` exists for this reason; `keychainService()` mirrors the formula.
-- `CLAUDE_SECURESTORAGE_CONFIG_DIR` overrides which directory is hashed, and on 2.1.311 it also moves the credentials file (below). Not used by claudep.
+- `CLAUDE_SECURESTORAGE_CONFIG_DIR` overrides which directory is hashed, and on 2.1.311 it also moves the credentials file (below). claudep refuses it in `claudep.env` and warns when it is inherited and names another directory. Claude Code 2.1.318 copies it into the environment of the teammates it spawns.
 - The item is stored with `security add-generic-password -U -a <username> -s <service>`, so `doctor` checks with `-a $USER`.
 - GitHub issue #20553 (all config dirs sharing one Keychain entry) describes builds before 2.1.144 and does not apply.
 
@@ -297,9 +297,9 @@ Last 24h · 412 requests · 5 sessions
 
 **Statusline**: the statusline JSON carries `rate_limits.five_hour` and `rate_limits.seven_day`, each `{used_percentage, resets_at}`, with `resets_at` in epoch seconds and `used_percentage` = `min(round(utilization*1000)/10, 100)`. Behind a Claude gateway a third key, `spend_limit`, adds `used_percentage` (which can pass 100), `resets_at`, and optionally `used_usd`, `limit_usd` and `period`. `rate_limits` is present when any of the three is. claudep reads only the first two, so a gateway-only payload has no usage. The payload's `version` field is the running version.
 
-## 16. Credential variables Claude Code reads (2026-10-27)
+## 16. Credential variables Claude Code reads (2026-10-27, re-checked on 2.1.318 on 2026-11-05)
 
-Checked on 2.1.311 and recorded for 0.8.0; 0.7.1 does not change `AUTH_ENV`. claudep refuses `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` in `claudep.env`. Claude Code's own list of Anthropic credentials, the one it scrubs from subprocess environments (`Pes`), is longer:
+These feed `CREDENTIAL_ENV`. `AUTH_ENV` stays `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`, the three that replace the stored login. Claude Code's own list of Anthropic credentials, the one it scrubs from subprocess environments (`Pes` on 2.1.311, `rBn` on 2.1.318, unchanged but for an internal `ALL_INPUTS`), is longer:
 
 ```
 ANTHROPIC_API_KEY  ANTHROPIC_AUTH_TOKEN  ANTHROPIC_CUSTOM_HEADERS  CLAUDE_CODE_OAUTH_TOKEN
@@ -315,6 +315,23 @@ ANTHROPIC_FOUNDRY_AUTH_TOKEN  ANTHROPIC_AWS_API_KEY  ANTHROPIC_IDENTITY_TOKEN  A
 - the cloud provider secrets `AWS_BEARER_TOKEN_BEDROCK`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AZURE_CLIENT_SECRET`, `AZURE_PASSWORD`, `GOOGLE_OAUTH_ACCESS_TOKEN` and `CLOUDSDK_AUTH_ACCESS_TOKEN`.
 
 These hold a file descriptor number or a path, not a secret: `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_HOST_CREDS_FILE`, `CLAUDE_SESSION_INGRESS_TOKEN_FILE` and `ANTHROPIC_IDENTITY_TOKEN_FILE`. `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, with `CLAUDE_CODE_OAUTH_SCOPES`, is the one that writes a lasting login into the profile, through `claude auth login`. No older binary was at hand, so which of these appeared after 2.1.286 is not known.
+
+A scan of 2.1.318 for names containing TOKEN, SECRET, PASSWORD, PASSPHRASE or API_KEY added these secrets to `CREDENTIAL_ENV`: `CLAUDE_API_KEY`, `ANTHROPIC_WORK_SECRET`, `CLAUDE_CODE_HFI_BEARER_TOKEN`, `CLAUDE_CODE_MCP_SERVE_AUTH_TOKEN`, `CLAUDE_CODE_MESSAGING_TOKEN`, `AWS_CONTAINER_AUTHORIZATION_TOKEN`, `AZURE_CLIENT_CERTIFICATE_PASSWORD`, `CLOUDSDK_PROXY_PASSWORD`, `ANTHROPIC_ENVIRONMENT_KEY`, `ENVIRONMENT_SERVICE_KEY`, `MCP_CLIENT_SECRET` and `MCP_XAA_IDP_CLIENT_SECRET`. Those last four were found by string presence, without reading how each is used. `GITHUB_TOKEN` and `GH_TOKEN` are in the binary too and stay out: they are the user's general tokens, not Claude Code's. The `*_FILE` and `*_FILE_DESCRIPTOR` names and sizing variables such as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` stay out.
+
+## 17. Managed settings and an empty config dir (2026-11-05, 2.1.318)
+
+The managed folder is fixed per platform: `/etc/claude-code`, `/Library/Application Support/ClaudeCode` and `C:\Program Files\ClaudeCode`.
+
+```js
+function ZC(){let e=WOs();if(e!==void 0)return e;switch(P()){case"macos":return"/Library/Application Support/ClaudeCode";case"windows":return"C:\\Program Files\\ClaudeCode";default:return"/etc/claude-code"}}
+function Sfe(e){return e.endsWith(".json")&&!e.startsWith(".")}
+```
+
+`fOr` reads `managed-settings.json`, then each name in `managed-settings.d` that passes `Sfe`, sorted, each merged over the last. `policySettings` ranks above every other source. The same chain also holds server-managed settings, a macOS plist and the Windows registry, and a cloud session may only restrict. `managedSettingsEnv()` reads the two files and nothing else.
+
+The updater check is still `DISABLE_UPDATES`, then `DISABLE_AUTOUPDATER`, then the non-essential traffic switch, then `autoUpdates`, with the same native-install exception (`zy`).
+
+An empty `CLAUDE_CONFIG_DIR` is not unset: with `HOME` and the working directory in a scratch folder, `CLAUDE_CONFIG_DIR= claude auth status --json` reported `"configDirectory": ""` and `"projectsDirectory": "projects"`, a path relative to the current directory ([anthropics/claude-code#104629](https://github.com/anthropics/claude-code/issues/104629), open on 2026-11-05). The same output carries a new `loginExpiresAt` field, which claudep does not read.
 
 ## How to re-verify
 
