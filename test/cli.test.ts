@@ -1384,7 +1384,7 @@ describe("run links what the profile is missing", () => {
     expect(first.exitCode).toBe(0);
     expect(first.stderr).toContain("claudep: linked keybindings.json into smoke");
     expect(first.stderr).toContain("claudep: linked workflows into smoke");
-    expect(norm(readlinkSync(join(dir, "keybindings.json")))).toBe(join(h.base, "keybindings.json"));
+    expect(norm(readlinkSync(join(dir, "keybindings.json")))).toBe(norm(join(h.base, "keybindings.json")));
     expect(lstatSync(join(dir, "workflows")).isSymbolicLink()).toBe(true);
     const second = await runCli(["smoke", "-p", "hi"], { home: h.home });
     expect(second.stderr).not.toContain("linked");

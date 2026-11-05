@@ -396,7 +396,7 @@ describe("healLinks", () => {
     expect(linked).not.toContain("skills");
     expect(linked).not.toContain("CLAUDE.md");
     expect(lstatSync(join(dir, "plans")).isDirectory()).toBe(true);
-    expect(norm(readlinkSync(join(dir, "skills")))).toBe(join(h.home, "elsewhere"));
+    expect(norm(readlinkSync(join(dir, "skills")))).toBe(norm(join(h.home, "elsewhere")));
   });
 
   test("a profile whose links all point at another base gets none from this one", () => {
@@ -411,7 +411,7 @@ describe("healLinks", () => {
     symlinkSync(join(h.base, "plans"), join(dir, "plans"), "dir");
     expect(builtOnOtherBase(h.base, dir)).toBe(false);
     expect(healLinks(h.base, dir)).toContain("CLAUDE.md");
-    expect(norm(readlinkSync(join(dir, "skills")))).toBe(join(h.home, "custom", "skills"));
+    expect(norm(readlinkSync(join(dir, "skills")))).toBe(norm(join(h.home, "custom", "skills")));
   });
 
   test("a link another launch created first, or any other error, is skipped", () => {
