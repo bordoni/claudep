@@ -12,6 +12,9 @@
  *                        when set, after logging like anything else
  *   anything else        appends {argv, configDir} to $FAKE_CLAUDE_LOG and exits $FAKE_CLAUDE_EXIT;
  *                        FAKE_CLAUDE_LOG_ENV=A,B adds {env: {A, B}} with the values it saw
+ *
+ * Before anything but --version, FAKE_CLAUDE_STDERR=<bytes> writes that much to stderr
+ * (a full pipe blocks a child nobody reads) and FAKE_CLAUDE_SLEEP=<ms> waits.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -29,6 +32,11 @@ if (argv[0] === "--version") {
   out(process.env.FAKE_CLAUDE_VERSION ?? "9.9.9 (fake claude)");
   process.exit(0);
 }
+
+const noise = Number(process.env.FAKE_CLAUDE_STDERR ?? "0");
+if (noise > 0) await Bun.write(Bun.stderr, "x".repeat(noise));
+const sleepMs = Number(process.env.FAKE_CLAUDE_SLEEP ?? "0");
+if (sleepMs > 0) await Bun.sleep(sleepMs);
 
 /** The fields 2.1.286 adds to every `auth status --json`. */
 function reported(): Record<string, string> {

@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- `claudep list`, `status`, `usage` and `doctor` stop a `claude` that has not answered in 30 seconds, so one stuck profile no longer hangs the whole command. Its row shows `timeout` with the account in `.claude.json` (for `usage`, the last numbers seen), and `--json` adds `"timedOut": true`. `CLAUDEP_TIMEOUT=<seconds>` changes the limit and `0` turns it off. The child gets SIGTERM and three seconds to finish a token refresh before SIGKILL. `claudep <name>`, `run` and `handoff` have no limit.
+
+### Fixed
+
+- Short `claude` calls in `list`, `status`, `usage` and `doctor` read stderr as well as stdout, so a child that writes a lot to stderr can no longer block on a full pipe.
+
 ## [0.8.0] - 2026-11-05
 
 ### Added

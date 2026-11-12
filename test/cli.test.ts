@@ -1889,3 +1889,51 @@ describe("doctor reads managed settings", () => {
     expect(later.stdout).not.toContain("managed settings env");
   });
 });
+
+describe("deadlines on child claude calls", () => {
+  test("a profile whose claude does not answer shows timeout and its .claude.json account", async () => {
+    using h = fakeHome({ loggedIn: true });
+    await runCli(["init", "work", "--email", "w@corp.com"], { home: h.home });
+    writeFileSync(
+      join(h.profilesRoot, "work", ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: "w@corp.com", organizationName: "Corp" } }),
+    );
+    const started = Date.now();
+    const r = await runCli(["list"], { home: h.home, env: { FAKE_CLAUDE_SLEEP: "20000", CLAUDEP_TIMEOUT: "1" } });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/^work\s+timeout\s+w@corp\.com\s+Corp\s+/m);
+    expect(r.stdout).toContain("CLAUDEP_TIMEOUT=<seconds>");
+    const json = await runCli(["status", "work", "--json"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_SLEEP: "20000", CLAUDEP_TIMEOUT: "1" },
+    });
+    expect(JSON.parse(json.stdout)).toMatchObject({ name: "work", timedOut: true, cached: true, email: "w@corp.com" });
+  }, 30_000);
+
+  test("usage --live falls back to the last numbers seen and marks the row", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const stdin = JSON.stringify({ rate_limits: { seven_day: { used_percentage: 41, resets_at: 1_797_900_000 } } });
+    await runCli(["statusline"], { home: h.home, env: { CLAUDE_CONFIG_DIR: join(h.profilesRoot, "work") }, stdin });
+    const env = { FAKE_CLAUDE_SLEEP: "20000", CLAUDEP_TIMEOUT: "1" };
+    const r = await runCli(["usage", "work"], { home: h.home, env });
+    expect(r.stdout).toMatch(/^work\s+-\s+-\s+41%\s+.+\s+timeout, now \(statusline\)$/m);
+    const json = await runCli(["usage", "work", "--json"], { home: h.home, env });
+    expect(JSON.parse(json.stdout)[0]).toMatchObject({ name: "work", live: false, timedOut: true });
+  }, 30_000);
+
+  test("a child that writes a lot to stderr does not hang the command", async () => {
+    using h = fakeHome({ loggedIn: true });
+    const r = await runCli(["list"], { home: h.home, env: { FAKE_CLAUDE_STDERR: String(1 << 20) } });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/^default\s+yes\s+/m);
+  }, 30_000);
+
+  test("a CLAUDEP_TIMEOUT that is not a number is named once and the default applies", async () => {
+    using h = fakeHome({ loggedIn: true });
+    const r = await runCli(["list"], { home: h.home, env: { CLAUDEP_TIMEOUT: "soon" } });
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr.match(/CLAUDEP_TIMEOUT="soon" is not a number of seconds/g)?.length).toBe(1);
+  });
+});

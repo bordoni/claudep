@@ -1584,15 +1584,82 @@ async function execClaude(L: Layout, dir: string | undefined, args: string[]): P
   process.exit(proc.exitCode ?? 1);
 }
 
+/** Seconds a child `claude` gets in list, status, usage and doctor. */
+export const DEFAULT_TIMEOUT_S = 30;
+/** How long a child has between SIGTERM and SIGKILL. */
+export const KILL_GRACE_MS = 3_000;
+
+/** The deadline from CLAUDEP_TIMEOUT, in ms: seconds, where 0 means none.
+ *  Anything that is not a number of seconds keeps the default and is named in `bad`. */
+export function claudeTimeoutMs(env: Env = process.env): { ms: number | undefined; bad?: string } {
+  const raw = env.CLAUDEP_TIMEOUT;
+  if (raw === undefined || raw.trim() === "") return { ms: DEFAULT_TIMEOUT_S * 1000 };
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return { ms: DEFAULT_TIMEOUT_S * 1000, bad: raw };
+  return { ms: n === 0 ? undefined : n * 1000 };
+}
+
+export type DeadlineDeps = {
+  setTimer: (fn: () => void, ms: number) => unknown;
+  clearTimer: (t: unknown) => void;
+  kill: (signal: NodeJS.Signals) => void;
+};
+
+/** Waits for a child to exit. After `ms` it sends SIGTERM, then SIGKILL
+ *  `graceMs` later. The grace lets a token refresh already in flight finish
+ *  writing, because a hard kill there signs the profile out
+ *  (anthropics/claude-code#95822). No `ms` means no deadline. */
+export async function awaitWithDeadline(
+  exited: Promise<number>,
+  ms: number | undefined,
+  graceMs: number,
+  deps: DeadlineDeps,
+): Promise<{ code: number; timedOut: boolean }> {
+  if (ms === undefined) return { code: await exited, timedOut: false };
+  let timedOut = false;
+  let hard: unknown;
+  const soft = deps.setTimer(() => {
+    timedOut = true;
+    deps.kill("SIGTERM");
+    hard = deps.setTimer(() => deps.kill("SIGKILL"), graceMs);
+  }, ms);
+  try {
+    return { code: await exited, timedOut };
+  } finally {
+    deps.clearTimer(soft);
+    if (hard !== undefined) deps.clearTimer(hard);
+  }
+}
+
+let timeoutWarned = false;
+
+/** CLAUDEP_TIMEOUT for this process, warning once about a value it cannot use. */
+function childTimeoutMs(): number | undefined {
+  const { ms, bad } = claudeTimeoutMs();
+  if (bad !== undefined && !timeoutWarned) {
+    timeoutWarned = true;
+    console.error(`claudep: CLAUDEP_TIMEOUT="${bad}" is not a number of seconds; using ${DEFAULT_TIMEOUT_S}`);
+  }
+  return ms;
+}
+
+/** Runs a short `claude` command and returns its stdout. stderr is read and
+ *  dropped, so a chatty child never blocks on a full pipe. Past the
+ *  CLAUDEP_TIMEOUT deadline the child is stopped and `out` is empty. */
 async function captureClaude(
   L: Layout,
   dir: string | undefined,
   args: string[],
-): Promise<{ code: number; out: string }> {
+): Promise<{ code: number; out: string; timedOut: boolean }> {
   const proc = await spawnClaude(L, dir, args, "pipe");
-  const out = await new Response(proc.stdout).text();
-  const code = await proc.exited;
-  return { code, out };
+  const out = new Response(proc.stdout).text().catch(() => "");
+  void new Response(proc.stderr).text().catch(() => "");
+  const { code, timedOut } = await awaitWithDeadline(proc.exited, childTimeoutMs(), KILL_GRACE_MS, {
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+    kill: (signal) => proc.kill(signal),
+  });
+  return { code, out: timedOut ? "" : await out, timedOut };
 }
 
 export type AuthStatus = {
@@ -1609,6 +1676,8 @@ export type AuthStatus = {
   configDirectory?: string;
   /** Read from the profile's .claude.json instead of asking Claude Code. */
   cached?: boolean;
+  /** Claude Code did not answer before the CLAUDEP_TIMEOUT deadline, so this is the .claude.json record. */
+  timedOut?: boolean;
 };
 
 /** Before this Claude Code, a short command such as `claude auth status`
@@ -1656,19 +1725,19 @@ export function parseAuthStatus(text: string): AuthStatus {
   }
 }
 
-async function authStatus(L: Layout, dir: string | undefined): Promise<AuthStatus> {
-  const { out } = await captureClaude(L, dir, ["auth", "status", "--json"]);
-  return parseAuthStatus(out);
-}
-
 async function claudeVersion(L: Layout): Promise<Version | undefined> {
   return parseVersion((await captureClaude(L, undefined, ["--version"])).out);
 }
 
-/** `claude auth status` when it is safe or `live` asks for it, otherwise the .claude.json record. */
+/** `claude auth status` when it is safe or `live` asks for it, otherwise
+ *  the .claude.json record. A live call past the deadline falls back to the record. */
 async function loginOf(L: Layout, dir: string | undefined, live: boolean): Promise<AuthStatus> {
-  if (live) return authStatus(L, dir);
-  return cachedAuthStatus(await readJson(dir === undefined ? L.baseGlobalJson : join(dir, ".claude.json")));
+  const cached = async () =>
+    cachedAuthStatus(await readJson(dir === undefined ? L.baseGlobalJson : join(dir, ".claude.json")));
+  if (!live) return cached();
+  const { out, timedOut } = await captureClaude(L, dir, ["auth", "status", "--json"]);
+  if (timedOut) return { ...(await cached()), timedOut: true };
+  return parseAuthStatus(out);
 }
 
 /** The login flags a profile was created with: `--sso --email you@company.com`
@@ -2256,7 +2325,7 @@ export function formatTable(rows: Row[], home: string, platform: NodeJS.Platform
   const cols = ["PROFILE", "LOGIN", "EMAIL", "ORG", "PLAN", "DIR"];
   const data = rows.map((r) => [
     r.name,
-    `${r.status.loggedIn ? "yes" : "no"}${r.status.cached ? "*" : ""}`,
+    r.status.timedOut ? "timeout" : `${r.status.loggedIn ? "yes" : "no"}${r.status.cached ? "*" : ""}`,
     r.status.email ?? "-",
     r.status.orgName ?? "-",
     r.status.subscriptionType ?? "-",
@@ -2273,7 +2342,15 @@ function printTable(rows: Row[], home: string, platform: NodeJS.Platform, v: Ver
   lines.forEach((line, i) => {
     console.log(rows[i]?.status.loggedIn ? line : c.dim(line));
   });
-  if (rows.some((r) => r.status.cached)) console.log(c.dim(`\n${cachedNote(v)}`));
+  if (rows.some((r) => r.status.cached && !r.status.timedOut)) console.log(c.dim(`\n${cachedNote(v)}`));
+  if (rows.some((r) => r.status.timedOut)) console.log(c.dim(`\n${timeoutNote()}`));
+}
+
+/** The footnote under a row whose `claude` ran past the deadline. */
+function timeoutNote(): string {
+  const ms = claudeTimeoutMs().ms;
+  const secs = ms === undefined ? "" : ` within ${ms / 1000} s`;
+  return `timeout: claude did not answer${secs}, so the row shows the account in .claude.json. Raise the limit with CLAUDEP_TIMEOUT=<seconds>`;
 }
 
 /** The flat object `status --json` prints for one row; `list --json` prints an array of them. */
@@ -2658,7 +2735,7 @@ export function ageText(at: number, now: number): string {
   return `${Math.floor(s / 86_400)} d ago`;
 }
 
-export type UsageRow = { name: string; usage?: Usage; live: boolean };
+export type UsageRow = { name: string; usage?: Usage; live: boolean; timedOut?: boolean };
 
 export function formatUsageTable(rows: UsageRow[], now: number): string[] {
   const cols = ["PROFILE", "5H", "RESETS", "7D", "RESETS", "SEEN"];
@@ -2669,7 +2746,8 @@ export function formatUsageTable(rows: UsageRow[], now: number): string[] {
     resetsText(r.usage?.fiveHour),
     pct(r.usage?.sevenDay),
     resetsText(r.usage?.sevenDay),
-    r.usage ? (r.live ? "now" : `${ageText(r.usage.at, now)} (${r.usage.source})`) : "never",
+    (r.timedOut ? "timeout, " : "") +
+      (r.usage ? (r.live ? "now" : `${ageText(r.usage.at, now)} (${r.usage.source})`) : "never"),
   ]);
   const widths = cols.map((h, i) => Math.max(h.length, ...data.map((d) => (d[i] as string).length)));
   const fmt = (cells: string[]) =>
@@ -2696,13 +2774,15 @@ async function cmdUsage(L: Layout, args: string[]): Promise<void> {
       if (live) {
         const dir = name === "default" ? undefined : profileDir(L, name);
         const args = ["-p", "/usage", "--output-format", "json", "--no-session-persistence"];
-        const fresh = parseUsageOutput((await captureClaude(L, dir, args)).out, now);
+        const { out, timedOut } = await captureClaude(L, dir, args);
+        const fresh = parseUsageOutput(out, now);
         if (fresh) {
           try {
             writeUsageCache(L, name, fresh, old);
           } catch {}
           return { name, usage: fresh, live: true };
         }
+        if (timedOut) return { name, usage: old, live: false, timedOut: true };
       }
       return { name, usage: old, live: false };
     }),
@@ -2710,7 +2790,7 @@ async function cmdUsage(L: Layout, args: string[]): Promise<void> {
   if (f.bools.has("--json")) {
     console.log(
       JSON.stringify(
-        rows.map((r) => ({ name: r.name, live: r.live, ...r.usage })),
+        rows.map((r) => ({ name: r.name, live: r.live, ...(r.timedOut ? { timedOut: true } : {}), ...r.usage })),
         null,
         2,
       ),
@@ -2726,6 +2806,8 @@ async function cmdUsage(L: Layout, args: string[]): Promise<void> {
         `\nLast seen numbers: Claude Code ${v?.join(".") ?? "of unknown version"} can sign a profile out on a short command (${AUTH_STATUS_ISSUE}, fixed in ${SAFE_AUTH_STATUS_FROM}). Update Claude Code, or pass --live`,
       ),
     );
+  if (rows.some((r) => r.timedOut))
+    console.log(c.dim(`\n${timeoutNote().replace("the account in .claude.json", "the last numbers seen")}`));
   if (rows.some((r) => !r.usage))
     console.log(
       c.dim(
@@ -3855,7 +3937,14 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       report.add("credentials", "absent", "warn", `no .credentials.json in the profile. Not logged in yet (${login})`, {
         fix: login,
       });
-    if (s.cached && s.loggedIn)
+    if (s.timedOut)
+      report.add(
+        "login",
+        "timeout",
+        "warn",
+        `claude auth status did not answer in time; last known account: ${s.email ?? "none"}, from .claude.json. CLAUDEP_TIMEOUT=<seconds> waits longer`,
+      );
+    else if (s.cached && s.loggedIn)
       report.add(
         "login",
         "cached",
@@ -4154,6 +4243,7 @@ ${c.bold("ENVIRONMENT")}
   CLAUDE_PROFILES_DIR   where profiles live (default ~/.claudep; keep it out of iCloud/Dropbox)
   CLAUDEP_AUTO          set by the hook next to CLAUDE_CONFIG_DIR; marks the pin as hook-managed
   CLAUDEP_MANAGED_DIR   where doctor reads managed settings (default ${managedSettingsDir(L.platform)})
+  CLAUDEP_TIMEOUT       seconds list, status, usage and doctor wait for each claude (default ${DEFAULT_TIMEOUT_S}; 0 waits forever)
   ${ENV_KEYS_VAR}      the variables a ${ENV_FILE} put in this shell, cleared again on leaving
 
 ${c.dim("claudep is an independent, unofficial tool. It is not affiliated with, endorsed by or supported by Anthropic.")}

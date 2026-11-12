@@ -7,17 +7,20 @@ import {
   aliasShim,
   authEnvOverrides,
   authStatusSafe,
+  awaitWithDeadline,
   baseEnv,
   COMMANDS,
   COMPLETION_SHELLS,
   CREDENTIAL_ENV,
   cachedAuthStatus,
   canon,
+  claudeTimeoutMs,
   commandWords,
   completionHint,
   completionScript,
   currentLabel,
   currentProfile,
+  DEFAULT_TIMEOUT_S,
   defaultShell,
   deleteEnv,
   ENV_KEYS_VAR,
@@ -1335,5 +1338,104 @@ describe("settingsKeyDiff", () => {
     expect(settingsKeyDiff("{not", "{}")).toBeUndefined();
     expect(settingsKeyDiff("[]", "{}")).toBeUndefined();
     expect(settingsKeyDiff(undefined, "{}")).toBeUndefined();
+  });
+});
+
+describe("child deadlines", () => {
+  test("CLAUDEP_TIMEOUT is seconds, 0 turns it off, junk keeps the default", () => {
+    expect(claudeTimeoutMs({})).toEqual({ ms: DEFAULT_TIMEOUT_S * 1000 });
+    expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "2.5" })).toEqual({ ms: 2500 });
+    expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "0" })).toEqual({ ms: undefined });
+    expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "-1" })).toEqual({ ms: DEFAULT_TIMEOUT_S * 1000, bad: "-1" });
+    expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "x" })).toEqual({ ms: DEFAULT_TIMEOUT_S * 1000, bad: "x" });
+  });
+
+  /** A clock the test advances by hand. */
+  function fakeTimers() {
+    let now = 0;
+    const timers: { at: number; fn: () => void; id: number }[] = [];
+    let next = 1;
+    return {
+      setTimer: (fn: () => void, ms: number) => {
+        const id = next++;
+        timers.push({ at: now + ms, fn, id });
+        return id;
+      },
+      clearTimer: (id: unknown) => {
+        const i = timers.findIndex((t) => t.id === id);
+        if (i >= 0) timers.splice(i, 1);
+      },
+      advance(ms: number) {
+        now += ms;
+        for (const t of [...timers].sort((a, b) => a.at - b.at))
+          if (t.at <= now) {
+            timers.splice(timers.indexOf(t), 1);
+            t.fn();
+          }
+      },
+      pending: () => timers.length,
+    };
+  }
+
+  test("a child that exits in time is never signalled and leaves no timer", async () => {
+    const t = fakeTimers();
+    const kills: string[] = [];
+    const r = await awaitWithDeadline(Promise.resolve(3), 1000, 200, { ...t, kill: (s) => kills.push(s) });
+    expect(r).toEqual({ code: 3, timedOut: false });
+    expect(kills).toEqual([]);
+    expect(t.pending()).toBe(0);
+  });
+
+  test("a stuck child gets SIGTERM at the deadline and SIGKILL after the grace", async () => {
+    const t = fakeTimers();
+    const kills: string[] = [];
+    let exit: (code: number) => void = () => {};
+    const exited = new Promise<number>((r) => {
+      exit = r;
+    });
+    const p = awaitWithDeadline(exited, 1000, 200, { ...t, kill: (s) => kills.push(s) });
+    t.advance(999);
+    expect(kills).toEqual([]);
+    t.advance(1);
+    expect(kills).toEqual(["SIGTERM"]);
+    t.advance(199);
+    expect(kills).toEqual(["SIGTERM"]);
+    t.advance(1);
+    expect(kills).toEqual(["SIGTERM", "SIGKILL"]);
+    exit(137);
+    expect(await p).toEqual({ code: 137, timedOut: true });
+    expect(t.pending()).toBe(0);
+  });
+
+  test("a child that stops on SIGTERM is not killed", async () => {
+    const t = fakeTimers();
+    const kills: string[] = [];
+    let exit: (code: number) => void = () => {};
+    const exited = new Promise<number>((r) => {
+      exit = r;
+    });
+    const p = awaitWithDeadline(exited, 1000, 200, {
+      ...t,
+      kill: (s) => {
+        kills.push(s);
+        if (s === "SIGTERM") exit(143);
+      },
+    });
+    t.advance(1000);
+    expect(await p).toEqual({ code: 143, timedOut: true });
+    t.advance(1000);
+    expect(kills).toEqual(["SIGTERM"]);
+  });
+
+  test("no deadline waits for the child however long it takes", async () => {
+    const kills: string[] = [];
+    const r = await awaitWithDeadline(Promise.resolve(0), undefined, 200, {
+      setTimer: () => {
+        throw new Error("no timer expected");
+      },
+      clearTimer: () => {},
+      kill: (s) => kills.push(s),
+    });
+    expect(r).toEqual({ code: 0, timedOut: false });
   });
 });
