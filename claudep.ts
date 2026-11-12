@@ -227,7 +227,7 @@ export type Current = {
   kind: "base" | "profile" | "custom";
   name: string | undefined;
   dir: string;
-  setBy: "none" | "hook" | "manual";
+  setBy: "none" | "hook" | "manual" | "run";
 };
 
 /** What this shell is running Claude Code as, and how it got that way. */
@@ -236,7 +236,11 @@ export function currentProfile(L: Layout, env: Env = process.env): Current {
   if (!cfg) return { kind: "base", name: undefined, dir: L.base, setBy: "none" };
   const dir = canon(cfg, L.home, L.platform);
   const auto = env.CLAUDEP_AUTO;
-  const setBy = auto !== undefined && samePath(canon(auto, L.home, L.platform), dir, L.platform) ? "hook" : "manual";
+  const run = env.CLAUDEP_RUN;
+  const same = (v: string | undefined) =>
+    v !== undefined && v !== "" && samePath(canon(v, L.home, L.platform), dir, L.platform);
+  // A marker that names another dir was inherited by a nested manual pin, so it does not count.
+  const setBy = same(auto) ? "hook" : same(run) ? "run" : "manual";
   if (L.activeProfile !== undefined) return { kind: "profile", name: L.activeProfile, dir, setBy };
   return { kind: "custom", name: undefined, dir, setBy };
 }
@@ -1546,10 +1550,16 @@ async function claudeLaunch(L: Layout): Promise<ClaudeLaunch> {
   return launch;
 }
 
-async function spawnClaude(L: Layout, dir: string | undefined, args: string[], io: "inherit" | "pipe") {
+async function spawnClaude(
+  L: Layout,
+  dir: string | undefined,
+  args: string[],
+  io: "inherit" | "pipe",
+  env: Env = claudeEnv(L, dir),
+) {
   const { cmd, verbatim } = claudeSpawn(await claudeLaunch(L), args);
   return Bun.spawn(cmd, {
-    env: claudeEnv(L, dir),
+    env,
     stdin: io === "inherit" ? "inherit" : "ignore",
     stdout: io,
     stderr: io,
@@ -1588,13 +1598,31 @@ export function baseEnv(L: Layout, env: Env = process.env): Env {
   return out;
 }
 
+/** Marks a session claudep started, for `claudep current` and the StopFailure hook.
+ *  CLAUDEP_RUN names the profile dir (removed for the base) and CLAUDEP_RUN_ID
+ *  is this launch's nonce. An inherited CLAUDEP_AUTO goes, so a hook-pinned
+ *  parent shell does not make the session look hook-pinned. */
+export function runMarkers(
+  env: Env,
+  dir: string | undefined,
+  runId: string,
+  platform: NodeJS.Platform = process.platform,
+): Env {
+  const out: Env = { ...env };
+  for (const k of ["CLAUDEP_AUTO", "CLAUDEP_RUN", "CLAUDEP_RUN_ID"]) deleteEnv(out, k, platform);
+  if (dir !== undefined) out.CLAUDEP_RUN = dir;
+  out.CLAUDEP_RUN_ID = runId;
+  return out;
+}
+
 function claudeEnv(L: Layout, dir: string | undefined): Env {
   if (dir === undefined) return baseEnv(L);
   return withProfileVars(readProfileEnv(dir).vars, envFor(dir, process.env, L.platform), L.platform);
 }
 
 async function execClaude(L: Layout, dir: string | undefined, args: string[]): Promise<never> {
-  const proc = await spawnClaude(L, dir, args, "inherit");
+  const runId = crypto.randomUUID();
+  const proc = await spawnClaude(L, dir, args, "inherit", runMarkers(claudeEnv(L, dir), dir, runId, L.platform));
   // Ctrl+C reaches the child through the terminal; keep the wrapper alive so
   // it can report the child's real exit code.
   const signals = wrapperSignals(L.platform);
@@ -2613,7 +2641,14 @@ function cmdSettings(L: Layout, args: string[]): void {
 
 function describeCurrent(cur: Current): string {
   const label = currentLabel(cur);
-  const how = cur.setBy === "hook" ? "shell hook" : cur.setBy === "manual" ? "manual pin" : "nothing pinned";
+  const how =
+    cur.setBy === "hook"
+      ? "shell hook"
+      : cur.setBy === "run"
+        ? "claudep run"
+        : cur.setBy === "manual"
+          ? "manual pin"
+          : "nothing pinned";
   return `${label} (${how})`;
 }
 
@@ -2883,6 +2918,7 @@ function cmdCurrent(L: Layout, args: string[]): void {
   console.log(`${c.bold(label)}  ${c.dim(shortHome(cur.dir, L.home, L.platform))}`);
   if (cur.setBy === "hook")
     console.log(`set by: shell hook${pin ? ` (${PIN_FILE} in ${shortHome(pin.dir, L.home, L.platform)})` : ""}`);
+  else if (cur.setBy === "run") console.log("set by: claudep run (this session was started by claudep)");
   else if (cur.setBy === "manual") console.log("set by: manual pin (claudep env or export CLAUDE_CONFIG_DIR)");
   else console.log("set by: nothing pinned; this is ~/.claude");
   if (cur.kind === "custom") console.log(c.dim("CLAUDE_CONFIG_DIR points outside the claudep profiles root"));
@@ -4266,6 +4302,7 @@ ${c.bold("PROFILE VARIABLES")}
 ${c.bold("ENVIRONMENT")}
   CLAUDE_PROFILES_DIR   where profiles live (default ~/.claudep; keep it out of iCloud/Dropbox)
   CLAUDEP_AUTO          set by the hook next to CLAUDE_CONFIG_DIR; marks the pin as hook-managed
+  CLAUDEP_RUN           set by claudep <name>, run, handoff and alias commands in claude's environment: the profile dir
   CLAUDEP_MANAGED_DIR   where doctor reads managed settings (default ${managedSettingsDir(L.platform)})
   CLAUDEP_TIMEOUT       seconds list, status, usage and doctor wait for each claude (default ${DEFAULT_TIMEOUT_S}; 0 waits forever)
   ${ENV_KEYS_VAR}      the variables a ${ENV_FILE} put in this shell, cleared again on leaving

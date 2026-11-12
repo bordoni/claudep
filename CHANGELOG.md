@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Added
 
 - `claudep list`, `status`, `usage` and `doctor` stop a `claude` that has not answered in 30 seconds, so one stuck profile no longer hangs the whole command. Its row shows `timeout` with the account in `.claude.json` (for `usage`, the last numbers seen), and `--json` adds `"timedOut": true`. `CLAUDEP_TIMEOUT=<seconds>` changes the limit and `0` turns it off. The child gets SIGTERM and three seconds to finish a token refresh before SIGKILL. `claudep <name>`, `run` and `handoff` have no limit.
+- `claudep <name>`, `claudep run`, `claudep handoff` and alias commands set `CLAUDEP_RUN` to the profile dir in claude's environment. `claudep current` inside such a session says `set by: claudep run`, and `--json` returns `"setBy": "run"`. A `CLAUDEP_RUN` naming another dir counts as a manual pin.
 
 ### Changed
 
@@ -16,6 +17,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Fixed
 
+- A session started by `claudep run` from a shell the hook had pinned no longer inherits `CLAUDEP_AUTO`, so `claudep current` inside it no longer says "shell hook".
 - Short `claude` calls in `list`, `status`, `usage` and `doctor` read stderr as well as stdout, so a child that writes a lot to stderr can no longer block on a full pipe.
 
 ## [0.8.0] - 2026-11-05

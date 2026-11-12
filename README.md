@@ -131,6 +131,7 @@ From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile,
 
 - The nearest `.claudep` file upward from the current directory wins. An empty one cancels a parent pin.
 - The hook only changes a `CLAUDE_CONFIG_DIR` it set itself. It tracks that in `CLAUDEP_AUTO`, so a manual pin from `eval "$(claudep env work)"` (`claudep env work | source` in fish, `claudep env work | Invoke-Expression` in PowerShell) or a plain `export` stays put until you `eval "$(claudep env --unset)"`.
+- `claudep <name>`, `claudep run`, `claudep handoff` and alias commands put `CLAUDEP_RUN=<profile dir>` in claude's environment and drop an inherited `CLAUDEP_AUTO`, so inside that session `claudep current` says `set by: claudep run` and the hook leaves the session's profile alone.
 - A pin that names a profile you have not created prints one warning per directory change and sets nothing.
 
 `claudep env` prints the syntax of the shell it runs in: it looks at its parent process (fish, pwsh, or an sh-like shell) and falls back to your login shell. Pass `--shell sh|fish|powershell` when neither answer fits, for example from a script or a Makefile.

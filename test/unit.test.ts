@@ -68,6 +68,7 @@ import {
   refusedEnvRegex,
   refusedSettingKey,
   resolvePin,
+  runMarkers,
   runSettings,
   SHELLS,
   type Shell,
@@ -1437,5 +1438,26 @@ describe("child deadlines", () => {
       kill: (s) => kills.push(s),
     });
     expect(r).toEqual({ code: 0, timedOut: false });
+  });
+});
+
+describe("runMarkers", () => {
+  test("names the profile, sets the nonce and drops hook and stale markers", () => {
+    const env: Env = { CLAUDEP_AUTO: "/a", CLAUDEP_RUN: "/old", CLAUDEP_RUN_ID: "old", PATH: "/bin" };
+    expect(runMarkers(env, "/p/work", "n1", "linux")).toEqual({
+      PATH: "/bin",
+      CLAUDEP_RUN: "/p/work",
+      CLAUDEP_RUN_ID: "n1",
+    });
+    expect(runMarkers(env, undefined, "n2", "linux")).toEqual({ PATH: "/bin", CLAUDEP_RUN_ID: "n2" });
+    expect(env.CLAUDEP_AUTO).toBe("/a");
+  });
+
+  test("drops every spelling on win32", () => {
+    expect(runMarkers({ ClaudeP_Auto: "x", Path: "p" }, "C:\\p\\w", "n", "win32")).toEqual({
+      Path: "p",
+      CLAUDEP_RUN: "C:\\p\\w",
+      CLAUDEP_RUN_ID: "n",
+    });
   });
 });

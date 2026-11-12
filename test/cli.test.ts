@@ -1967,3 +1967,47 @@ describe("exit codes for claudep's own failures", () => {
     }
   });
 });
+
+describe("CLAUDEP_RUN marks sessions claudep started", () => {
+  test("run sets CLAUDEP_RUN and a run id and drops an inherited CLAUDEP_AUTO", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const log = join(h.home, "claude.log");
+    const env = {
+      FAKE_CLAUDE_LOG: log,
+      FAKE_CLAUDE_LOG_ENV: "CLAUDEP_RUN,CLAUDEP_RUN_ID,CLAUDEP_AUTO",
+      CLAUDEP_AUTO: join(h.profilesRoot, "other"),
+      CLAUDEP_RUN: join(h.profilesRoot, "stale"),
+    };
+    await runCli(["work", "-p", "x"], { home: h.home, env });
+    await runCli(["run", "default", "-p", "x"], { home: h.home, env });
+    const [work, base] = readFileSync(log, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l).env);
+    expect(work.CLAUDEP_RUN).toBe(join(h.profilesRoot, "work"));
+    expect(work.CLAUDEP_AUTO).toBeNull();
+    expect(work.CLAUDEP_RUN_ID).toMatch(/^[0-9a-f-]{36}$/);
+    expect(base.CLAUDEP_RUN).toBeNull();
+    expect(base.CLAUDEP_AUTO).toBeNull();
+    expect(base.CLAUDEP_RUN_ID).not.toBe(work.CLAUDEP_RUN_ID);
+  });
+
+  test("current says set by claudep run, and a marker for another dir counts as manual", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "work");
+    const run = await runCli(["current", "--json"], {
+      home: h.home,
+      env: { CLAUDE_CONFIG_DIR: dir, CLAUDEP_RUN: dir },
+    });
+    expect(JSON.parse(run.stdout)).toMatchObject({ name: "work", setBy: "run" });
+    const text = await runCli(["current"], { home: h.home, env: { CLAUDE_CONFIG_DIR: dir, CLAUDEP_RUN: dir } });
+    expect(text.stdout).toContain("set by: claudep run");
+    const stale = await runCli(["current", "--json"], {
+      home: h.home,
+      env: { CLAUDE_CONFIG_DIR: dir, CLAUDEP_RUN: join(h.profilesRoot, "other") },
+    });
+    expect(JSON.parse(stale.stdout)).toMatchObject({ name: "work", setBy: "manual" });
+  });
+});
