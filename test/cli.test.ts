@@ -2105,3 +2105,81 @@ describe("StopFailure markers", () => {
     expect((await runCli(["init", "hook", "--no-login"], { home: h.home })).stderr).toContain("reserved");
   });
 });
+
+describe("ps", () => {
+  /** A pid that no longer exists: a short child that has already exited. */
+  function deadPid(): number {
+    const p = Bun.spawnSync([process.execPath, "-e", "0"]);
+    return p.pid;
+  }
+
+  function record(dir: string, pid: number, fields: Record<string, unknown>): void {
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    writeFileSync(join(dir, "sessions", `${pid}.json`), JSON.stringify({ pid, ...fields }));
+  }
+
+  test("lists live sessions in the base and each profile, skips dead pids and marks old versions", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const now = Date.now();
+    record(h.base, process.pid, {
+      name: "base-one",
+      status: "idle",
+      kind: "interactive",
+      version: "9.9.9",
+      cwd: h.home,
+      updatedAt: now,
+    });
+    record(join(h.profilesRoot, "work"), process.pid, {
+      name: "old-one",
+      status: "busy",
+      kind: "bg",
+      version: "2.1.300",
+      cwd: join(h.home, "repo"),
+      updatedAt: now,
+    });
+    record(join(h.profilesRoot, "work"), deadPid(), { name: "gone", status: "idle", version: "9.9.9" });
+    writeFileSync(join(h.profilesRoot, "work", "sessions", `${process.pid}.abc.key`), "secret");
+    const r = await runCli(["ps"], { home: h.home });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/^PROFILE\s+PID\s+NAME\s+STATUS\s+KIND\s+VERSION\s+CWD/);
+    expect(r.stdout).toMatch(
+      new RegExp(`^default\\s+${process.pid}\\s+base-one\\s+idle now\\s+interactive\\s+9\\.9\\.9\\s+`, "m"),
+    );
+    expect(r.stdout).toMatch(/^work\s+\d+\s+old-one\s+busy now\s+bg\s+2\.1\.300 \(old\)/m);
+    expect(r.stdout).not.toContain("gone");
+    expect(r.stdout).not.toContain("secret");
+    const stale = await runCli(["ps", "--stale", "--json"], { home: h.home });
+    const rows = JSON.parse(stale.stdout) as { profile: string; name: string; stale: boolean }[];
+    expect(rows.map((x) => [x.profile, x.name, x.stale])).toEqual([["work", "old-one", true]]);
+    const only = await runCli(["ps", "work", "--json"], { home: h.home });
+    expect(JSON.parse(only.stdout).map((x: { name: string }) => x.name)).toEqual(["old-one"]);
+  });
+
+  test("a record from another pid namespace, or for a reused pid, is not live", async () => {
+    if (process.platform !== "linux") return;
+    using h = fakeHome();
+    record(h.base, process.pid, { name: "foreign", pidDomain: "linux:other:pid:[1]" });
+    record(join(h.base), process.ppid, { name: "reused", procStart: "1" });
+    const r = await runCli(["ps", "--json"], { home: h.home });
+    expect(JSON.parse(r.stdout)).toEqual([]);
+  });
+
+  test("rm refuses a profile with live sessions unless --force, and names the pids", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    record(join(h.profilesRoot, "work"), process.pid, { name: "busy" });
+    const r = await runCli(["rm", "work", "--yes"], { home: h.home });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(`pid ${process.pid}`);
+    expect(existsSync(join(h.profilesRoot, "work"))).toBe(true);
+    const forced = await runCli(["rm", "work", "--yes", "--force"], { home: h.home });
+    expect(forced.exitCode).toBe(0);
+    expect(existsSync(join(h.profilesRoot, "work"))).toBe(false);
+  });
+
+  test("ps is a reserved profile name", async () => {
+    using h = fakeHome();
+    expect((await runCli(["init", "ps", "--no-login"], { home: h.home })).stderr).toContain("reserved");
+  });
+});

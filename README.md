@@ -67,7 +67,9 @@ claudep statusline                   statusline segment with the profile and its
 claudep current [--json|--name]      which profile this shell is on, and why
 claudep doctor [name] [--json]       verify symlinks, keychain entry, unclassified files, shims, Claude Code version
 claudep doctor --accept <name> <item>   stop counting one shared item as a problem; --unaccept undoes it
-claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
+claudep ps [name…] [--json] [--stale]   live Claude Code sessions in every profile; --stale only older versions
+claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched); refuses
+                                     one with live sessions unless --force
 claudep local <name> | --remove      pin the current directory tree to a profile (see below)
 claudep resolve [dir]                print the profile pinned for a directory
 claudep shell-init [zsh|bash|fish|powershell]   print the hook that applies pins on cd
@@ -226,6 +228,16 @@ claudep usage work --json    # one profile, with the per-model weekly windows
 ```
 
 From Claude Code 2.1.301 on, `claudep usage` asks each profile with `claude -p /usage`, which reports usage without running the model and, with `--no-session-persistence`, writes no transcript. Older versions can sign a profile out on a short command like that ([anthropics/claude-code#95822](https://github.com/anthropics/claude-code/issues/95822)), so there it shows the numbers last seen by `claudep statusline` or an earlier run instead. `--live` asks anyway, `--cached` never asks. claudep never reads a token: Claude Code makes every request.
+
+## Live sessions
+
+```sh
+claudep ps              # every live session in ~/.claude and each profile
+claudep ps work --json  # one profile, as JSON
+claudep ps --stale      # only sessions on a Claude Code older than the one installed
+```
+
+Each running Claude Code session writes `sessions/<pid>.json` in its config dir. `claudep ps` reads those files and nothing else in the folder, so the `.key` files next to them, which hold a peer token, are never opened. It shows the profile, pid, name, status and how long it has held it, kind, version and working directory, and skips a record whose process is gone. On Linux it also skips one whose pid now belongs to another process or another pid namespace. `claudep rm` refuses a profile with live sessions, because its logout revokes the token under them; `--force` removes it anyway.
 
 ## Hand a session to another profile
 

@@ -65,8 +65,10 @@ import {
   parseVersion,
   pathKey,
   printMode,
+  procStartOf,
   projectSlug,
   RESERVED,
+  readSessions,
   refusedEnvCase,
   refusedEnvKey,
   refusedEnvRegex,
@@ -74,6 +76,7 @@ import {
   resolvePin,
   runMarkers,
   runSettings,
+  type SessionDeps,
   SHELLS,
   type Shell,
   type Shim,
@@ -1523,5 +1526,83 @@ describe("StopFailure markers", () => {
     expect(hookProfile(layout({ ...env, CLAUDE_CONFIG_DIR: "/h/.claudep/c2" }, "linux"), {})).toBe("c2");
     expect(hookProfile(L, {})).toBe("default");
     expect(hookProfile(layout({ ...env, CLAUDE_CONFIG_DIR: "/custom" }, "linux"), {})).toBeUndefined();
+  });
+});
+
+describe("readSessions", () => {
+  function deps(files: Record<string, string>, over: Partial<SessionDeps> = {}) {
+    const read: string[] = [];
+    const d: SessionDeps = {
+      list: () => Object.keys(files),
+      read: (f) => {
+        read.push(f);
+        return files[f.split("/").pop() as string];
+      },
+      alive: () => true,
+      procStart: () => undefined,
+      domain: undefined,
+      ...over,
+    };
+    return { d, read };
+  }
+
+  test("reads only <pid>.json, never a .key file, and keeps only the allowlisted fields", () => {
+    const { d, read } = deps({
+      "42.json": JSON.stringify({
+        pid: 42,
+        name: "a",
+        status: "idle",
+        messagingSocketPath: "/s",
+        peerFeatures: {},
+        cwd: "/w",
+        updatedAt: 5,
+      }),
+      "42.deadbeef.key": "token",
+      "x.json": "{}",
+      "1.json": "{}",
+    });
+    const rows = readSessions("work", "/c", d, "linux");
+    expect(read).toEqual(["/c/sessions/42.json"]);
+    expect(rows).toEqual([
+      {
+        profile: "work",
+        pid: 42,
+        name: "a",
+        status: "idle",
+        kind: undefined,
+        entrypoint: undefined,
+        cwd: "/w",
+        version: undefined,
+        startedAt: undefined,
+        statusSince: 5,
+      },
+    ]);
+  });
+
+  test("skips a dead pid, a reused pid and another pid domain", () => {
+    const f = { "7.json": JSON.stringify({ procStart: "100", pidDomain: "linux:a:pid:[1]" }) };
+    expect(readSessions("w", "/c", deps(f, { alive: () => false }).d, "linux")).toEqual([]);
+    expect(readSessions("w", "/c", deps(f, { procStart: () => "101" }).d, "linux")).toEqual([]);
+    expect(readSessions("w", "/c", deps(f, { domain: "linux:b:pid:[1]" }).d, "linux")).toEqual([]);
+    expect(
+      readSessions("w", "/c", deps(f, { procStart: () => "100", domain: "linux:a:pid:[1]" }).d, "linux"),
+    ).toHaveLength(1);
+  });
+
+  test("a missing sessions dir is no sessions", () => {
+    const d = deps(
+      {},
+      {
+        list: () => {
+          throw new Error("ENOENT");
+        },
+      },
+    ).d;
+    expect(readSessions("w", "/c", d, "linux")).toEqual([]);
+  });
+
+  test("procStartOf counts from the last parenthesis", () => {
+    const fields = Array.from({ length: 30 }, (_, i) => String(i + 3)).join(" ");
+    expect(procStartOf(`123 (a) b) ${fields}`)).toBe("22");
   });
 });

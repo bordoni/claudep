@@ -463,6 +463,7 @@ export const COMMANDS: readonly Command[] = [
     arg: "profile",
     flags: ["--json"],
   },
+  { name: "ps", desc: "live Claude Code sessions in every profile", arg: "profile", flags: ["--json", "--stale"] },
   { name: "handoff", desc: "resume this directory's latest session under another profile", arg: "profile" },
   { name: "statusline", desc: "print the profile and its usage from the statusline JSON on stdin" },
   {
@@ -482,7 +483,7 @@ export const COMMANDS: readonly Command[] = [
     desc: "log out and delete a profile",
     aliases: ["remove"],
     arg: "profile",
-    flags: ["--keep-login", "--yes"],
+    flags: ["--keep-login", "--yes", "--force"],
   },
   { name: "local", desc: "pin this directory tree to a profile", arg: "profile", flags: ["--remove", "--force"] },
   { name: "resolve", desc: "print the profile pinned for a directory", arg: "dir", flags: ["--json"] },
@@ -4359,7 +4360,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
 async function cmdRm(L: Layout, args: string[]): Promise<void> {
   const f = parseFlags(args, ...flagSpec("rm"));
   const name = f.rest[0];
-  if (!name) die("usage: claudep rm <name> [--keep-login] [--yes]");
+  if (!name) die("usage: claudep rm <name> [--keep-login] [--yes] [--force]");
   const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist`);
   const real = realpathSync(dir);
@@ -4380,6 +4381,11 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
   if (pin && pin.name === name)
     warn(
       `${shortHome(pin.file, L.home, L.platform)} pins this directory tree to ${name}. Remove it with: claudep local --remove`,
+    );
+  const live = liveSessions(L, [name]);
+  if (live.length && !f.bools.has("--force"))
+    die(
+      `"${name}" has ${live.length} live session(s), pid ${live.map((r) => r.pid).join(", ")}. Logging out would revoke the token under them. Stop them first, or pass --force`,
     );
   if (!f.bools.has("--yes")) {
     const yes = confirm(`Remove profile "${name}" (${dir})? Shared items are only unlinked; ${L.base} is untouched.`);
@@ -4403,6 +4409,223 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
   ok(`removed ${dir}`);
   for (const shim of findShims(shimDirs(L), L.platform))
     if (shim.profile === name) warn(`alias shim ${shim.path} still points at this profile. Remove it if unused`);
+}
+
+// ---------------------------------------------------------------------------
+// Live sessions. Claude Code writes sessions/<pid>.json in its config dir for
+// every running session. claudep reads only those files, keeps a fixed set of
+// fields and checks the pid is still the process that wrote the record. The
+// sessions dir also holds <pid>.<hash>.key files with a peer token; they are
+// never opened (Never 3).
+// ---------------------------------------------------------------------------
+
+export const SESSION_FILE_RE = /^[0-9]+\.json$/;
+const SESSION_MAX_BYTES = 262_144;
+
+export type Session = {
+  profile: string;
+  pid: number;
+  name?: string;
+  status?: string;
+  kind?: string;
+  entrypoint?: string;
+  cwd?: string;
+  version?: string;
+  startedAt?: number;
+  /** ms since epoch when the status last changed, or the record was last written. */
+  statusSince?: number;
+};
+
+export type SessionDeps = {
+  list: (dir: string) => string[];
+  read: (file: string) => string | undefined;
+  /** True while a process with this pid exists. */
+  alive: (pid: number) => boolean;
+  /** The process's start time as Claude Code records it (field 22 of /proc/<pid>/stat), when known. */
+  procStart: (pid: number) => string | undefined;
+  /** This host's pid domain as Claude Code writes it, when known. */
+  domain: string | undefined;
+};
+
+/** Field 22 of a /proc/<pid>/stat line: start time in clock ticks. The command
+ *  name in field 2 can hold spaces and parentheses, so count from the last ")". */
+export function procStartOf(stat: string): string | undefined {
+  const tail = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  return tail[19];
+}
+
+const str = (o: JsonObject, k: string) => (typeof o[k] === "string" ? (o[k] as string) : undefined);
+const num = (o: JsonObject, k: string) =>
+  typeof o[k] === "number" && Number.isFinite(o[k]) ? (o[k] as number) : undefined;
+
+/** The live sessions in one config dir. A record whose pid is gone, was reused
+ *  by another process, or belongs to another host or pid namespace is skipped. */
+export function readSessions(
+  profile: string,
+  configDir: string,
+  deps: SessionDeps,
+  platform: NodeJS.Platform = process.platform,
+): Session[] {
+  const P = pathApi(platform);
+  const dir = P.join(configDir, "sessions");
+  const out: Session[] = [];
+  let names: string[];
+  try {
+    names = deps.list(dir);
+  } catch {
+    return out;
+  }
+  for (const f of names) {
+    if (!SESSION_FILE_RE.test(f)) continue;
+    const pid = Number(f.slice(0, -5));
+    if (!Number.isSafeInteger(pid) || pid <= 1) continue;
+    const text = deps.read(P.join(dir, f));
+    if (text === undefined) continue;
+    let o: JsonObject;
+    try {
+      const j: unknown = JSON.parse(text);
+      if (!j || typeof j !== "object" || Array.isArray(j)) continue;
+      o = j as JsonObject;
+    } catch {
+      continue;
+    }
+    const domain = str(o, "pidDomain");
+    if (domain !== undefined && deps.domain !== undefined && domain !== deps.domain) continue;
+    if (!deps.alive(pid)) continue;
+    const recorded = str(o, "procStart");
+    const actual = recorded === undefined ? undefined : deps.procStart(pid);
+    if (recorded !== undefined && actual !== undefined && recorded !== actual) continue;
+    out.push({
+      profile,
+      pid,
+      name: str(o, "name"),
+      status: str(o, "status"),
+      kind: str(o, "kind"),
+      entrypoint: str(o, "entrypoint"),
+      cwd: str(o, "cwd"),
+      version: str(o, "version"),
+      startedAt: num(o, "startedAt"),
+      statusSince: num(o, "statusUpdatedAt") ?? num(o, "updatedAt"),
+    });
+  }
+  return out.sort((a, b) => a.pid - b.pid);
+}
+
+function hostSessionDeps(platform: NodeJS.Platform): SessionDeps {
+  const linux = platform === "linux";
+  let domain: string | undefined;
+  if (linux) {
+    try {
+      const id = readFileSync("/etc/machine-id", "utf8").trim();
+      let ns = "";
+      try {
+        ns = readlinkSync("/proc/self/ns/pid");
+      } catch {}
+      domain = `linux:${id}:${ns}`;
+    } catch {}
+  }
+  return {
+    list: (dir) => readdirSync(dir),
+    read: (file) => {
+      try {
+        if (statSync(file).size > SESSION_MAX_BYTES) return undefined;
+        return readFileSync(file, "utf8");
+      } catch {
+        return undefined;
+      }
+    },
+    alive: (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (e) {
+        return (e as NodeJS.ErrnoException).code === "EPERM";
+      }
+    },
+    procStart: (pid) => {
+      if (!linux) return undefined;
+      try {
+        return procStartOf(readFileSync(`/proc/${pid}/stat`, "utf8"));
+      } catch {
+        return undefined;
+      }
+    },
+    domain,
+  };
+}
+
+/** Live sessions for each named profile (`default` is the base). */
+function liveSessions(L: Layout, names: readonly string[]): Session[] {
+  const deps = hostSessionDeps(L.platform);
+  return names.flatMap((n) => readSessions(n, n === "default" ? L.base : profileDir(L, n), deps, L.platform));
+}
+
+export function formatSessions(
+  rows: readonly Session[],
+  installed: Version | undefined,
+  now: number,
+  home: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const cols = ["PROFILE", "PID", "NAME", "STATUS", "KIND", "VERSION", "CWD"];
+  const data = rows.map((r) => [
+    r.profile,
+    String(r.pid),
+    r.name ?? "-",
+    r.status
+      ? `${r.status}${r.statusSince ? ` ${ageText(Math.floor(r.statusSince / 1000), now).replace(/ ago$/, "")}` : ""}`
+      : "-",
+    r.kind ?? "-",
+    r.version ? `${r.version}${sessionStale(r, installed) ? " (old)" : ""}` : "-",
+    r.cwd ? shortHome(r.cwd, home, platform) : "-",
+  ]);
+  const widths = cols.map((h, i) => Math.max(h.length, ...data.map((d) => (d[i] as string).length)));
+  const fmt = (cells: string[]) =>
+    cells
+      .map((v, i) => v.padEnd(widths[i] as number))
+      .join("  ")
+      .trimEnd();
+  return [fmt(cols), ...data.map((d) => fmt(d))];
+}
+
+/** True when the session runs a Claude Code older than the one installed now. */
+export function sessionStale(r: Session, installed: Version | undefined): boolean {
+  const v = r.version === undefined ? undefined : parseVersion(r.version);
+  return v !== undefined && installed !== undefined && versionBelow(v, installed);
+}
+
+/** `claudep ps [name…] [--json] [--stale]`: live sessions in the base and every profile. */
+async function cmdPs(L: Layout, args: string[]): Promise<void> {
+  const f = parseFlags(args, ...flagSpec("ps"));
+  const names = f.rest.length ? f.rest : ["default", ...listProfileNames(L)];
+  for (const n of names) if (n !== "default" && !profileExists(L, n)) die(`profile "${n}" does not exist`);
+  const installed = findClaude() ? await claudeVersion(L) : undefined;
+  let rows = liveSessions(L, names);
+  if (f.bools.has("--stale")) rows = rows.filter((r) => sessionStale(r, installed));
+  const now = Math.floor(Date.now() / 1000);
+  if (f.bools.has("--json")) {
+    console.log(
+      JSON.stringify(
+        rows.map((r) => ({ ...r, stale: sessionStale(r, installed) })),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  if (!rows.length) {
+    console.log(f.bools.has("--stale") ? "No session runs an older Claude Code." : "No live Claude Code sessions.");
+    return;
+  }
+  const [header, ...lines] = formatSessions(rows, installed, now, L.home, L.platform);
+  console.log(c.bold(header as string));
+  for (const line of lines) console.log(line);
+  if (rows.some((r) => sessionStale(r, installed)))
+    console.log(
+      c.dim(
+        `\n(old): started before Claude Code ${installed?.join(".")} was installed; it picks up the update when restarted`,
+      ),
+    );
 }
 
 function help(L: Layout): void {
@@ -4440,7 +4663,9 @@ ${c.bold("USAGE")}
                                        remembers the numbers for claudep usage
   claudep doctor [name] [--json]       verify symlinks, keychain entry, unclassified files, shims, Claude Code version
   claudep doctor --accept <name> <item>   stop counting one shared item as a problem; --unaccept undoes it
-  claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
+  claudep ps [name…] [--json] [--stale]   live Claude Code sessions in every profile; --stale only older versions
+  claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched); refuses
+                                       one with live sessions unless --force
   claudep help                         show this text
   claudep --version                    print the version
 
@@ -4565,6 +4790,8 @@ export async function main(argv: string[]): Promise<void> {
       return cmdAlias(L, args);
     case "handoff":
       return cmdHandoff(L, args);
+    case "ps":
+      return cmdPs(L, args);
     case "hook":
       return cmdHook(L, args);
     case "statusline":

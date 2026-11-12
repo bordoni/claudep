@@ -345,6 +345,17 @@ Verified on the npm-global Linux build with a throwaway, logged-out config dir: 
 
 No `error_details` was present for this error. The matcher is tested against `error`. The error names in the 2.1.322 binary are `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `billing_error`, `rate_limit`, `overloaded`, `invalid_request`, `model_not_found`, `server_error`, `unknown`, `max_output_tokens` and `cloud_credential_error`. `verification_required` ("organization verification required") and `cloud_credential_error` are newer than 2.1.311. Not verified: a login whose refresh token is dead rather than absent. It is expected to end the same way, as `authentication_failed`.
 
+## 19. Session records (2026-11-12, 2.1.322)
+
+Each live session writes `<config dir>/sessions/<pid>.json`, and Claude Code itself only reads names whose stem is a canonical integer. A record on the author's machine carried `pid`, `sessionId`, `cwd`, `startedAt`, `procStart`, `version`, `peerProtocol`, `peerFeatures`, `kind`, `entrypoint`, `pidDomain`, `asksForConvertedSkills`, `messagingSocketPath`, `name`, `nameSource`, `nameSince`, `status`, `updatedAt` and `statusUpdatedAt`. Next to it sits `<pid>.<sha256>.key`, which holds a peer token; `claudep ps` never opens it.
+
+- `kind` is one of `interactive`, `bg`, `daemon`, `daemon-worker`; `status` one of `busy`, `shell`, `idle`, `waiting`.
+- `procStart` is field 22 of `/proc/<pid>/stat` (checked against six live sessions), so a pid reused by another process is caught by comparing the two.
+- `pidDomain` on Linux is `linux:<contents of /etc/machine-id>:<readlink /proc/self/ns/pid>`, from a function that returns plain `linux` on macOS. `claudep ps` compares it on Linux only.
+- Liveness in Claude Code is `process.kill(pid, 0)` with pid 1 and below refused, the same check `ps` uses.
+
+The binary's record reader (search `procStartFt`) keeps `cwd`, `startedAt`, `procStart`, `kind`, `sessionId`, `status`, `entrypoint` and `pidDomain`.
+
 ## How to re-verify
 
 The fastest way needs no script: byte offsets from a fixed-string grep, then a bounded slice around each one. `/usr/bin/grep` because the shell's `grep` is ugrep and rejects wide context regexes; `tr` because the slice is binary.
