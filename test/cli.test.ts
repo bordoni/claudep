@@ -58,7 +58,7 @@ describe("help and dispatch", () => {
   test("an unknown profile name explains how to create it", async () => {
     using h = fakeHome();
     const r = await runCli(["nope"], { home: h.home });
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(67);
     expect(r.stderr).toContain('no profile "nope"');
     expect(r.stderr).toContain("claudep init nope");
   });
@@ -66,7 +66,7 @@ describe("help and dispatch", () => {
   test("an unknown command is rejected", async () => {
     using h = fakeHome();
     const r = await runCli(["Frobnicate"], { home: h.home });
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(64);
     expect(r.stderr).toContain("unknown command");
   });
 });
@@ -124,10 +124,10 @@ describe("init", () => {
   test("refuses reserved and malformed names", async () => {
     using h = fakeHome();
     const a = await runCli(["init", "default", "--no-login"], { home: h.home });
-    expect(a.exitCode).toBe(1);
+    expect(a.exitCode).toBe(64);
     expect(a.stderr).toContain("reserved");
     const b = await runCli(["init", "Bad Name", "--no-login"], { home: h.home });
-    expect(b.exitCode).toBe(1);
+    expect(b.exitCode).toBe(64);
     expect(b.stderr).toContain("invalid profile name");
     expect(existsSync(h.profilesRoot)).toBe(false);
   });
@@ -1005,7 +1005,7 @@ describe("completion", () => {
     const help = await runCli(["help"], { home: h.home });
     expect(help.stdout).toContain("claudep completion");
     const r = await runCli(["init", "completion", "--no-login"], { home: h.home });
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(64);
     expect(r.stderr).toContain("reserved");
   });
 });
@@ -1193,12 +1193,13 @@ describe("handoff", () => {
     await runCli(["handoff", "work", OLD], { home: h.home, cwd, env: { FAKE_CLAUDE_LOG: log } });
     expect(JSON.parse(readFileSync(log, "utf8")).argv).toContain(OLD);
     const junk = await runCli(["handoff", "work", "nope"], { home: h.home, cwd });
-    expect(junk.exitCode).toBe(1);
+    expect(junk.exitCode).toBe(64);
     expect(junk.stderr).toContain('"nope" is not a session id');
     const empty = await runCli(["handoff", "work"], { home: h.home, cwd: h.home });
     expect(empty.exitCode).toBe(1);
     expect(empty.stderr).toContain("no session for this directory");
     const ghost = await runCli(["handoff", "ghost"], { home: h.home, cwd });
+    expect(ghost.exitCode).toBe(67);
     expect(ghost.stderr).toContain('profile "ghost" does not exist');
   });
 
@@ -1353,7 +1354,7 @@ describe("settings", () => {
     await runCli(["init", "work", "--no-login"], { home: h.home });
     writeFileSync(join(h.profilesRoot, "work", "claudep.settings.json"), "{ nope");
     const r = await runCli(["work", "x"], { home: h.home });
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(78);
     expect(r.stderr).toContain("not valid JSON");
     const doc = await runCli(["doctor", "work"], { home: h.home });
     expect(doc.exitCode).toBe(1);
@@ -1555,7 +1556,7 @@ describe("credential and config-dir guards", () => {
       const env = { CLAUDE_CONFIG_DIR: "" };
       for (const args of [["current"], ["run", "default"], ["doctor"]]) {
         const r = await runCli(args, { home: h.home, env });
-        expect(r.exitCode).toBe(1);
+        expect(r.exitCode).toBe(args[0] === "run" ? 78 : 1);
         expect(r.stdout + r.stderr).toContain("unset CLAUDE_CONFIG_DIR");
       }
       const doctor = await runCli(["doctor"], { home: h.home, env });
@@ -1935,5 +1936,34 @@ describe("deadlines on child claude calls", () => {
     const r = await runCli(["list"], { home: h.home, env: { CLAUDEP_TIMEOUT: "soon" } });
     expect(r.exitCode).toBe(0);
     expect(r.stderr.match(/CLAUDEP_TIMEOUT="soon" is not a number of seconds/g)?.length).toBe(1);
+  });
+});
+
+describe("exit codes for claudep's own failures", () => {
+  /** PATH holding only the test's own directories. */
+  const onlyPath = (...dirs: string[]) => ({
+    PATH: [...dirs, ...(WIN ? [join(process.env.SystemRoot ?? "C:\\Windows", "System32")] : [])].join(delimiter),
+  });
+
+  test("run without claude on PATH exits 69, a missing profile 67, a bad name 64", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const empty = join(h.home, "empty-bin");
+    mkdirSync(empty);
+    const absent = await runCli(["run", "work", "-p", "x"], { home: h.home, bin: empty, env: onlyPath(empty) });
+    expect(absent.exitCode).toBe(69);
+    expect(absent.stderr).toContain("not found on PATH");
+    expect((await runCli(["run", "ghost"], { home: h.home })).exitCode).toBe(67);
+    expect((await runCli(["run", "Bad Name"], { home: h.home })).exitCode).toBe(64);
+    expect((await runCli(["run"], { home: h.home })).exitCode).toBe(64);
+  }, 30_000);
+
+  test("claude's own exit code still passes through", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    for (const code of ["1", "2", "69"]) {
+      const r = await runCli(["work", "-p", "x"], { home: h.home, env: { FAKE_CLAUDE_EXIT: code } });
+      expect(r.exitCode).toBe(Number(code));
+    }
   });
 });

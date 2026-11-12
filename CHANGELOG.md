@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - `claudep list`, `status`, `usage` and `doctor` stop a `claude` that has not answered in 30 seconds, so one stuck profile no longer hangs the whole command. Its row shows `timeout` with the account in `.claude.json` (for `usage`, the last numbers seen), and `--json` adds `"timedOut": true`. `CLAUDEP_TIMEOUT=<seconds>` changes the limit and `0` turns it off. The child gets SIGTERM and three seconds to finish a token refresh before SIGKILL. `claudep <name>`, `run` and `handoff` have no limit.
 
+### Changed
+
+- **Breaking:** `claudep <name>`, `claudep run`, `claudep handoff` and alias commands exit with their own code when claudep stops before claude starts: 64 for a usage error or invalid name, 67 for a missing profile, 69 when `claude` cannot be found and 78 for an unreadable `claudep.settings.json` or an empty `CLAUDE_CONFIG_DIR`. They used to exit 1, which a script could not tell from claude's own 1. An invalid or reserved profile name is 64 in every command. The README lists the codes.
+
 ### Fixed
 
 - Short `claude` calls in `list`, `status`, `usage` and `doctor` read stderr as well as stdout, so a child that writes a lot to stderr can no longer block on a full pipe.

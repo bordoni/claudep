@@ -517,6 +517,23 @@ const ok = (msg: string) => console.log(`${c.green("✓")} ${msg}`);
 const warn = (msg: string) => console.log(`${c.yellow("!")} ${msg}`);
 const bad = (msg: string) => console.log(`${c.red("✗")} ${msg}`);
 
+/** Exit codes for claudep's own failures on the launch path, from sysexits.h.
+ *  Claude's own exit code passes through unchanged, so these never collide with its 1. */
+export const EXIT = {
+  /** Usage error or an invalid profile name (EX_USAGE). */
+  usage: 64,
+  /** The profile does not exist (EX_NOUSER). */
+  noProfile: 67,
+  /** `claude` is missing, or only a .ps1 was found (EX_UNAVAILABLE). */
+  noClaude: 69,
+  /** Claude stopped on a usage limit or a billing error (EX_TEMPFAIL). */
+  limit: 75,
+  /** Claude stopped because the login no longer works (EX_NOPERM). */
+  login: 77,
+  /** The profile's claudep.settings.json cannot be read (EX_CONFIG). */
+  config: 78,
+} as const;
+
 export function die(msg: string, code = 1): never {
   console.error(`${c.red("error:")} ${msg}`);
   process.exit(code);
@@ -527,8 +544,9 @@ export function die(msg: string, code = 1): never {
 // ---------------------------------------------------------------------------
 
 export function profileDir(L: Layout, name: string): string {
-  if (!NAME_RE.test(name)) die(`invalid profile name "${name}" (use [a-z0-9_-], starting with a letter or digit)`);
-  if (RESERVED.has(name)) die(`"${name}" is a reserved word and cannot be a profile name`);
+  if (!NAME_RE.test(name))
+    die(`invalid profile name "${name}" (use [a-z0-9_-], starting with a letter or digit)`, EXIT.usage);
+  if (RESERVED.has(name)) die(`"${name}" is a reserved word and cannot be a profile name`, EXIT.usage);
   return canon(pathApi(L.platform).join(L.profilesRoot, name), L.home, L.platform);
 }
 
@@ -1518,10 +1536,12 @@ async function claudeLaunch(L: Layout): Promise<ClaudeLaunch> {
       updating
         ? "`claude` is still missing after a Claude Code update ran for five minutes. Check the install: claude doctor"
         : "`claude` not found on PATH. Install Claude Code first: https://code.claude.com/docs/en/setup",
+      EXIT.noClaude,
     );
   if (launch.kind === "ps1")
     die(
       `only ${launch.bin} was found. Install Claude Code with the native installer or npm so claude.exe or claude.cmd exists: https://code.claude.com/docs/en/setup`,
+      EXIT.noClaude,
     );
   return launch;
 }
@@ -2212,16 +2232,16 @@ function warnSkippedEnv(dir: string): void {
 
 async function cmdRun(L: Layout, args: string[]): Promise<never> {
   const name = args[0];
-  if (!name) die("usage: claudep run <name> [claude args…]");
+  if (!name) die("usage: claudep run <name> [claude args…]", EXIT.usage);
   const rest = args.slice(1);
   if (rest[0] === "--") rest.shift();
   if (name === "default" || name === "base") {
-    if (L.emptyConfigDir) die(EMPTY_CONFIG_DIR_MESSAGE);
+    if (L.emptyConfigDir) die(EMPTY_CONFIG_DIR_MESSAGE, EXIT.config);
     warnSecureStorage(L, L.base, name);
     return execClaude(L, undefined, rest);
   }
   const dir = profileDir(L, name);
-  if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
+  if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`, EXIT.noProfile);
   for (const v of authEnvOverrides(process.env, L.platform))
     console.error(`claudep: ${v} is set; Claude Code will use it instead of the "${name}" login`);
   warnSecureStorage(L, dir, name);
@@ -2232,7 +2252,10 @@ async function cmdRun(L: Layout, args: string[]): Promise<never> {
     for (const item of healLinks(L.base, dir, readAccepted(dir))) console.error(`claudep: linked ${item} into ${name}`);
   const overlay = readProfileSettings(dir);
   if (overlay.error)
-    die(`${join(dir, SETTINGS_FILE)}: ${overlay.error}. Fix it, or: claudep settings ${name} --unset <key>`);
+    die(
+      `${join(dir, SETTINGS_FILE)}: ${overlay.error}. Fix it, or: claudep settings ${name} --unset <key>`,
+      EXIT.config,
+    );
   if (rest.some((a) => a === "--settings" || a.startsWith("--settings="))) {
     if (Object.keys(overlay.settings).length)
       console.error(`claudep: you passed --settings, so ${join(dir, SETTINGS_FILE)} is not applied`);
@@ -2279,16 +2302,17 @@ export function latestSession(
 async function cmdHandoff(L: Layout, args: string[]): Promise<never> {
   const usage = "usage: claudep handoff <name> [session-id] [-- claude args…]";
   const name = args[0];
-  if (!name || name.startsWith("-")) die(usage);
+  if (!name || name.startsWith("-")) die(usage, EXIT.usage);
   let rest = args.slice(1);
   let id: string | undefined;
   if (rest[0] !== undefined && rest[0] !== "--") {
     id = rest.shift();
-    if (!id || !SESSION_ID_RE.test(id)) die(`"${id}" is not a session id. ${usage}`);
+    if (!id || !SESSION_ID_RE.test(id)) die(`"${id}" is not a session id. ${usage}`, EXIT.usage);
   }
   if (rest[0] === "--") rest = rest.slice(1);
   const target = name === "default" || name === "base" ? L.base : profileDir(L, name);
-  if (target !== L.base && !existsSync(target)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
+  if (target !== L.base && !existsSync(target))
+    die(`profile "${name}" does not exist. Run: claudep init ${name}`, EXIT.noProfile);
   const projects = sharedItems(L.base).find((s) => s.name === "projects");
   if (!projects || (target !== L.base && linkState(L.base, target, projects) !== "ok"))
     die(`projects/ is not shared with "${name}", so it cannot read this session. Run: claudep init ${name}`);
@@ -4309,8 +4333,8 @@ export async function main(argv: string[]): Promise<void> {
       return cmdRm(L, args);
     default:
       if (cmd === "default" || cmd === "base" || profileExists(L, cmd)) return cmdRun(L, [cmd, ...args]);
-      if (NAME_RE.test(cmd)) die(`no profile "${cmd}". Create it with: claudep init ${cmd}`);
-      die(`unknown command "${cmd}". Try: claudep help`);
+      if (NAME_RE.test(cmd)) die(`no profile "${cmd}". Create it with: claudep init ${cmd}`, EXIT.noProfile);
+      die(`unknown command "${cmd}". Try: claudep help`, EXIT.usage);
   }
 }
 

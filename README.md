@@ -238,6 +238,19 @@ claudep handoff work -- -p "go on"      # anything after -- goes to claude
 
 `projects/` is shared, so every profile can read every transcript. `handoff` finds the newest one for the current directory and runs `claude --resume <id> --fork-session` under the other profile. The fork gets a new session id, so the original session can keep running without two processes writing one file. The first reply is slower and costs more than usual: the prompt cache belongs to the account that built it.
 
+## Exit codes
+
+`claudep <name>`, `claudep run`, `claudep handoff` and alias commands exit with claude's own code. When claudep itself stops before claude starts, it uses a code from sysexits.h, so a script can tell the two apart:
+
+| Code | Meaning |
+|---|---|
+| 64 | Usage error or an invalid profile name |
+| 67 | The profile does not exist |
+| 69 | `claude` is not on PATH, is still missing after an update, or only a `.ps1` was found |
+| 78 | The profile's `claudep.settings.json` cannot be read, or `CLAUDE_CONFIG_DIR` is set but empty |
+
+Other commands exit 0 on success and 1 on failure, except that an invalid profile name is 64 everywhere.
+
 ## Claude Code updates
 
 Install Claude Code with the native installer when you use profiles. Each profile is its own config dir, so each runs its own auto-updater. With the native installer an update unpacks a new version and swaps one symlink, so `claude` is always there. With an npm or bun global install every profile reinstalls the same package, and `claude` is gone while the reinstall runs ([anthropics/claude-code#93197](https://github.com/anthropics/claude-code/issues/93197)). Move with `claude install`.
