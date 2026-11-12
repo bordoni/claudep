@@ -32,13 +32,16 @@ import {
   envPlan,
   envScript,
   envSyntaxOf,
+  exitAfterRun,
   exportedEnvKeys,
+  failureKind,
   fishQuote,
   flagSpec,
   formatTable,
   helpText,
   homeDir,
   hookHint,
+  hookProfile,
   isInside,
   isKnownPrivate,
   isMsysPath,
@@ -61,6 +64,7 @@ import {
   parseShim,
   parseVersion,
   pathKey,
+  printMode,
   projectSlug,
   RESERVED,
   refusedEnvCase,
@@ -74,6 +78,7 @@ import {
   type Shell,
   type Shim,
   type ShimDeps,
+  STOP_FAILURE_MATCHER,
   samePath,
   secureStorageOverride,
   settingsEnvConfigDir,
@@ -85,6 +90,7 @@ import {
   shimState,
   shortHome,
   splitPathVar,
+  stopFailureCommand,
   toNativePath,
   validateEnvEntry,
   version,
@@ -1459,5 +1465,63 @@ describe("runMarkers", () => {
       CLAUDEP_RUN: "C:\\p\\w",
       CLAUDEP_RUN_ID: "n",
     });
+  });
+});
+
+describe("StopFailure markers", () => {
+  test("login errors map to 77 and limits to 75, only for this run in print mode", () => {
+    const f = { error: "authentication_failed", at: 1, run: "n1" };
+    expect(exitAfterRun(f, "n1", 1, true)).toEqual({ code: 77, clear: false, failure: f });
+    expect(exitAfterRun({ ...f, error: "rate_limit" }, "n1", 1, true).code).toBe(75);
+    expect(exitAfterRun({ ...f, error: "billing_error" }, "n1", 1, true).code).toBe(75);
+    expect(exitAfterRun(f, "n2", 1, true)).toEqual({ code: 1, clear: false });
+    expect(exitAfterRun(f, "n1", 1, false)).toEqual({ code: 1, clear: false });
+    expect(exitAfterRun(f, "n1", 0, true)).toEqual({ code: 0, clear: true });
+    expect(exitAfterRun(undefined, "n1", 0, true)).toEqual({ code: 0, clear: false });
+  });
+
+  test("every error name in the matcher has a kind", () => {
+    for (const e of STOP_FAILURE_MATCHER.split("|")) expect(failureKind(e)).toBeDefined();
+    expect(failureKind("server_error")).toBeUndefined();
+  });
+
+  test("print mode is -p or --print before a --", () => {
+    expect(printMode(["--settings", "{}", "-p", "x"])).toBe(true);
+    expect(printMode(["--print"])).toBe(true);
+    expect(printMode(["x", "--", "-p"])).toBe(false);
+    expect(printMode(["--resume", "id"])).toBe(false);
+  });
+
+  test("the hook command quotes for sh and uses slashes on win32", () => {
+    expect(stopFailureCommand("/b/bun", '/a b/$x"y`.ts', "linux")).toBe(
+      '"/b/bun" "/a b/\\$x\\"y\\`.ts" hook stop-failure',
+    );
+    expect(stopFailureCommand("C:\\b\\bun.exe", "C:\\c\\claudep.ts", "win32")).toBe(
+      '"C:/b/bun.exe" "C:/c/claudep.ts" hook stop-failure',
+    );
+  });
+
+  test("runSettings adds the hook after the overlay's own StopFailure hooks and leaves a broken hooks value alone", () => {
+    const own = { matcher: "x", hooks: [{ type: "command", command: "mine" }] };
+    const out = runSettings(undefined, { hooks: { StopFailure: [own], Stop: [] } }, "cmd");
+    expect(out).toEqual({
+      hooks: {
+        Stop: [],
+        StopFailure: [own, { matcher: STOP_FAILURE_MATCHER, hooks: [{ type: "command", command: "cmd" }] }],
+      },
+    });
+    expect(runSettings(undefined, { hooks: "nope" }, "cmd")).toEqual({ hooks: "nope" });
+    expect(runSettings(undefined, {})).toBeUndefined();
+  });
+
+  test("the hook's profile comes from CLAUDEP_RUN, then the active profile, then default", () => {
+    const env = { HOME: "/h" };
+    const L = layout(env, "linux");
+    expect(hookProfile(L, { CLAUDEP_RUN: "/h/.claudep/work" })).toBe("work");
+    expect(hookProfile(L, { CLAUDEP_RUN: "/elsewhere/work" })).toBeUndefined();
+    expect(hookProfile(L, { CLAUDEP_RUN: "/h/.claudep/run" })).toBeUndefined();
+    expect(hookProfile(layout({ ...env, CLAUDE_CONFIG_DIR: "/h/.claudep/c2" }, "linux"), {})).toBe("c2");
+    expect(hookProfile(L, {})).toBe("default");
+    expect(hookProfile(layout({ ...env, CLAUDE_CONFIG_DIR: "/custom" }, "linux"), {})).toBeUndefined();
   });
 });

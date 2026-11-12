@@ -333,6 +333,18 @@ The updater check is still `DISABLE_UPDATES`, then `DISABLE_AUTOUPDATER`, then t
 
 An empty `CLAUDE_CONFIG_DIR` is not unset: with `HOME` and the working directory in a scratch folder, `CLAUDE_CONFIG_DIR= claude auth status --json` reported `"configDirectory": ""` and `"projectsDirectory": "projects"`, a path relative to the current directory ([anthropics/claude-code#104629](https://github.com/anthropics/claude-code/issues/104629), open on 2026-11-05). The same output carries a new `loginExpiresAt` field, which claudep does not read.
 
+## 18. StopFailure hooks (2026-11-12, 2.1.322)
+
+Verified on the npm-global Linux build with a throwaway, logged-out config dir: `claude -p "reply ok"` printed `Not logged in · Please run /login`, exited 1, and ran both a StopFailure hook from that dir's `settings.json` and one from `--settings`. So flag-settings hooks add to the user's hooks, they do not replace them, and the hook runs in print mode without a trust prompt. The payload was:
+
+```json
+{ "session_id": "…", "transcript_path": "…", "cwd": "…", "prompt_id": "…", "effort": {…},
+  "hook_event_name": "StopFailure", "error": "authentication_failed",
+  "last_assistant_message": "Not logged in · Please run /login" }
+```
+
+No `error_details` was present for this error. The matcher is tested against `error`. The error names in the 2.1.322 binary are `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `billing_error`, `rate_limit`, `overloaded`, `invalid_request`, `model_not_found`, `server_error`, `unknown`, `max_output_tokens` and `cloud_credential_error`. `verification_required` ("organization verification required") and `cloud_credential_error` are newer than 2.1.311. Not verified: a login whose refresh token is dead rather than absent. It is expected to end the same way, as `authentication_failed`.
+
 ## How to re-verify
 
 The fastest way needs no script: byte offsets from a fixed-string grep, then a bounded slice around each one. `/usr/bin/grep` because the shell's `grep` is ugrep and rejects wide context regexes; `tr` because the slice is binary.

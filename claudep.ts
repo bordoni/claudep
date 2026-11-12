@@ -424,6 +424,13 @@ export const COMMANDS: readonly Command[] = [
   },
   { name: "run", desc: "run claude with a profile", arg: "profile", hidden: true },
   {
+    name: "hook",
+    desc: "record a StopFailure for list and doctor, or print the settings that call it",
+    arg: ["stop-failure"],
+    flags: ["--print"],
+    hidden: true,
+  },
+  {
     name: "list",
     desc: "show every profile and who it is logged in as",
     aliases: ["ls"],
@@ -1620,7 +1627,10 @@ function claudeEnv(L: Layout, dir: string | undefined): Env {
   return withProfileVars(readProfileEnv(dir).vars, envFor(dir, process.env, L.platform), L.platform);
 }
 
-async function execClaude(L: Layout, dir: string | undefined, args: string[]): Promise<never> {
+/** Runs claude in the foreground and exits with its code. With `name`, the
+ *  run carries claudep's StopFailure hook: a clean exit clears the profile's
+ *  marker, and a failure this run recorded in print mode exits 77 or 75. */
+async function execClaude(L: Layout, dir: string | undefined, args: string[], name?: string): Promise<never> {
   const runId = crypto.randomUUID();
   const proc = await spawnClaude(L, dir, args, "inherit", runMarkers(claudeEnv(L, dir), dir, runId, L.platform));
   // Ctrl+C reaches the child through the terminal; keep the wrapper alive so
@@ -1629,7 +1639,13 @@ async function execClaude(L: Layout, dir: string | undefined, args: string[]): P
   for (const s of signals.ignore) process.on(s, () => {});
   for (const s of signals.forward) process.on(s, () => proc.kill(s));
   await proc.exited;
-  process.exit(proc.exitCode ?? 1);
+  const code = proc.exitCode ?? 1;
+  if (name === undefined) process.exit(code);
+  const after = exitAfterRun(readFailure(L, name), runId, code, printMode(args));
+  if (after.clear) rmSync(failurePath(L, name), { force: true });
+  if (after.failure)
+    console.error(`claudep: ${failureNote(name, after.failure, loginCommand(name, dir ? readLoginFlags(dir) : []))}`);
+  process.exit(after.code);
 }
 
 /** Seconds a child `claude` gets in list, status, usage and doctor. */
@@ -2266,7 +2282,10 @@ async function cmdRun(L: Layout, args: string[]): Promise<never> {
   if (name === "default" || name === "base") {
     if (L.emptyConfigDir) die(EMPTY_CONFIG_DIR_MESSAGE, EXIT.config);
     warnSecureStorage(L, L.base, name);
-    return execClaude(L, undefined, rest);
+    if (passesSettings(rest)) return execClaude(L, undefined, rest);
+    const settings = runSettings(undefined, {}, stopFailureCommand(process.execPath, import.meta.path, L.platform));
+    if (settings) rest.unshift("--settings", JSON.stringify(settings));
+    return execClaude(L, undefined, rest, "default");
   }
   const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`, EXIT.noProfile);
@@ -2284,14 +2303,23 @@ async function cmdRun(L: Layout, args: string[]): Promise<never> {
       `${join(dir, SETTINGS_FILE)}: ${overlay.error}. Fix it, or: claudep settings ${name} --unset <key>`,
       EXIT.config,
     );
-  if (rest.some((a) => a === "--settings" || a.startsWith("--settings="))) {
+  if (passesSettings(rest)) {
     if (Object.keys(overlay.settings).length)
       console.error(`claudep: you passed --settings, so ${join(dir, SETTINGS_FILE)} is not applied`);
     return execClaude(L, dir, rest);
   }
-  const settings = runSettings(memoryDirOverride(dir, process.cwd(), rest, process.env, L.platform), overlay.settings);
+  const settings = runSettings(
+    memoryDirOverride(dir, process.cwd(), rest, process.env, L.platform),
+    overlay.settings,
+    stopFailureCommand(process.execPath, import.meta.path, L.platform),
+  );
   if (settings) rest.unshift("--settings", JSON.stringify(settings));
-  return execClaude(L, dir, rest);
+  return execClaude(L, dir, rest, name);
+}
+
+/** The caller passed its own --settings, which replaces claudep's overlay and hook. */
+function passesSettings(args: readonly string[]): boolean {
+  return args.some((a) => a === "--settings" || a.startsWith("--settings="));
 }
 
 export const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -2354,7 +2382,7 @@ async function cmdHandoff(L: Layout, args: string[]): Promise<never> {
   return cmdRun(L, [name, "--", "--resume", id, "--fork-session", ...rest]);
 }
 
-export type Row = { name: string; dir: string; status: AuthStatus };
+export type Row = { name: string; dir: string; status: AuthStatus; failure?: Failure };
 
 async function collectRows(L: Layout, names: string[], live: boolean): Promise<{ rows: Row[]; v?: Version }> {
   const v = await claudeVersion(L);
@@ -2362,7 +2390,13 @@ async function collectRows(L: Layout, names: string[], live: boolean): Promise<{
   const rows = await Promise.all(
     names.map(async (name) => {
       const dir = name === "default" ? L.base : profileDir(L, name);
-      return { name, dir, status: await loginOf(L, name === "default" ? undefined : dir, ask) };
+      const failure = readFailure(L, name);
+      return {
+        name,
+        dir,
+        status: await loginOf(L, name === "default" ? undefined : dir, ask),
+        ...(failure ? { failure } : {}),
+      };
     }),
   );
   return { rows, v };
@@ -2377,7 +2411,11 @@ export function formatTable(rows: Row[], home: string, platform: NodeJS.Platform
   const cols = ["PROFILE", "LOGIN", "EMAIL", "ORG", "PLAN", "DIR"];
   const data = rows.map((r) => [
     r.name,
-    r.status.timedOut ? "timeout" : `${r.status.loggedIn ? "yes" : "no"}${r.status.cached ? "*" : ""}`,
+    failureKind(r.failure?.error ?? "") === "login"
+      ? "needs login"
+      : r.status.timedOut
+        ? "timeout"
+        : `${r.status.loggedIn ? "yes" : "no"}${r.status.cached ? "*" : ""}`,
     r.status.email ?? "-",
     r.status.orgName ?? "-",
     r.status.subscriptionType ?? "-",
@@ -2396,6 +2434,15 @@ function printTable(rows: Row[], home: string, platform: NodeJS.Platform, v: Ver
   });
   if (rows.some((r) => r.status.cached && !r.status.timedOut)) console.log(c.dim(`\n${cachedNote(v)}`));
   if (rows.some((r) => r.status.timedOut)) console.log(c.dim(`\n${timeoutNote()}`));
+  const failed = rows.filter((r) => r.failure);
+  if (failed.length) console.log("");
+  for (const r of failed)
+    if (r.failure)
+      console.log(
+        c.yellow(
+          failureNote(r.name, r.failure, loginCommand(r.name, r.name === "default" ? [] : readLoginFlags(r.dir))),
+        ),
+      );
 }
 
 /** The footnote under a row whose `claude` ran past the deadline. */
@@ -2407,7 +2454,8 @@ function timeoutNote(): string {
 
 /** The flat object `status --json` prints for one row; `list --json` prints an array of them. */
 function rowJson(row: Row): JsonObject {
-  return { name: row.name, dir: row.dir, ...row.status };
+  const failure = row.failure ? { failure: { error: row.failure.error, at: row.failure.at } } : {};
+  return { name: row.name, dir: row.dir, ...row.status, ...failure };
 }
 
 async function cmdList(L: Layout, args: string[]): Promise<void> {
@@ -2439,7 +2487,7 @@ async function cmdStatus(L: Layout, args: string[]): Promise<void> {
     return;
   }
   printTable([row], L.home, L.platform, v);
-  if (!row.status.loggedIn && name !== "default")
+  if (!row.status.loggedIn && !row.failure && name !== "default")
     console.log(c.dim(`\nLog in: ${loginCommand(name, readLoginFlags(row.dir))}`));
 }
 
@@ -2608,10 +2656,161 @@ export function readProfileSettings(dir: string): { settings: JsonObject; error?
   }
 }
 
-/** The --settings value `run` passes: the auto-memory path, then the profile's overlay, which wins. */
-export function runSettings(memoryDir: string | undefined, overlay: JsonObject): JsonObject | undefined {
+/** The --settings value `run` passes: the auto-memory path, then the profile's
+ *  overlay, which wins, then claudep's StopFailure hook added to any the overlay
+ *  has. Flag-settings hooks run alongside the user's own (checked on 2.1.322). */
+export function runSettings(
+  memoryDir: string | undefined,
+  overlay: JsonObject,
+  stopFailureHook?: string,
+): JsonObject | undefined {
   const out: JsonObject = { ...(memoryDir === undefined ? {} : { autoMemoryDirectory: memoryDir }), ...overlay };
+  const own = overlay.hooks;
+  const ownIsObject = own !== undefined && own !== null && typeof own === "object" && !Array.isArray(own);
+  if (stopFailureHook !== undefined && (own === undefined || ownIsObject)) {
+    const hooks: JsonObject = ownIsObject ? { ...(own as JsonObject) } : {};
+    const prior = Array.isArray(hooks.StopFailure) ? (hooks.StopFailure as unknown[]) : [];
+    hooks.StopFailure = [...prior, stopFailureEntry(stopFailureHook)];
+    out.hooks = hooks;
+  }
   return Object.keys(out).length ? out : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// StopFailure markers. Claude Code runs StopFailure hooks when a turn ends on
+// an API error, with the error's name and no token. claudep's hook writes that
+// name to <profiles root>/.health/<name>.json, so list, status and doctor can
+// say a profile needs a login, and run can exit 77 or 75 instead of 1.
+// ---------------------------------------------------------------------------
+
+/** StopFailure errors that mean the login or the account needs a person (exit 77). */
+export const LOGIN_FAILURES = [
+  "authentication_failed",
+  "oauth_org_not_allowed",
+  "account_on_hold",
+  "verification_required",
+  "cloud_credential_error",
+] as const;
+/** StopFailure errors that mean a usage or spend limit (exit 75). */
+export const LIMIT_FAILURES = ["rate_limit", "billing_error"] as const;
+export const STOP_FAILURE_MATCHER = [...LOGIN_FAILURES, ...LIMIT_FAILURES].join("|");
+
+export type Failure = { error: string; at: number; run?: string };
+
+export function failureKind(error: string): "login" | "limit" | undefined {
+  if ((LOGIN_FAILURES as readonly string[]).includes(error)) return "login";
+  if ((LIMIT_FAILURES as readonly string[]).includes(error)) return "limit";
+  return undefined;
+}
+
+/** The hook command: bun and claudep.ts by absolute path, quoted for sh, which
+ *  is what Claude Code runs hooks in (Git Bash on Windows, hence the slashes). */
+export function stopFailureCommand(bun: string, script: string, platform: NodeJS.Platform = process.platform): string {
+  const q = (p: string) => `"${(platform === "win32" ? p.replace(/\\/g, "/") : p).replace(/(["\\$`])/g, "\\$1")}"`;
+  return `${q(bun)} ${q(script)} hook stop-failure`;
+}
+
+function stopFailureEntry(command: string): JsonObject {
+  return { matcher: STOP_FAILURE_MATCHER, hooks: [{ type: "command", command }] };
+}
+
+export function failurePath(L: Layout, name: string): string {
+  return pathApi(L.platform).join(L.profilesRoot, ".health", `${name}.json`);
+}
+
+export function readFailure(L: Layout, name: string): Failure | undefined {
+  try {
+    const j: unknown = JSON.parse(readFileSync(failurePath(L, name), "utf8"));
+    if (!j || typeof j !== "object") return undefined;
+    const o = j as JsonObject;
+    if (typeof o.error !== "string" || typeof o.at !== "number") return undefined;
+    return { error: o.error, at: o.at, ...(typeof o.run === "string" ? { run: o.run } : {}) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The profile a hook call belongs to: the one CLAUDEP_RUN names, else the
+ *  active profile, else `default` when no CLAUDE_CONFIG_DIR is set. A custom
+ *  config dir outside the profiles root has no name and records nothing. */
+export function hookProfile(L: Layout, env: Env = process.env): string | undefined {
+  const run = env.CLAUDEP_RUN;
+  if (run) {
+    const dir = canon(run, L.home, L.platform);
+    const P = pathApi(L.platform);
+    const name = P.basename(dir);
+    if (samePath(P.dirname(dir), L.profilesRoot, L.platform) && NAME_RE.test(name) && !RESERVED.has(name)) return name;
+    return undefined;
+  }
+  if (L.activeProfile !== undefined) return L.activeProfile;
+  if (L.callerConfigDir === undefined && !L.emptyConfigDir) return "default";
+  return undefined;
+}
+
+/** What `run` exits with once claude has: a clean exit clears the marker;
+ *  in print mode, a failure this run recorded becomes 77 or 75. */
+export function exitAfterRun(
+  failure: Failure | undefined,
+  runId: string,
+  code: number,
+  print: boolean,
+): { code: number; clear: boolean; failure?: Failure } {
+  if (code === 0) return { code, clear: failure !== undefined };
+  if (!print || failure === undefined || failure.run !== runId) return { code, clear: false };
+  const kind = failureKind(failure.error);
+  if (kind === undefined) return { code, clear: false };
+  return { code: kind === "login" ? EXIT.login : EXIT.limit, clear: false, failure };
+}
+
+/** True when the claude args ask for print mode, which is how scripts run it. */
+export function printMode(args: readonly string[]): boolean {
+  for (const a of args) {
+    if (a === "--") return false;
+    if (a === "-p" || a === "--print") return true;
+  }
+  return false;
+}
+
+/** "Nov 12, 9:14 PM" in local time. */
+function seenText(at: number): string {
+  return new Date(at * 1000).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+export function failureNote(name: string, f: Failure, login: string): string {
+  const kind = failureKind(f.error);
+  if (kind === "login") return `${name} needs a login: ${f.error}, seen ${seenText(f.at)}. Log in: ${login}`;
+  return `${name} hit a limit: ${f.error}, seen ${seenText(f.at)}`;
+}
+
+/** `claudep hook stop-failure`: Claude Code's StopFailure hook. Reads the hook
+ *  JSON on stdin and writes the error's name. No output, no subprocess, no
+ *  network, and it never fails the hook. `--print` shows the settings that
+ *  call it, for shells that start plain claude; claudep never writes them. */
+async function cmdHook(L: Layout, args: string[]): Promise<void> {
+  const f = parseFlags(args, ...flagSpec("hook"));
+  const command = stopFailureCommand(process.execPath, import.meta.path, L.platform);
+  if (f.bools.has("--print")) {
+    console.log(JSON.stringify({ hooks: { StopFailure: [stopFailureEntry(command)] } }, null, 2));
+    return;
+  }
+  if (f.rest[0] !== "stop-failure")
+    die("usage: claudep hook stop-failure < hook.json   or   claudep hook --print", EXIT.usage);
+  try {
+    const input: unknown = JSON.parse(await Bun.stdin.text());
+    const error = input && typeof input === "object" ? (input as JsonObject).error : undefined;
+    const name = hookProfile(L);
+    if (typeof error !== "string" || failureKind(error) === undefined || name === undefined) return;
+    const file = failurePath(L, name);
+    mkdirSync(pathApi(L.platform).dirname(file), { recursive: true });
+    const run = process.env.CLAUDEP_RUN_ID;
+    const record: Failure = { error, at: Math.floor(Date.now() / 1000), ...(run ? { run } : {}) };
+    writeFileSync(file, `${JSON.stringify(record)}\n`);
+  } catch {}
 }
 
 function cmdSettings(L: Layout, args: string[]): void {
@@ -3978,6 +4177,13 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       );
     const s = await loginOf(L, dir, ask);
     const login = loginCommand(name, readLoginFlags(dir));
+    const failure = readFailure(L, name);
+    if (failure && failureKind(failure.error) === "login")
+      report.add("stop-failure", failure.error, "fail", failureNote(name, failure, login), {
+        problem: true,
+        fix: login,
+      });
+    else if (failure) report.add("stop-failure", failure.error, "info", failureNote(name, failure, login));
     if (L.platform === "darwin") {
       const svc = keychainService(dir);
       if (await keychainHas(svc)) report.add("keychain", "present", "ok", `keychain item "${svc}" present`);
@@ -4226,6 +4432,8 @@ ${c.bold("USAGE")}
                                        (values are JSON or a string); --unset key…, --json
   claudep handoff <name> [session-id]  resume this directory's latest session under <name>, as a fork;
                                        arguments after -- go to claude
+  claudep hook --print                 the StopFailure settings block for shells that start plain claude;
+                                       claudep run adds it on its own and exits 77 (login) or 75 (limit) in -p mode
   claudep usage [name…] [--json]       five-hour and weekly usage per profile; live from claude -p /usage on
                                        Claude Code 2.1.301+, else last seen (--live asks, --cached never does)
   claudep statusline                   pipe the statusline JSON in: prints "work · 5h 23% · 7d 41%" and
@@ -4357,6 +4565,8 @@ export async function main(argv: string[]): Promise<void> {
       return cmdAlias(L, args);
     case "handoff":
       return cmdHandoff(L, args);
+    case "hook":
+      return cmdHook(L, args);
     case "statusline":
       return cmdStatusline(L);
     case "usage":

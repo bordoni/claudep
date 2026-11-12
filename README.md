@@ -248,9 +248,21 @@ claudep handoff work -- -p "go on"      # anything after -- goes to claude
 | 64 | Usage error or an invalid profile name |
 | 67 | The profile does not exist |
 | 69 | `claude` is not on PATH, is still missing after an update, or only a `.ps1` was found |
+| 75 | In print mode (`-p`), claude stopped on a usage limit or billing error: `rate_limit`, `billing_error` |
+| 77 | In print mode, claude stopped because the login no longer works: `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `cloud_credential_error` |
 | 78 | The profile's `claudep.settings.json` cannot be read, or `CLAUDE_CONFIG_DIR` is set but empty |
 
 Other commands exit 0 on success and 1 on failure, except that an invalid profile name is 64 everywhere.
+
+### Login markers
+
+Every `claudep <name>`, `run`, `handoff` and alias command adds a StopFailure hook to the `--settings` it passes. When a turn ends on one of the errors above, Claude Code runs `claudep hook stop-failure`, which writes the error's name and the time to `~/.claudep/.health/<name>.json`. It reads no token and prints nothing. From then on:
+
+- a print-mode run that recorded the error exits 77 or 75 instead of claude's 1, with the login command on stderr;
+- `claudep list` and `status` show `needs login` and when it was seen, `--json` adds `failure: {error, at}`, and `doctor` fails the profile with the login command;
+- the next run that exits 0 clears the marker.
+
+`claude auth status` reports a login whose refresh token has stopped working as logged in, so the marker is the only place that failure shows. Passing your own `--settings` leaves the hook out. For shells that start plain `claude`, `claudep hook --print` prints the settings block that calls the hook; add it to a `settings.json` yourself, since claudep never writes one.
 
 ## Claude Code updates
 

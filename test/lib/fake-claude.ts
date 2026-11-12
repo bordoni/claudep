@@ -15,6 +15,8 @@
  *
  * Before anything but --version, FAKE_CLAUDE_STDERR=<bytes> writes that much to stderr
  * (a full pipe blocks a child nobody reads) and FAKE_CLAUDE_SLEEP=<ms> waits.
+ * FAKE_CLAUDE_STOP_FAILURE=<error> runs the matching StopFailure hooks from --settings with
+ * that error before exiting, as Claude Code does when a turn ends on an API error.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -95,6 +97,26 @@ if (argv[0] === "-p" && argv[1] === "/usage") {
     "You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 12% used · resets Oct 17 at 1:59pm (America/New_York)\nCurrent week (all models): 34% used · resets Oct 23 at 10:59pm (America/New_York)\nCurrent week (Fable): 5% used · resets Oct 23 at 11pm (America/New_York)\n\nWhat's contributing to your limits usage?";
   out(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 0, total_cost_usd: 0, result }));
   process.exit(0);
+}
+// Claude Code runs StopFailure hooks when a turn ends on an API error. The fake
+// runs every StopFailure command in the --settings it was given whose matcher
+// matches, through sh with the payload on stdin, the way Claude Code does.
+const stopFailure = process.env.FAKE_CLAUDE_STOP_FAILURE;
+const at = argv.indexOf("--settings");
+if (stopFailure && at !== -1) {
+  type Entry = { matcher?: string; hooks?: { type?: string; command?: string }[] };
+  const settings = JSON.parse(argv[at + 1] ?? "{}") as { hooks?: { StopFailure?: Entry[] } };
+  const payload = JSON.stringify({ hook_event_name: "StopFailure", error: stopFailure, session_id: "fake" });
+  const sh =
+    process.platform === "win32"
+      ? join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "bash.exe")
+      : "/bin/sh";
+  for (const entry of settings.hooks?.StopFailure ?? []) {
+    if (entry.matcher && !new RegExp(`^(?:${entry.matcher})$`).test(stopFailure)) continue;
+    for (const h of entry.hooks ?? [])
+      if (h.type === "command" && h.command)
+        Bun.spawnSync([sh, "-c", h.command], { stdin: new Blob([payload]), stdout: "ignore", stderr: "inherit" });
+  }
 }
 out(`fake claude ran with: ${argv.join(" ")}`);
 process.exit(Number(process.env.FAKE_CLAUDE_EXIT ?? "0"));

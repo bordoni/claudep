@@ -23,7 +23,9 @@ import {
   keychainService,
   projectSlug,
   SHELLS,
+  STOP_FAILURE_MATCHER,
   shareFixCommand,
+  stopFailureCommand,
 } from "../claudep.ts";
 import { fakeBin, REPO, runCli, SCRIPT } from "./lib/cli.ts";
 import { BASE_DIRS, BASE_FILES, fakeHome, PRIVATE_DIRS, PRIVATE_FILES, writeLogin } from "./lib/home.ts";
@@ -32,11 +34,17 @@ import { norm, rx, tilde } from "./lib/paths.ts";
 const SHARED = [...BASE_FILES, ...BASE_DIRS] as readonly string[];
 const WIN = process.platform === "win32";
 
+/** The StopFailure hook every `run` adds to its --settings. */
+function hookSettings(): { hooks: unknown } {
+  const command = stopFailureCommand(process.execPath, SCRIPT);
+  return { hooks: { StopFailure: [{ matcher: STOP_FAILURE_MATCHER, hooks: [{ type: "command", command }] }] } };
+}
+
 /** The arguments `run` puts first in a profile whose projects/ is shared:
- *  the real auto-memory dir for a session started in `root`. */
+ *  the real auto-memory dir for a session started in `root`, and the hook. */
 function memoryArgs(base: string, root: string): string[] {
   const dir = join(realpathSync.native(join(base, "projects")), projectSlug(root, {}), "memory");
-  return ["--settings", JSON.stringify({ autoMemoryDirectory: dir })];
+  return ["--settings", JSON.stringify({ autoMemoryDirectory: dir, ...hookSettings() })];
 }
 
 describe("help and dispatch", () => {
@@ -309,11 +317,14 @@ describe("run", () => {
     expect(JSON.parse(readFileSync(log, "utf8")).argv).toEqual(["--settings", "{}", "x"]);
   });
 
-  test("`default` runs claude with the caller's environment untouched", async () => {
+  test("`default` runs claude with the caller's config dir untouched and only the hook added", async () => {
     using h = fakeHome();
     const log = join(h.home, "claude.log");
     await runCli(["default", "x"], { home: h.home, env: { FAKE_CLAUDE_LOG: log } });
-    expect(JSON.parse(readFileSync(log, "utf8"))).toEqual({ argv: ["x"], configDir: null });
+    expect(JSON.parse(readFileSync(log, "utf8"))).toEqual({
+      argv: ["--settings", JSON.stringify(hookSettings()), "x"],
+      configDir: null,
+    });
   });
 
   test("propagates claude's exit code", async () => {
@@ -2009,5 +2020,88 @@ describe("CLAUDEP_RUN marks sessions claudep started", () => {
       env: { CLAUDE_CONFIG_DIR: dir, CLAUDEP_RUN: join(h.profilesRoot, "other") },
     });
     expect(JSON.parse(stale.stdout)).toMatchObject({ name: "work", setBy: "manual" });
+  });
+});
+
+describe("StopFailure markers", () => {
+  /** Runs the hook the way Claude Code would, with the payload on stdin. */
+  async function fire(home: string, error: string, env: Record<string, string | undefined>) {
+    const payload = JSON.stringify({ hook_event_name: "StopFailure", error, session_id: "s", cwd: home });
+    return runCli(["hook", "stop-failure"], { home, env, stdin: payload });
+  }
+
+  test("the hook writes the error name for the profile CLAUDEP_RUN names, and nothing else", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "work");
+    const r = await fire(h.home, "authentication_failed", {
+      CLAUDE_CONFIG_DIR: dir,
+      CLAUDEP_RUN: dir,
+      CLAUDEP_RUN_ID: "n1",
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toBe("");
+    const marker = JSON.parse(readFileSync(join(h.profilesRoot, ".health", "work.json"), "utf8"));
+    expect(Object.keys(marker).sort()).toEqual(["at", "error", "run"]);
+    expect(marker).toMatchObject({ error: "authentication_failed", run: "n1" });
+    expect(await fire(h.home, "server_error", { CLAUDE_CONFIG_DIR: dir })).toMatchObject({ exitCode: 0, stdout: "" });
+    expect(JSON.parse(readFileSync(join(h.profilesRoot, ".health", "work.json"), "utf8")).error).toBe(
+      "authentication_failed",
+    );
+    const junk = await runCli(["hook", "stop-failure"], { home: h.home, env: { CLAUDE_CONFIG_DIR: dir }, stdin: "{" });
+    expect(junk).toMatchObject({ exitCode: 0, stdout: "", stderr: "" });
+  });
+
+  test("a print-mode run whose claude stopped on a login error exits 77 and says how to log in", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login", "--sso"], { home: h.home });
+    const marker = join(h.profilesRoot, ".health", "work.json");
+    // The fake claude runs the hook from the --settings claudep passed, as Claude Code does.
+    const r = await runCli(["work", "-p", "x"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_EXIT: "1", FAKE_CLAUDE_STOP_FAILURE: "authentication_failed" },
+    });
+    expect(r.exitCode).toBe(77);
+    expect(r.stderr).toContain("work needs a login: authentication_failed");
+    expect(r.stderr).toContain("claudep work auth login --sso");
+    expect(existsSync(marker)).toBe(true);
+    const list = await runCli(["list"], { home: h.home });
+    expect(list.stdout).toMatch(/^work\s+needs login\s+/m);
+    expect(list.stdout).toContain("work needs a login: authentication_failed");
+    const json = await runCli(["status", "work", "--json"], { home: h.home });
+    expect(JSON.parse(json.stdout).failure).toMatchObject({ error: "authentication_failed" });
+    const doctor = await runCli(["doctor", "work", "--json"], { home: h.home });
+    const checks = JSON.parse(doctor.stdout).profiles[0].checks as { item: string; level: string; fix?: string }[];
+    expect(checks.find((c) => c.item === "stop-failure")).toMatchObject({
+      level: "fail",
+      fix: "claudep work auth login --sso",
+    });
+    const ok = await runCli(["work", "-p", "x"], { home: h.home });
+    expect(ok.exitCode).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+  }, 30_000);
+
+  test("a limit exits 75, an interactive run keeps claude's code, and an older run's marker changes nothing", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const env = { FAKE_CLAUDE_EXIT: "1", FAKE_CLAUDE_STOP_FAILURE: "rate_limit" };
+    expect((await runCli(["work", "--print", "x"], { home: h.home, env })).exitCode).toBe(75);
+    expect((await runCli(["work", "x"], { home: h.home, env })).exitCode).toBe(1);
+    // A server error is not in the matcher, so the hook never runs for it.
+    const other = await runCli(["work", "-p", "x"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_EXIT: "1", FAKE_CLAUDE_STOP_FAILURE: "server_error" },
+    });
+    expect(other.exitCode).toBe(1);
+    const stale = await runCli(["work", "-p", "x"], { home: h.home, env: { FAKE_CLAUDE_EXIT: "1" } });
+    expect(stale.exitCode).toBe(1);
+  }, 30_000);
+
+  test("hook --print shows the settings that call the hook, and hook is reserved", async () => {
+    using h = fakeHome();
+    const r = await runCli(["hook", "--print"], { home: h.home });
+    expect(JSON.parse(r.stdout)).toEqual(hookSettings());
+    expect((await runCli(["init", "hook", "--no-login"], { home: h.home })).stderr).toContain("reserved");
   });
 });
