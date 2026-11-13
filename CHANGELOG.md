@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-13
+
 ### Added
 
 - `claudep list`, `status`, `usage` and `doctor` stop a `claude` that has not answered in 30 seconds, so one stuck profile no longer hangs the whole command. Its row shows `timeout` with the account in `.claude.json` (for `usage`, the last numbers seen), and `--json` adds `"timedOut": true`. `CLAUDEP_TIMEOUT=<seconds>` changes the limit and `0` turns it off. The child gets SIGTERM and three seconds to finish a token refresh before SIGKILL. `claudep <name>`, `run` and `handoff` have no limit.
@@ -211,7 +213,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Keychain isolation per config dir verified against Claude Code 2.1.259: the service name is `Claude Code-credentials-<sha256(dir)[0:8]>`.
 - Test suite with `bun test`, a sandboxed `$HOME`, a fake `claude` and `security` on PATH, and a real-shell test for the hook. CI runs typecheck, lint and tests on macOS and Linux.
 
-[Unreleased]: https://github.com/bordoni/claudep/compare/0.8.0...HEAD
+[Unreleased]: https://github.com/bordoni/claudep/compare/0.9.0...HEAD
+[0.9.0]: https://github.com/bordoni/claudep/compare/0.8.0...0.9.0
 [0.8.0]: https://github.com/bordoni/claudep/compare/0.7.1...0.8.0
 [0.7.1]: https://github.com/bordoni/claudep/compare/0.7.0...0.7.1
 [0.7.0]: https://github.com/bordoni/claudep/compare/0.6.0...0.7.0
