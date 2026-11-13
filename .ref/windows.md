@@ -39,7 +39,7 @@ PowerShell 5.1 and PowerShell 7 with a native `claude.exe`, and Git Bash (MSYS2)
 
 ## StopFailure hooks (0.9.0)
 
-`claudep run` passes hooks whose command is a POSIX `printf` into a single-quoted path with forward slashes. Claude Code runs command hooks through Git Bash on Windows, which this needs. It has not been checked on a Windows machine: if a setup runs hooks in PowerShell instead, the hook fails, nothing is recorded, and `run` exits with claude's own code as before. The test fake runs the hooks with `%ProgramFiles%\\Git\\bin\\bash.exe`.
+`claudep run` passes hooks whose command is a POSIX `printf` into a single-quoted path with forward slashes. Claude Code runs command hooks through Git Bash on Windows, which this needs. It has not been checked on a Windows machine: if a setup runs hooks in PowerShell instead, the hook fails, nothing is recorded, and `run` exits with claude's own code as before. The test fake runs the hooks with `%ProgramFiles%\\Git\\bin\\bash.exe`. The test for a hook that lands after claude exits is skipped here: on the first CI run (PR #12) Git Bash took longer to start than the 300 ms claudep polls for the marker. If real Windows hooks start that slowly, a login failure on Windows is recorded late or not at all, and `-p` exits with claude's own 1.
 
 ## What the Windows job proves, and what still needs a person
 

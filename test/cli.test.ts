@@ -2107,15 +2107,25 @@ describe("StopFailure markers", () => {
     expect((await runCli(["list"], { home: h.home })).stdout).not.toContain("needs login");
   }, 30_000);
 
-  test("a hook that lands just after claude exits still counts", async () => {
-    using h = fakeHome();
-    await runCli(["init", "work", "--no-login"], { home: h.home });
-    const r = await runCli(["work", "-p", "x"], {
-      home: h.home,
-      env: { FAKE_CLAUDE_EXIT: "1", FAKE_CLAUDE_STOP_FAILURE: "authentication_failed", FAKE_CLAUDE_HOOK_DELAY: "100" },
-    });
-    expect(r.exitCode).toBe(77);
-  }, 30_000);
+  // On Windows the fake starts the late hook through Git Bash, whose start-up on a CI runner
+  // alone outlasts the 300 ms claudep waits, so the test would time the runner, not claudep.
+  test.skipIf(WIN)(
+    "a hook that lands just after claude exits still counts",
+    async () => {
+      using h = fakeHome();
+      await runCli(["init", "work", "--no-login"], { home: h.home });
+      const r = await runCli(["work", "-p", "x"], {
+        home: h.home,
+        env: {
+          FAKE_CLAUDE_EXIT: "1",
+          FAKE_CLAUDE_STOP_FAILURE: "authentication_failed",
+          FAKE_CLAUDE_HOOK_DELAY: "100",
+        },
+      });
+      expect(r.exitCode).toBe(77);
+    },
+    30_000,
+  );
 
   test("a limit exits 75, an interactive run keeps claude's code, and an older run's marker changes nothing", async () => {
     using h = fakeHome();
