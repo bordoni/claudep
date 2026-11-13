@@ -67,7 +67,9 @@ claudep statusline                   statusline segment with the profile and its
 claudep current [--json|--name]      which profile this shell is on, and why
 claudep doctor [name] [--json]       verify symlinks, keychain entry, unclassified files, shims, Claude Code version
 claudep doctor --accept <name> <item>   stop counting one shared item as a problem; --unaccept undoes it
-claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
+claudep ps [name…] [--json] [--stale]   live Claude Code sessions in every profile; --stale only older versions
+claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched); refuses
+                                     one with live sessions unless --force
 claudep local <name> | --remove      pin the current directory tree to a profile (see below)
 claudep resolve [dir]                print the profile pinned for a directory
 claudep shell-init [zsh|bash|fish|powershell]   print the hook that applies pins on cd
@@ -131,6 +133,7 @@ From then on, `cd` into a pinned tree sets `CLAUDE_CONFIG_DIR` for that profile,
 
 - The nearest `.claudep` file upward from the current directory wins. An empty one cancels a parent pin.
 - The hook only changes a `CLAUDE_CONFIG_DIR` it set itself. It tracks that in `CLAUDEP_AUTO`, so a manual pin from `eval "$(claudep env work)"` (`claudep env work | source` in fish, `claudep env work | Invoke-Expression` in PowerShell) or a plain `export` stays put until you `eval "$(claudep env --unset)"`.
+- `claudep <name>`, `claudep run`, `claudep handoff` and alias commands put `CLAUDEP_RUN=<profile dir>` (none for `default`, which has no profile dir) in claude's environment and drop an inherited `CLAUDEP_AUTO`, so inside that session `claudep current` says `set by: claudep run` and the hook leaves the session's profile alone.
 - A pin that names a profile you have not created prints one warning per directory change and sets nothing.
 
 `claudep env` prints the syntax of the shell it runs in: it looks at its parent process (fish, pwsh, or an sh-like shell) and falls back to your login shell. Pass `--shell sh|fish|powershell` when neither answer fits, for example from a script or a Makefile.
@@ -226,6 +229,26 @@ claudep usage work --json    # one profile, with the per-model weekly windows
 
 From Claude Code 2.1.301 on, `claudep usage` asks each profile with `claude -p /usage`, which reports usage without running the model and, with `--no-session-persistence`, writes no transcript. Older versions can sign a profile out on a short command like that ([anthropics/claude-code#95822](https://github.com/anthropics/claude-code/issues/95822)), so there it shows the numbers last seen by `claudep statusline` or an earlier run instead. `--live` asks anyway, `--cached` never asks. claudep never reads a token: Claude Code makes every request.
 
+## Live sessions
+
+```sh
+claudep ps              # every live session in ~/.claude and each profile
+claudep ps work --json  # one profile, as JSON
+claudep ps --stale      # only sessions on a Claude Code older than the one installed
+```
+
+Each running Claude Code session writes `sessions/<pid>.json` in its config dir. `claudep ps` reads those files and nothing else in the folder, so the `.key` files next to them, which hold a peer token, are never opened. It shows the profile, pid, name, status and how long it has held it, kind, version and working directory, and skips a record whose process is gone. On Linux it also skips one whose pid now belongs to another process or another pid namespace. `claudep rm` refuses a profile with live sessions, because its logout revokes the token under them; `--force` removes it anyway.
+
+## MCP servers per profile
+
+```sh
+claudep mcp                      # server × profile table from the files, no subprocess
+claudep mcp work --live          # ask claude mcp list in that profile
+claudep mcp --server nx1 --json  # one server everywhere; exit 77 if it needs auth
+```
+
+By default (`--cached`) `claudep mcp` reads only names: the servers in each `.claude.json` `mcpServers` (shown as `unknown`) and the entries of `mcp-needs-auth-cache.json` (`needs-auth`). It never reads a value, so URLs, env and headers stay where they are. claude.ai connectors show up only once Claude Code has cached them as needing auth, and an entry can outlive the problem until Claude Code connects again. `--live` runs `claude mcp list` in each profile, from an empty scratch folder so no project `.mcp.json` is read and a stdio server that writes relative files leaves nothing behind, and keeps the name and one word per server: `connected`, `needs-auth`, `failed`, `off` or `unknown`. A line it cannot read is counted, never printed, because those lines carry stdio arguments and URLs. `--live` connects to every server, which starts stdio servers and can refresh MCP logins, so it is never the default; below Claude Code 2.1.301 it falls back to the names. It exits 77 when a server named with `--server` needs auth, or with none named, any server. `claudep doctor` lists the servers waiting for auth.
+
 ## Hand a session to another profile
 
 When one account hits its limit, carry on in another:
@@ -237,6 +260,31 @@ claudep handoff work -- -p "go on"      # anything after -- goes to claude
 ```
 
 `projects/` is shared, so every profile can read every transcript. `handoff` finds the newest one for the current directory and runs `claude --resume <id> --fork-session` under the other profile. The fork gets a new session id, so the original session can keep running without two processes writing one file. The first reply is slower and costs more than usual: the prompt cache belongs to the account that built it.
+
+## Exit codes
+
+`claudep <name>`, `claudep run`, `claudep handoff` and alias commands exit with claude's own code. For the cases below claudep uses a code from sysexits.h instead, so a script can tell them apart. Any other stop before claude starts, such as `handoff` finding no session, exits 1.
+
+| Code | Meaning |
+|---|---|
+| 64 | Usage error or an invalid profile name |
+| 67 | The profile does not exist |
+| 69 | `claude` is not on PATH, is still missing after an update, or only a `.ps1` was found |
+| 75 | In print mode (`-p`), claude stopped on a usage limit or billing error: `rate_limit`, `billing_error` |
+| 77 | In print mode, claude stopped because the login no longer works: `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `cloud_credential_error` |
+| 78 | The profile's `claudep.settings.json` cannot be read, or `CLAUDE_CONFIG_DIR` is set but empty |
+
+Other commands exit 0 on success and 1 on failure, except that an invalid profile name is 64 everywhere.
+
+### Login markers
+
+Every `claudep <name>`, `run`, `handoff` and alias command adds StopFailure hooks to the `--settings` it passes, one per error above. When a turn ends on one, the hook writes the error's name and the run's id to `~/.claudep/.health/<name>`. Each hook is a single shell `printf` into that file: Claude Code does not wait for StopFailure hooks, and on 2.1.323 one that took 50 ms was killed before it wrote anything. It reads no token and prints nothing. From then on:
+
+- a print-mode run that recorded a login error exits 77, and a limit 75, instead of claude's 1, with the error and the login command on stderr;
+- after a login error, `claudep list` and `status` show `needs login` with when it was seen, and `doctor` fails the profile with the login command; after a limit they print `hit a limit` and `doctor` notes it. `--json` adds `failure: {error, at}` for both;
+- the marker clears when a later print-mode run or `claudep <name> auth login` exits 0, and when the profile is removed. Other clean exits, `auth status` included, leave it, and so does an interactive session that ends cleanly after recording it.
+
+`claude auth status` reports a login whose refresh token has stopped working as logged in, so the marker is the only place that failure shows. Passing your own `--settings` leaves the hooks out. Plain `claude` records nothing. The hooks need a POSIX shell, which Claude Code uses on Windows through Git Bash; that path has not been checked on Windows yet.
 
 ## Claude Code updates
 
@@ -270,6 +318,7 @@ The shared list is an allowlist, so an account-specific file cannot leak across 
 - Skills and plugins synced from claude.ai land in the shared `skills/synced/` and `plugins/synced/`, in one folder per account, so profiles do not mix them. The `syncClaudeAiSkills` and `syncClaudeAiPlugins` switches live in the shared `settings.json`; to change one for a single profile, use `claudep settings <name> syncClaudeAiSkills=false`.
 - Console sign-ins made without an API key live in `~/.config/anthropic`, outside every config dir, so all profiles see the same ones. `ANTHROPIC_PROFILE` picks which one Claude Code uses; set it per profile with `claudep vars <name> ANTHROPIC_PROFILE=<sign-in>`.
 - In VS Code, `CLAUDE_CONFIG_DIR` in `claudeCode.environmentVariables` must be an absolute path. The session list ignores it when `claudeProcessWrapper` is set.
+- `claudep list`, `status`, `usage`, `doctor` and `mcp --live` give each `claude` they start 30 seconds. One that has not answered by then is stopped (SIGTERM, then SIGKILL three seconds later; on Windows the process tree is killed at once with `taskkill /T /F`) and its row shows `timeout` with what `.claude.json` or the last `usage` run recorded; `--json` adds `"timedOut": true`. Set `CLAUDEP_TIMEOUT=<seconds>` to change it, `0` to wait forever. `claudep <name>`, `run` and `handoff` are never stopped.
 - Set `CLAUDE_PROFILES_DIR` to move the profiles root. Keep it out of iCloud or Dropbox; `.claude.json` is rewritten constantly and sync tools create conflict copies.
 - Never put `CLAUDE_CONFIG_DIR` in a `settings.json` `env` block. Claude Code detects that mismatch and disables features; `claudep doctor` reports it.
 - `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` override the login in any config dir, always in `-p` mode. `claudep <name>` and `claudep doctor` warn when one is set and leave it alone. `claudep doctor` also names the key source Claude Code reports, and fails when Claude Code reports a config dir other than the profile's.

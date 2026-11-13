@@ -7,17 +7,21 @@ import {
   aliasShim,
   authEnvOverrides,
   authStatusSafe,
+  awaitWithDeadline,
   baseEnv,
   COMMANDS,
   COMPLETION_SHELLS,
   CREDENTIAL_ENV,
   cachedAuthStatus,
+  cachedMcp,
   canon,
+  claudeTimeoutMs,
   commandWords,
   completionHint,
   completionScript,
   currentLabel,
   currentProfile,
+  DEFAULT_TIMEOUT_S,
   defaultShell,
   deleteEnv,
   ENV_KEYS_VAR,
@@ -29,7 +33,9 @@ import {
   envPlan,
   envScript,
   envSyntaxOf,
+  exitAfterRun,
   exportedEnvKeys,
+  failureKind,
   fishQuote,
   flagSpec,
   formatTable,
@@ -42,6 +48,7 @@ import {
   keychainService,
   layout,
   loginCommand,
+  type McpState,
   MEMORY_SYMLINK_PROMPT_FROM,
   MIN_CLAUDE_VERSION,
   managedSettingsDir,
@@ -52,24 +59,32 @@ import {
   parentProcessName,
   parseAuthStatus,
   parseEnvFile,
+  parseFailure,
   parseFlags,
   parseLoginFlags,
+  parseMcpLine,
   parseSettingEntry,
   parseShim,
   parseVersion,
   pathKey,
+  printMode,
+  procStartOf,
   projectSlug,
   RESERVED,
+  readSessions,
   refusedEnvCase,
   refusedEnvKey,
   refusedEnvRegex,
   refusedSettingKey,
   resolvePin,
+  runMarkers,
   runSettings,
+  type SessionDeps,
   SHELLS,
   type Shell,
   type Shim,
   type ShimDeps,
+  STOP_FAILURES,
   samePath,
   secureStorageOverride,
   settingsEnvConfigDir,
@@ -81,6 +96,7 @@ import {
   shimState,
   shortHome,
   splitPathVar,
+  stopFailureHooks,
   toNativePath,
   validateEnvEntry,
   version,
@@ -1335,5 +1351,303 @@ describe("settingsKeyDiff", () => {
     expect(settingsKeyDiff("{not", "{}")).toBeUndefined();
     expect(settingsKeyDiff("[]", "{}")).toBeUndefined();
     expect(settingsKeyDiff(undefined, "{}")).toBeUndefined();
+  });
+});
+
+describe("child deadlines", () => {
+  test("CLAUDEP_TIMEOUT is seconds, 0 or more than setTimeout can hold turns it off, junk keeps the default", () => {
+    expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "3000000" })).toEqual({ ms: undefined });
+    expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "2147483" })).toEqual({ ms: 2_147_483_000 });
+    expect(claudeTimeoutMs({})).toEqual({ ms: DEFAULT_TIMEOUT_S * 1000 });
+    expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "2.5" })).toEqual({ ms: 2500 });
+    expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "0" })).toEqual({ ms: undefined });
+    expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "-1" })).toEqual({ ms: DEFAULT_TIMEOUT_S * 1000, bad: "-1" });
+    expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "x" })).toEqual({ ms: DEFAULT_TIMEOUT_S * 1000, bad: "x" });
+  });
+
+  /** A clock the test advances by hand. */
+  function fakeTimers() {
+    let now = 0;
+    const timers: { at: number; fn: () => void; id: number }[] = [];
+    let next = 1;
+    return {
+      setTimer: (fn: () => void, ms: number) => {
+        const id = next++;
+        timers.push({ at: now + ms, fn, id });
+        return id;
+      },
+      clearTimer: (id: unknown) => {
+        const i = timers.findIndex((t) => t.id === id);
+        if (i >= 0) timers.splice(i, 1);
+      },
+      advance(ms: number) {
+        now += ms;
+        for (const t of [...timers].sort((a, b) => a.at - b.at))
+          if (t.at <= now) {
+            timers.splice(timers.indexOf(t), 1);
+            t.fn();
+          }
+      },
+      pending: () => timers.length,
+    };
+  }
+
+  test("a child that exits in time is never signalled and leaves no timer", async () => {
+    const t = fakeTimers();
+    const kills: string[] = [];
+    const r = await awaitWithDeadline(Promise.resolve(3), 1000, 200, { ...t, kill: (s) => kills.push(s) });
+    expect(r).toEqual({ code: 3, timedOut: false });
+    expect(kills).toEqual([]);
+    expect(t.pending()).toBe(0);
+  });
+
+  test("a stuck child gets SIGTERM at the deadline and SIGKILL after the grace", async () => {
+    const t = fakeTimers();
+    const kills: string[] = [];
+    let exit: (code: number) => void = () => {};
+    const exited = new Promise<number>((r) => {
+      exit = r;
+    });
+    const p = awaitWithDeadline(exited, 1000, 200, { ...t, kill: (s) => kills.push(s) });
+    t.advance(999);
+    expect(kills).toEqual([]);
+    t.advance(1);
+    expect(kills).toEqual(["SIGTERM"]);
+    t.advance(199);
+    expect(kills).toEqual(["SIGTERM"]);
+    t.advance(1);
+    expect(kills).toEqual(["SIGTERM", "SIGKILL"]);
+    exit(137);
+    expect(await p).toEqual({ code: 137, timedOut: true });
+    expect(t.pending()).toBe(0);
+  });
+
+  test("a child that stops on SIGTERM is not killed", async () => {
+    const t = fakeTimers();
+    const kills: string[] = [];
+    let exit: (code: number) => void = () => {};
+    const exited = new Promise<number>((r) => {
+      exit = r;
+    });
+    const p = awaitWithDeadline(exited, 1000, 200, {
+      ...t,
+      kill: (s) => {
+        kills.push(s);
+        if (s === "SIGTERM") exit(143);
+      },
+    });
+    t.advance(1000);
+    expect(await p).toEqual({ code: 143, timedOut: true });
+    t.advance(1000);
+    expect(kills).toEqual(["SIGTERM"]);
+  });
+
+  test("no deadline waits for the child however long it takes", async () => {
+    const kills: string[] = [];
+    const r = await awaitWithDeadline(Promise.resolve(0), undefined, 200, {
+      setTimer: () => {
+        throw new Error("no timer expected");
+      },
+      clearTimer: () => {},
+      kill: (s) => kills.push(s),
+    });
+    expect(r).toEqual({ code: 0, timedOut: false });
+  });
+});
+
+describe("runMarkers", () => {
+  test("names the profile, sets the nonce and drops hook and stale markers", () => {
+    const env: Env = { CLAUDEP_AUTO: "/a", CLAUDEP_RUN: "/old", CLAUDEP_RUN_ID: "old", PATH: "/bin" };
+    expect(runMarkers(env, "/p/work", "n1", "linux")).toEqual({
+      PATH: "/bin",
+      CLAUDEP_RUN: "/p/work",
+      CLAUDEP_RUN_ID: "n1",
+    });
+    expect(runMarkers(env, undefined, "n2", "linux")).toEqual({ PATH: "/bin", CLAUDEP_RUN_ID: "n2" });
+    expect(env.CLAUDEP_AUTO).toBe("/a");
+  });
+
+  test("drops every spelling on win32", () => {
+    expect(runMarkers({ ClaudeP_Auto: "x", Path: "p" }, "C:\\p\\w", "n", "win32")).toEqual({
+      Path: "p",
+      CLAUDEP_RUN: "C:\\p\\w",
+      CLAUDEP_RUN_ID: "n",
+    });
+  });
+});
+
+describe("StopFailure markers", () => {
+  const f = { error: "authentication_failed", at: 1, run: "n1" };
+
+  test("login errors map to 77 and limits to 75, only for this run in print mode", () => {
+    expect(exitAfterRun(f, "n1", 1, ["-p", "x"])).toEqual({ code: 77, clear: false, failure: f });
+    expect(exitAfterRun({ ...f, error: "rate_limit" }, "n1", 1, ["-p"]).code).toBe(75);
+    expect(exitAfterRun({ ...f, error: "billing_error" }, "n1", 1, ["-p"]).code).toBe(75);
+    expect(exitAfterRun(f, "n2", 1, ["-p"])).toEqual({ code: 1, clear: false });
+    expect(exitAfterRun(f, "n1", 1, ["x"])).toEqual({ code: 1, clear: false });
+  });
+
+  test("a clean exit clears an older marker only from print mode or a login, never its own", () => {
+    expect(exitAfterRun(f, "n2", 0, ["-p", "x"]).clear).toBe(true);
+    expect(exitAfterRun(f, "n2", 0, ["auth", "login", "--sso"]).clear).toBe(true);
+    expect(exitAfterRun(f, "n2", 0, ["auth", "status"]).clear).toBe(false);
+    expect(exitAfterRun(f, "n2", 0, ["--version"]).clear).toBe(false);
+    expect(exitAfterRun(f, "n1", 0, ["-p", "x"]).clear).toBe(false);
+    expect(exitAfterRun(undefined, "n1", 0, ["-p"]).clear).toBe(false);
+  });
+
+  test("every hooked error has a kind", () => {
+    for (const e of STOP_FAILURES) expect(failureKind(e)).toBeDefined();
+    expect(failureKind("server_error")).toBeUndefined();
+  });
+
+  test("print mode is -p or --print before a --", () => {
+    expect(printMode(["--settings", "{}", "-p", "x"])).toBe(true);
+    expect(printMode(["--print"])).toBe(true);
+    expect(printMode(["x", "--", "-p"])).toBe(false);
+    expect(printMode(["--resume", "id"])).toBe(false);
+  });
+
+  test("each hook is one printf into a single-quoted path, with slashes on win32", () => {
+    const [first] = stopFailureHooks("/r/.health/it's", "linux");
+    expect(first).toEqual({
+      matcher: "authentication_failed",
+      hooks: [
+        {
+          type: "command",
+          command: `printf '%s %s\\n' authentication_failed "$CLAUDEP_RUN_ID" > '/r/.health/it'\\''s'`,
+        },
+      ],
+    });
+    expect(stopFailureHooks("C:\\r\\.health\\w", "win32")[0]?.hooks).toEqual([
+      { type: "command", command: `printf '%s %s\\n' authentication_failed "$CLAUDEP_RUN_ID" > 'C:/r/.health/w'` },
+    ]);
+    expect(stopFailureHooks("/x").map((e) => e.matcher)).toEqual([...STOP_FAILURES]);
+  });
+
+  test("the marker text is an error claudep hooks and an optional run id", () => {
+    const id = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    expect(parseFailure(`rate_limit ${id}\n`, 5000)).toEqual({ error: "rate_limit", at: 5, run: id });
+    expect(parseFailure("rate_limit \n", 5000)).toEqual({ error: "rate_limit", at: 5 });
+    expect(parseFailure("rate_limit; rm -rf /", 0)).toBeUndefined();
+    expect(parseFailure("server_error x", 0)).toBeUndefined();
+  });
+
+  test("runSettings adds the hooks after the overlay's own StopFailure hooks and leaves a broken hooks value alone", () => {
+    const own = { matcher: "x", hooks: [{ type: "command", command: "mine" }] };
+    const ours = stopFailureHooks("/f", "linux");
+    expect(runSettings(undefined, { hooks: { StopFailure: [own], Stop: [] } }, ours)).toEqual({
+      hooks: { Stop: [], StopFailure: [own, ...ours] },
+    });
+    expect(runSettings(undefined, { hooks: "nope" }, ours)).toEqual({ hooks: "nope" });
+    expect(runSettings(undefined, {})).toBeUndefined();
+  });
+});
+
+describe("readSessions", () => {
+  function deps(files: Record<string, string>, over: Partial<SessionDeps> = {}) {
+    const read: string[] = [];
+    const d: SessionDeps = {
+      list: () => Object.keys(files),
+      read: (f) => {
+        read.push(f);
+        return files[f.split("/").pop() as string];
+      },
+      alive: () => true,
+      procStart: () => undefined,
+      domain: undefined,
+      ...over,
+    };
+    return { d, read };
+  }
+
+  test("reads only <pid>.json, never a .key file, and keeps only the allowlisted fields", () => {
+    const { d, read } = deps({
+      "42.json": JSON.stringify({
+        pid: 42,
+        name: "a",
+        status: "idle",
+        messagingSocketPath: "/s",
+        peerFeatures: {},
+        cwd: "/w",
+        updatedAt: 5,
+      }),
+      "42.deadbeef.key": "token",
+      "x.json": "{}",
+      "1.json": "{}",
+    });
+    const rows = readSessions("work", "/c", d, "linux");
+    expect(read).toEqual(["/c/sessions/42.json"]);
+    expect(rows).toEqual([
+      {
+        profile: "work",
+        pid: 42,
+        name: "a",
+        status: "idle",
+        kind: undefined,
+        entrypoint: undefined,
+        cwd: "/w",
+        version: undefined,
+        startedAt: undefined,
+        statusSince: 5,
+      },
+    ]);
+  });
+
+  test("skips a dead pid, a reused pid and another pid domain", () => {
+    const f = { "7.json": JSON.stringify({ procStart: "100", pidDomain: "linux:a:pid:[1]" }) };
+    expect(readSessions("w", "/c", deps(f, { alive: () => false }).d, "linux")).toEqual([]);
+    expect(readSessions("w", "/c", deps(f, { procStart: () => "101" }).d, "linux")).toEqual([]);
+    expect(readSessions("w", "/c", deps(f, { domain: "linux:b:pid:[1]" }).d, "linux")).toEqual([]);
+    expect(
+      readSessions("w", "/c", deps(f, { procStart: () => "100", domain: "linux:a:pid:[1]" }).d, "linux"),
+    ).toHaveLength(1);
+  });
+
+  test("a missing sessions dir is no sessions", () => {
+    const d = deps(
+      {},
+      {
+        list: () => {
+          throw new Error("ENOENT");
+        },
+      },
+    ).d;
+    expect(readSessions("w", "/c", d, "linux")).toEqual([]);
+  });
+
+  test("procStartOf counts from the last parenthesis", () => {
+    const fields = Array.from({ length: 30 }, (_, i) => String(i + 3)).join(" ");
+    expect(procStartOf(`123 (a) b) ${fields}`)).toBe("22");
+  });
+});
+
+describe("mcp list parsing", () => {
+  test("each 2.1.322 status maps to a state", () => {
+    const cases: [string, string][] = [
+      ["a: https://x/mcp (HTTP) - \u2713 Connected", "connected"],
+      ["a: https://x/mcp (HTTP) - ! Connected \u00b7 tools fetch failed \u2014 boom", "failed"],
+      ["a: https://x/mcp - ! Needs authentication", "needs-auth"],
+      ["a: cmd --x - - Not configured", "off"],
+      ["a: cmd - \u2718 Failed to connect \u2014 HTTP 405: <html> - \u2713 Connected", "failed"],
+      ["a: cmd - \u23F8 Pending approval (run `claude` to approve)", "off"],
+      ["a: cmd - \u2718 Rejected (see disabledMcpjsonServers in settings)", "off"],
+      ["a: cmd - \u2298 Disabled for this project (re-enable via /mcp)", "off"],
+    ];
+    for (const [line, state] of cases) expect(parseMcpLine(line)).toEqual({ name: "a", state: state as McpState });
+    expect(parseMcpLine("a: cat - - \u2713 Connected")).toEqual({ name: "a", state: "connected" });
+    expect(parseMcpLine("<p>x: y - \u2713 Connected")).toBeUndefined();
+    expect(parseMcpLine("plugin:p:srv: cmd - \u2713 Connected")).toEqual({ name: "plugin:p:srv", state: "connected" });
+    expect(parseMcpLine("no colon here")).toBeUndefined();
+    expect(parseMcpLine("a: b c")).toBeUndefined();
+  });
+
+  test("cached names come from key names only", () => {
+    const m = cachedMcp({ mcpServers: { x: { env: { T: "s" } } } }, { "claude.ai Y": { timestamp: 1 }, x: {} });
+    expect([...m]).toEqual([
+      ["x", "needs-auth"],
+      ["claude.ai Y", "needs-auth"],
+    ]);
+    expect([...cachedMcp(undefined, undefined)]).toEqual([]);
   });
 });

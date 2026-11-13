@@ -24,6 +24,7 @@ import {
   projectSlug,
   SHELLS,
   shareFixCommand,
+  stopFailureHooks,
 } from "../claudep.ts";
 import { fakeBin, REPO, runCli, SCRIPT } from "./lib/cli.ts";
 import { BASE_DIRS, BASE_FILES, fakeHome, PRIVATE_DIRS, PRIVATE_FILES, writeLogin } from "./lib/home.ts";
@@ -32,11 +33,19 @@ import { norm, rx, tilde } from "./lib/paths.ts";
 const SHARED = [...BASE_FILES, ...BASE_DIRS] as readonly string[];
 const WIN = process.platform === "win32";
 
+/** The StopFailure hooks every `run` adds to its --settings. */
+function hookSettings(profilesRoot: string, name: string): { hooks: unknown } {
+  return { hooks: { StopFailure: stopFailureHooks(join(profilesRoot, ".health", name)) } };
+}
+
 /** The arguments `run` puts first in a profile whose projects/ is shared:
- *  the real auto-memory dir for a session started in `root`. */
+ *  the real auto-memory dir for a session started in `root`, and the hook. */
 function memoryArgs(base: string, root: string): string[] {
   const dir = join(realpathSync.native(join(base, "projects")), projectSlug(root, {}), "memory");
-  return ["--settings", JSON.stringify({ autoMemoryDirectory: dir })];
+  return [
+    "--settings",
+    JSON.stringify({ autoMemoryDirectory: dir, ...hookSettings(join(base, "..", ".claudep"), "smoke") }),
+  ];
 }
 
 describe("help and dispatch", () => {
@@ -58,7 +67,7 @@ describe("help and dispatch", () => {
   test("an unknown profile name explains how to create it", async () => {
     using h = fakeHome();
     const r = await runCli(["nope"], { home: h.home });
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(67);
     expect(r.stderr).toContain('no profile "nope"');
     expect(r.stderr).toContain("claudep init nope");
   });
@@ -66,7 +75,7 @@ describe("help and dispatch", () => {
   test("an unknown command is rejected", async () => {
     using h = fakeHome();
     const r = await runCli(["Frobnicate"], { home: h.home });
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(64);
     expect(r.stderr).toContain("unknown command");
   });
 });
@@ -124,10 +133,10 @@ describe("init", () => {
   test("refuses reserved and malformed names", async () => {
     using h = fakeHome();
     const a = await runCli(["init", "default", "--no-login"], { home: h.home });
-    expect(a.exitCode).toBe(1);
+    expect(a.exitCode).toBe(64);
     expect(a.stderr).toContain("reserved");
     const b = await runCli(["init", "Bad Name", "--no-login"], { home: h.home });
-    expect(b.exitCode).toBe(1);
+    expect(b.exitCode).toBe(64);
     expect(b.stderr).toContain("invalid profile name");
     expect(existsSync(h.profilesRoot)).toBe(false);
   });
@@ -309,11 +318,14 @@ describe("run", () => {
     expect(JSON.parse(readFileSync(log, "utf8")).argv).toEqual(["--settings", "{}", "x"]);
   });
 
-  test("`default` runs claude with the caller's environment untouched", async () => {
+  test("`default` runs claude with the caller's config dir untouched and only the hook added", async () => {
     using h = fakeHome();
     const log = join(h.home, "claude.log");
     await runCli(["default", "x"], { home: h.home, env: { FAKE_CLAUDE_LOG: log } });
-    expect(JSON.parse(readFileSync(log, "utf8"))).toEqual({ argv: ["x"], configDir: null });
+    expect(JSON.parse(readFileSync(log, "utf8"))).toEqual({
+      argv: ["--settings", JSON.stringify(hookSettings(h.profilesRoot, "default")), "x"],
+      configDir: null,
+    });
   });
 
   test("propagates claude's exit code", async () => {
@@ -1005,7 +1017,7 @@ describe("completion", () => {
     const help = await runCli(["help"], { home: h.home });
     expect(help.stdout).toContain("claudep completion");
     const r = await runCli(["init", "completion", "--no-login"], { home: h.home });
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(64);
     expect(r.stderr).toContain("reserved");
   });
 });
@@ -1193,12 +1205,13 @@ describe("handoff", () => {
     await runCli(["handoff", "work", OLD], { home: h.home, cwd, env: { FAKE_CLAUDE_LOG: log } });
     expect(JSON.parse(readFileSync(log, "utf8")).argv).toContain(OLD);
     const junk = await runCli(["handoff", "work", "nope"], { home: h.home, cwd });
-    expect(junk.exitCode).toBe(1);
+    expect(junk.exitCode).toBe(64);
     expect(junk.stderr).toContain('"nope" is not a session id');
     const empty = await runCli(["handoff", "work"], { home: h.home, cwd: h.home });
     expect(empty.exitCode).toBe(1);
     expect(empty.stderr).toContain("no session for this directory");
     const ghost = await runCli(["handoff", "ghost"], { home: h.home, cwd });
+    expect(ghost.exitCode).toBe(67);
     expect(ghost.stderr).toContain('profile "ghost" does not exist');
   });
 
@@ -1353,7 +1366,7 @@ describe("settings", () => {
     await runCli(["init", "work", "--no-login"], { home: h.home });
     writeFileSync(join(h.profilesRoot, "work", "claudep.settings.json"), "{ nope");
     const r = await runCli(["work", "x"], { home: h.home });
-    expect(r.exitCode).toBe(1);
+    expect(r.exitCode).toBe(78);
     expect(r.stderr).toContain("not valid JSON");
     const doc = await runCli(["doctor", "work"], { home: h.home });
     expect(doc.exitCode).toBe(1);
@@ -1555,7 +1568,7 @@ describe("credential and config-dir guards", () => {
       const env = { CLAUDE_CONFIG_DIR: "" };
       for (const args of [["current"], ["run", "default"], ["doctor"]]) {
         const r = await runCli(args, { home: h.home, env });
-        expect(r.exitCode).toBe(1);
+        expect(r.exitCode).toBe(args[0] === "run" ? 78 : 1);
         expect(r.stdout + r.stderr).toContain("unset CLAUDE_CONFIG_DIR");
       }
       const doctor = await runCli(["doctor"], { home: h.home, env });
@@ -1887,5 +1900,405 @@ describe("doctor reads managed settings", () => {
     );
     const later = await runCli(["doctor", "smoke"], { home: h.home, env });
     expect(later.stdout).not.toContain("managed settings env");
+  });
+});
+
+describe("deadlines on child claude calls", () => {
+  test("a profile whose claude does not answer shows timeout and its .claude.json account", async () => {
+    using h = fakeHome({ loggedIn: true });
+    await runCli(["init", "work", "--email", "w@corp.com"], { home: h.home });
+    writeFileSync(
+      join(h.profilesRoot, "work", ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: "w@corp.com", organizationName: "Corp" } }),
+    );
+    const started = Date.now();
+    const r = await runCli(["list"], { home: h.home, env: { FAKE_CLAUDE_SLEEP: "20000", CLAUDEP_TIMEOUT: "1" } });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/^work\s+timeout\s+w@corp\.com\s+Corp\s+/m);
+    expect(r.stdout).toContain("CLAUDEP_TIMEOUT=<seconds>");
+    const json = await runCli(["status", "work", "--json"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_SLEEP: "20000", CLAUDEP_TIMEOUT: "1" },
+    });
+    expect(JSON.parse(json.stdout)).toMatchObject({ name: "work", timedOut: true, cached: true, email: "w@corp.com" });
+  }, 30_000);
+
+  test("usage --live falls back to the last numbers seen and marks the row", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const stdin = JSON.stringify({ rate_limits: { seven_day: { used_percentage: 41, resets_at: 1_797_900_000 } } });
+    await runCli(["statusline"], { home: h.home, env: { CLAUDE_CONFIG_DIR: join(h.profilesRoot, "work") }, stdin });
+    const env = { FAKE_CLAUDE_SLEEP: "20000", CLAUDEP_TIMEOUT: "1" };
+    const r = await runCli(["usage", "work"], { home: h.home, env });
+    expect(r.stdout).toMatch(/^work\s+-\s+-\s+41%\s+.+\s+timeout, now \(statusline\)$/m);
+    const json = await runCli(["usage", "work", "--json"], { home: h.home, env });
+    expect(JSON.parse(json.stdout)[0]).toMatchObject({ name: "work", live: false, timedOut: true });
+  }, 30_000);
+
+  test("a claude reached through a wrapper that does not exec still lets the command finish", async () => {
+    if (WIN) return; // a .cmd launch is this shape on Windows; there claudep kills the tree with taskkill
+    using h = fakeHome({ loggedIn: true });
+    const bin = join(h.home, "wrapped-bin");
+    mkdirSync(bin, { recursive: true });
+    const wrapper = join(bin, "claude");
+    writeFileSync(wrapper, `#!/bin/sh\n"${process.execPath}" "${join(REPO, "test", "lib", "fake-claude.ts")}" "$@"\n`);
+    chmodSync(wrapper, 0o755);
+    const started = Date.now();
+    const r = await runCli(["list", "--live"], {
+      home: h.home,
+      bin,
+      env: { FAKE_CLAUDE_SLEEP: "20000", CLAUDEP_TIMEOUT: "1" },
+    });
+    expect(Date.now() - started).toBeLessThan(12_000);
+    expect(r.stdout).toMatch(/^default\s+timeout\s+/m);
+  }, 30_000);
+
+  test("a child that writes a lot to stderr does not hang the command", async () => {
+    using h = fakeHome({ loggedIn: true });
+    const r = await runCli(["list"], { home: h.home, env: { FAKE_CLAUDE_STDERR: String(1 << 20) } });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/^default\s+yes\s+/m);
+  }, 30_000);
+
+  test("a CLAUDEP_TIMEOUT that is not a number is named once and the default applies", async () => {
+    using h = fakeHome({ loggedIn: true });
+    const r = await runCli(["list"], { home: h.home, env: { CLAUDEP_TIMEOUT: "soon" } });
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr.match(/CLAUDEP_TIMEOUT="soon" is not a number of seconds/g)?.length).toBe(1);
+  });
+});
+
+describe("exit codes for claudep's own failures", () => {
+  /** PATH holding only the test's own directories. */
+  const onlyPath = (...dirs: string[]) => ({
+    PATH: [...dirs, ...(WIN ? [join(process.env.SystemRoot ?? "C:\\Windows", "System32")] : [])].join(delimiter),
+  });
+
+  test("run without claude on PATH exits 69, a missing profile 67, a bad name 64", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const empty = join(h.home, "empty-bin");
+    mkdirSync(empty);
+    const absent = await runCli(["run", "work", "-p", "x"], { home: h.home, bin: empty, env: onlyPath(empty) });
+    expect(absent.exitCode).toBe(69);
+    expect(absent.stderr).toContain("not found on PATH");
+    expect((await runCli(["run", "ghost"], { home: h.home })).exitCode).toBe(67);
+    expect((await runCli(["run", "Bad Name"], { home: h.home })).exitCode).toBe(64);
+    expect((await runCli(["run"], { home: h.home })).exitCode).toBe(64);
+  }, 30_000);
+
+  test("claude's own exit code still passes through", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    for (const code of ["1", "2", "69"]) {
+      const r = await runCli(["work", "-p", "x"], { home: h.home, env: { FAKE_CLAUDE_EXIT: code } });
+      expect(r.exitCode).toBe(Number(code));
+    }
+  });
+});
+
+describe("CLAUDEP_RUN marks sessions claudep started", () => {
+  test("run sets CLAUDEP_RUN and a run id and drops an inherited CLAUDEP_AUTO", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const log = join(h.home, "claude.log");
+    const env = {
+      FAKE_CLAUDE_LOG: log,
+      FAKE_CLAUDE_LOG_ENV: "CLAUDEP_RUN,CLAUDEP_RUN_ID,CLAUDEP_AUTO",
+      CLAUDEP_AUTO: join(h.profilesRoot, "other"),
+      CLAUDEP_RUN: join(h.profilesRoot, "stale"),
+    };
+    await runCli(["work", "-p", "x"], { home: h.home, env });
+    await runCli(["run", "default", "-p", "x"], { home: h.home, env });
+    const [work, base] = readFileSync(log, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l).env);
+    expect(work.CLAUDEP_RUN).toBe(join(h.profilesRoot, "work"));
+    expect(work.CLAUDEP_AUTO).toBeNull();
+    expect(work.CLAUDEP_RUN_ID).toMatch(/^[0-9a-f-]{36}$/);
+    expect(base.CLAUDEP_RUN).toBeNull();
+    expect(base.CLAUDEP_AUTO).toBeNull();
+    expect(base.CLAUDEP_RUN_ID).not.toBe(work.CLAUDEP_RUN_ID);
+  });
+
+  test("current says set by claudep run, and a marker for another dir counts as manual", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "work");
+    const run = await runCli(["current", "--json"], {
+      home: h.home,
+      env: { CLAUDE_CONFIG_DIR: dir, CLAUDEP_RUN: dir },
+    });
+    expect(JSON.parse(run.stdout)).toMatchObject({ name: "work", setBy: "run" });
+    const text = await runCli(["current"], { home: h.home, env: { CLAUDE_CONFIG_DIR: dir, CLAUDEP_RUN: dir } });
+    expect(text.stdout).toContain("set by: claudep run");
+    const stale = await runCli(["current", "--json"], {
+      home: h.home,
+      env: { CLAUDE_CONFIG_DIR: dir, CLAUDEP_RUN: join(h.profilesRoot, "other") },
+    });
+    expect(JSON.parse(stale.stdout)).toMatchObject({ name: "work", setBy: "manual" });
+  });
+});
+
+describe("StopFailure markers", () => {
+  const marker = (h: { profilesRoot: string }, name: string) => join(h.profilesRoot, ".health", name);
+
+  test("a print-mode run whose claude stopped on a login error exits 77, and list, status and doctor say so", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login", "--sso"], { home: h.home });
+    // The fake claude runs the hooks from the --settings claudep passed, through sh, as Claude Code does.
+    const r = await runCli(["work", "-p", "x"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_EXIT: "1", FAKE_CLAUDE_STOP_FAILURE: "authentication_failed" },
+    });
+    expect(r.exitCode).toBe(77);
+    expect(r.stderr).toContain("work needs a login: authentication_failed");
+    expect(r.stderr).toContain("claudep work auth login --sso");
+    expect(readFileSync(marker(h, "work"), "utf8")).toMatch(/^authentication_failed [0-9a-f-]{36}\n$/);
+    const list = await runCli(["list"], { home: h.home });
+    expect(list.stdout).toMatch(/^work\s+needs login\s+/m);
+    expect(list.stdout).toContain("work needs a login: authentication_failed");
+    const json = await runCli(["status", "work", "--json"], { home: h.home });
+    expect(JSON.parse(json.stdout).failure).toMatchObject({ error: "authentication_failed" });
+    const doctor = await runCli(["doctor", "work", "--json"], { home: h.home });
+    const checks = JSON.parse(doctor.stdout).profiles[0].checks as { item: string; level: string; fix?: string }[];
+    expect(checks.find((x) => x.item === "stop-failure")).toMatchObject({
+      level: "fail",
+      fix: "claudep work auth login --sso",
+    });
+  }, 30_000);
+
+  test("only a print-mode run or a login that exits 0 clears the marker", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    await runCli(["work", "-p", "x"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_EXIT: "1", FAKE_CLAUDE_STOP_FAILURE: "authentication_failed" },
+    });
+    expect((await runCli(["work", "--version-ish"], { home: h.home })).exitCode).toBe(0);
+    expect((await runCli(["work", "auth", "status"], { home: h.home })).exitCode).toBe(0);
+    expect(existsSync(marker(h, "work"))).toBe(true);
+    // An interactive session that hit the error and then ended cleanly keeps its own marker.
+    rmSync(marker(h, "work"));
+    await runCli(["work", "x"], { home: h.home, env: { FAKE_CLAUDE_STOP_FAILURE: "authentication_failed" } });
+    expect(existsSync(marker(h, "work"))).toBe(true);
+    expect((await runCli(["work", "-p", "x"], { home: h.home })).exitCode).toBe(0);
+    expect(existsSync(marker(h, "work"))).toBe(false);
+    await runCli(["work", "-p", "x"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_EXIT: "1", FAKE_CLAUDE_STOP_FAILURE: "authentication_failed" },
+    });
+    expect((await runCli(["work", "auth", "login"], { home: h.home })).exitCode).toBe(0);
+    expect(existsSync(marker(h, "work"))).toBe(false);
+  }, 30_000);
+
+  test("rm drops the marker, so a profile made again under the name starts clean", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    await runCli(["work", "-p", "x"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_EXIT: "1", FAKE_CLAUDE_STOP_FAILURE: "authentication_failed" },
+    });
+    await runCli(["rm", "work", "--yes", "--keep-login"], { home: h.home });
+    expect(existsSync(marker(h, "work"))).toBe(false);
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    expect((await runCli(["list"], { home: h.home })).stdout).not.toContain("needs login");
+  }, 30_000);
+
+  // On Windows the fake starts the late hook through Git Bash, whose start-up on a CI runner
+  // alone outlasts the 300 ms claudep waits, so the test would time the runner, not claudep.
+  test.skipIf(WIN)(
+    "a hook that lands just after claude exits still counts",
+    async () => {
+      using h = fakeHome();
+      await runCli(["init", "work", "--no-login"], { home: h.home });
+      const r = await runCli(["work", "-p", "x"], {
+        home: h.home,
+        env: {
+          FAKE_CLAUDE_EXIT: "1",
+          FAKE_CLAUDE_STOP_FAILURE: "authentication_failed",
+          FAKE_CLAUDE_HOOK_DELAY: "100",
+        },
+      });
+      expect(r.exitCode).toBe(77);
+    },
+    30_000,
+  );
+
+  test("a limit exits 75, an interactive run keeps claude's code, and an older run's marker changes nothing", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const env = { FAKE_CLAUDE_EXIT: "1", FAKE_CLAUDE_STOP_FAILURE: "rate_limit" };
+    expect((await runCli(["work", "--print", "x"], { home: h.home, env })).exitCode).toBe(75);
+    const list = await runCli(["list"], { home: h.home });
+    expect(list.stdout).not.toContain("needs login");
+    expect(list.stdout).toContain("work hit a limit: rate_limit");
+    expect((await runCli(["work", "x"], { home: h.home, env })).exitCode).toBe(1);
+    // A server error is not one claudep hooks, so nothing is written for it.
+    const other = await runCli(["work", "-p", "x"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_EXIT: "1", FAKE_CLAUDE_STOP_FAILURE: "server_error" },
+    });
+    expect(other.exitCode).toBe(1);
+    const stale = await runCli(["work", "-p", "x"], { home: h.home, env: { FAKE_CLAUDE_EXIT: "1" } });
+    expect(stale.exitCode).toBe(1);
+  }, 30_000);
+});
+
+describe("ps", () => {
+  /** A pid that no longer exists: a short child that has already exited. */
+  function deadPid(): number {
+    const p = Bun.spawnSync([process.execPath, "-e", "0"]);
+    return p.pid;
+  }
+
+  function record(dir: string, pid: number, fields: Record<string, unknown>): void {
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    writeFileSync(join(dir, "sessions", `${pid}.json`), JSON.stringify({ pid, ...fields }));
+  }
+
+  test("lists live sessions in the base and each profile, skips dead pids and marks old versions", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const now = Date.now();
+    record(h.base, process.pid, {
+      name: "base-one",
+      status: "idle",
+      kind: "interactive",
+      version: "9.9.9",
+      cwd: h.home,
+      updatedAt: now,
+    });
+    record(join(h.profilesRoot, "work"), process.pid, {
+      name: "old-one",
+      status: "busy",
+      kind: "bg",
+      version: "2.1.300",
+      cwd: join(h.home, "repo"),
+      updatedAt: now,
+    });
+    record(join(h.profilesRoot, "work"), deadPid(), { name: "gone", status: "idle", version: "9.9.9" });
+    writeFileSync(join(h.profilesRoot, "work", "sessions", `${process.pid}.abc.key`), "secret");
+    const r = await runCli(["ps"], { home: h.home });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/^PROFILE\s+PID\s+NAME\s+STATUS\s+KIND\s+VERSION\s+CWD/);
+    expect(r.stdout).toMatch(
+      new RegExp(`^default\\s+${process.pid}\\s+base-one\\s+idle now\\s+interactive\\s+9\\.9\\.9\\s+`, "m"),
+    );
+    expect(r.stdout).toMatch(/^work\s+\d+\s+old-one\s+busy now\s+bg\s+2\.1\.300 \(old\)/m);
+    expect(r.stdout).not.toContain("gone");
+    expect(r.stdout).not.toContain("secret");
+    const stale = await runCli(["ps", "--stale", "--json"], { home: h.home });
+    const rows = JSON.parse(stale.stdout) as { profile: string; name: string; stale: boolean }[];
+    expect(rows.map((x) => [x.profile, x.name, x.stale])).toEqual([["work", "old-one", true]]);
+    const only = await runCli(["ps", "work", "--json"], { home: h.home });
+    expect(JSON.parse(only.stdout).map((x: { name: string }) => x.name)).toEqual(["old-one"]);
+  });
+
+  test("a record from another pid namespace, or for a reused pid, is not live", async () => {
+    if (process.platform !== "linux") return;
+    using h = fakeHome();
+    record(h.base, process.pid, { name: "foreign", pidDomain: "linux:other:pid:[1]" });
+    record(join(h.base), process.ppid, { name: "reused", procStart: "1" });
+    const r = await runCli(["ps", "--json"], { home: h.home });
+    expect(JSON.parse(r.stdout)).toEqual([]);
+  });
+
+  test("rm refuses a profile with live sessions unless --force, and names the pids", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    record(join(h.profilesRoot, "work"), process.pid, { name: "busy" });
+    const r = await runCli(["rm", "work", "--yes"], { home: h.home });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(`pid ${process.pid}`);
+    expect(existsSync(join(h.profilesRoot, "work"))).toBe(true);
+    const forced = await runCli(["rm", "work", "--yes", "--force"], { home: h.home });
+    expect(forced.exitCode).toBe(0);
+    expect(existsSync(join(h.profilesRoot, "work"))).toBe(false);
+  });
+
+  test("ps is a reserved profile name", async () => {
+    using h = fakeHome();
+    expect((await runCli(["init", "ps", "--no-login"], { home: h.home })).stderr).toContain("reserved");
+  });
+});
+
+describe("mcp", () => {
+  test("cached mode reads server names from .claude.json and the needs-auth cache, and exits 77 for one", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "work");
+    writeFileSync(
+      join(dir, ".claude.json"),
+      JSON.stringify({
+        mcpServers: { nx1: { type: "http", url: "https://secret.example/mcp", headers: { A: "tok" } } },
+      }),
+    );
+    writeFileSync(join(dir, "mcp-needs-auth-cache.json"), JSON.stringify({ "claude.ai Drive": { timestamp: 1 } }));
+    const r = await runCli(["mcp", "work"], { home: h.home });
+    expect(r.exitCode).toBe(77);
+    expect(r.stdout).toMatch(/^SERVER\s+work$/m);
+    expect(r.stdout).toMatch(/^claude\.ai Drive\s+needs-auth$/m);
+    expect(r.stdout).toMatch(/^nx1\s+unknown$/m);
+    expect(r.stdout).not.toContain("secret.example");
+    expect(r.stdout).not.toContain("tok");
+    const one = await runCli(["mcp", "work", "--server", "nx1", "--json"], { home: h.home });
+    expect(one.exitCode).toBe(0);
+    expect(JSON.parse(one.stdout)).toEqual([{ profile: "work", mode: "cached", servers: { nx1: "unknown" } }]);
+    const doctor = await runCli(["doctor", "work"], { home: h.home });
+    expect(doctor.stdout).toContain("MCP servers waiting for auth: claude.ai Drive");
+  });
+
+  test("--live runs claude mcp list from a scratch folder and keeps only names and states", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const log = join(h.home, "claude.log");
+    const r = await runCli(["mcp", "work", "--live", "--json"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_VERSION: "2.1.322 (Claude Code)", FAKE_CLAUDE_LOG: log },
+    });
+    expect(r.exitCode).toBe(77);
+    expect(JSON.parse(r.stdout)).toEqual([
+      {
+        profile: "work",
+        mode: "live",
+        servers: { nx1: "connected", "claude.ai Drive": "needs-auth", local: "failed" },
+      },
+    ]);
+    expect(r.stdout).not.toContain("/secret/path");
+    const call = JSON.parse(readFileSync(log, "utf8").trim().split("\n").at(-1) as string);
+    // An empty scratch folder, removed afterwards: no project .mcp.json, nothing left in the profile.
+    expect(call.cwd).toContain("claudep-mcp-");
+    expect(existsSync(call.cwd)).toBe(false);
+    const odd = await runCli(["mcp", "work", "--live"], {
+      home: h.home,
+      env: {
+        FAKE_CLAUDE_VERSION: "2.1.322 (Claude Code)",
+        FAKE_CLAUDE_MCP: "weird https://leak.example/x?k=v\nok: x - \u2713 Connected",
+      },
+    });
+    expect(odd.exitCode).toBe(0);
+    expect(odd.stdout).not.toContain("leak.example");
+    expect(odd.stdout).toContain("1 line(s) of claude mcp list were not understood");
+  });
+
+  test("--live below 2.1.301 falls back to cached names", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const log = join(h.home, "claude.log");
+    const r = await runCli(["mcp", "work", "--live", "--json"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_VERSION: "2.1.300 (Claude Code)", FAKE_CLAUDE_LOG: log },
+    });
+    expect(JSON.parse(r.stdout)[0].mode).toBe("cached");
+    expect(r.stderr).toContain("95822");
+    expect(existsSync(log)).toBe(false);
+  });
+
+  test("mcp is a reserved profile name", async () => {
+    using h = fakeHome();
+    expect((await runCli(["init", "mcp", "--no-login"], { home: h.home })).stderr).toContain("reserved");
   });
 });

@@ -21,6 +21,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   readlinkSync,
@@ -32,7 +33,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, posix, resolve, win32 } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -227,7 +228,7 @@ export type Current = {
   kind: "base" | "profile" | "custom";
   name: string | undefined;
   dir: string;
-  setBy: "none" | "hook" | "manual";
+  setBy: "none" | "hook" | "manual" | "run";
 };
 
 /** What this shell is running Claude Code as, and how it got that way. */
@@ -236,7 +237,11 @@ export function currentProfile(L: Layout, env: Env = process.env): Current {
   if (!cfg) return { kind: "base", name: undefined, dir: L.base, setBy: "none" };
   const dir = canon(cfg, L.home, L.platform);
   const auto = env.CLAUDEP_AUTO;
-  const setBy = auto !== undefined && samePath(canon(auto, L.home, L.platform), dir, L.platform) ? "hook" : "manual";
+  const run = env.CLAUDEP_RUN;
+  const same = (v: string | undefined) =>
+    v !== undefined && v !== "" && samePath(canon(v, L.home, L.platform), dir, L.platform);
+  // A marker that names another dir was inherited by a nested manual pin, so it does not count.
+  const setBy = same(auto) ? "hook" : same(run) ? "run" : "manual";
   if (L.activeProfile !== undefined) return { kind: "profile", name: L.activeProfile, dir, setBy };
   return { kind: "custom", name: undefined, dir, setBy };
 }
@@ -452,6 +457,14 @@ export const COMMANDS: readonly Command[] = [
     arg: "profile",
     flags: ["--json"],
   },
+  {
+    name: "mcp",
+    desc: "MCP server state per profile, from cached names or claude mcp list",
+    arg: "profile",
+    flags: ["--json", "--live", "--cached"],
+    valueFlags: [{ name: "--server" }],
+  },
+  { name: "ps", desc: "live Claude Code sessions in every profile", arg: "profile", flags: ["--json", "--stale"] },
   { name: "handoff", desc: "resume this directory's latest session under another profile", arg: "profile" },
   { name: "statusline", desc: "print the profile and its usage from the statusline JSON on stdin" },
   {
@@ -471,7 +484,7 @@ export const COMMANDS: readonly Command[] = [
     desc: "log out and delete a profile",
     aliases: ["remove"],
     arg: "profile",
-    flags: ["--keep-login", "--yes"],
+    flags: ["--keep-login", "--yes", "--force"],
   },
   { name: "local", desc: "pin this directory tree to a profile", arg: "profile", flags: ["--remove", "--force"] },
   { name: "resolve", desc: "print the profile pinned for a directory", arg: "dir", flags: ["--json"] },
@@ -517,6 +530,23 @@ const ok = (msg: string) => console.log(`${c.green("✓")} ${msg}`);
 const warn = (msg: string) => console.log(`${c.yellow("!")} ${msg}`);
 const bad = (msg: string) => console.log(`${c.red("✗")} ${msg}`);
 
+/** Exit codes for claudep's own failures on the launch path, from sysexits.h.
+ *  Claude's own exit code passes through unchanged, so these never collide with its 1. */
+export const EXIT = {
+  /** Usage error or an invalid profile name (EX_USAGE). */
+  usage: 64,
+  /** The profile does not exist (EX_NOUSER). */
+  noProfile: 67,
+  /** `claude` is missing, or only a .ps1 was found (EX_UNAVAILABLE). */
+  noClaude: 69,
+  /** Claude stopped on a usage limit or a billing error (EX_TEMPFAIL). */
+  limit: 75,
+  /** Claude stopped because the login no longer works (EX_NOPERM). */
+  login: 77,
+  /** The profile's claudep.settings.json cannot be read (EX_CONFIG). */
+  config: 78,
+} as const;
+
 export function die(msg: string, code = 1): never {
   console.error(`${c.red("error:")} ${msg}`);
   process.exit(code);
@@ -527,8 +557,9 @@ export function die(msg: string, code = 1): never {
 // ---------------------------------------------------------------------------
 
 export function profileDir(L: Layout, name: string): string {
-  if (!NAME_RE.test(name)) die(`invalid profile name "${name}" (use [a-z0-9_-], starting with a letter or digit)`);
-  if (RESERVED.has(name)) die(`"${name}" is a reserved word and cannot be a profile name`);
+  if (!NAME_RE.test(name))
+    die(`invalid profile name "${name}" (use [a-z0-9_-], starting with a letter or digit)`, EXIT.usage);
+  if (RESERVED.has(name)) die(`"${name}" is a reserved word and cannot be a profile name`, EXIT.usage);
   return canon(pathApi(L.platform).join(L.profilesRoot, name), L.home, L.platform);
 }
 
@@ -1395,8 +1426,8 @@ export function cmdExeCommand(cmd: string): string {
  *  quotes, wrap in quotes, then caret-escape every metacharacter. Twice when
  *  the target is a .cmd shim, because its own cmd.exe parses `%*` again. */
 export function cmdExeQuote(arg: string, doubleEscape = true): string {
-  let out = arg.replace(/(?=(\\+?)?)"/g, '$1$1\\"');
-  out = out.replace(/(\\+)$/, "$1$1");
+  let out = arg.replace(/(\\*)"/g, '$1$1\\"');
+  out = out.replace(/(\\*)$/, "$1$1");
   out = `"${out}"`.replace(CMD_META, "^$1");
   if (doubleEscape) out = out.replace(CMD_META, "^$1");
   return out;
@@ -1518,18 +1549,26 @@ async function claudeLaunch(L: Layout): Promise<ClaudeLaunch> {
       updating
         ? "`claude` is still missing after a Claude Code update ran for five minutes. Check the install: claude doctor"
         : "`claude` not found on PATH. Install Claude Code first: https://code.claude.com/docs/en/setup",
+      EXIT.noClaude,
     );
   if (launch.kind === "ps1")
     die(
       `only ${launch.bin} was found. Install Claude Code with the native installer or npm so claude.exe or claude.cmd exists: https://code.claude.com/docs/en/setup`,
+      EXIT.noClaude,
     );
   return launch;
 }
 
-async function spawnClaude(L: Layout, dir: string | undefined, args: string[], io: "inherit" | "pipe") {
+async function spawnClaude(
+  L: Layout,
+  dir: string | undefined,
+  args: string[],
+  io: "inherit" | "pipe",
+  env: Env = claudeEnv(L, dir),
+) {
   const { cmd, verbatim } = claudeSpawn(await claudeLaunch(L), args);
   return Bun.spawn(cmd, {
-    env: claudeEnv(L, dir),
+    env,
     stdin: io === "inherit" ? "inherit" : "ignore",
     stdout: io,
     stderr: io,
@@ -1568,31 +1607,195 @@ export function baseEnv(L: Layout, env: Env = process.env): Env {
   return out;
 }
 
-function claudeEnv(L: Layout, dir: string | undefined): Env {
-  if (dir === undefined) return baseEnv(L);
-  return withProfileVars(readProfileEnv(dir).vars, envFor(dir, process.env, L.platform), L.platform);
+/** Marks a session claudep started, for `claudep current` and the StopFailure hook.
+ *  CLAUDEP_RUN names the profile dir (removed for the base) and CLAUDEP_RUN_ID
+ *  is this launch's nonce. An inherited CLAUDEP_AUTO goes, so a hook-pinned
+ *  parent shell does not make the session look hook-pinned. */
+export function runMarkers(
+  env: Env,
+  dir: string | undefined,
+  runId: string,
+  platform: NodeJS.Platform = process.platform,
+): Env {
+  const out: Env = { ...env };
+  for (const k of ["CLAUDEP_AUTO", "CLAUDEP_RUN", "CLAUDEP_RUN_ID"]) deleteEnv(out, k, platform);
+  if (dir !== undefined) out.CLAUDEP_RUN = dir;
+  out.CLAUDEP_RUN_ID = runId;
+  return out;
 }
 
-async function execClaude(L: Layout, dir: string | undefined, args: string[]): Promise<never> {
-  const proc = await spawnClaude(L, dir, args, "inherit");
+/** The child's environment. Run markers this process inherited are dropped;
+ *  execClaude sets fresh ones for the sessions it starts. */
+function claudeEnv(L: Layout, dir: string | undefined): Env {
+  const out =
+    dir === undefined
+      ? baseEnv(L)
+      : withProfileVars(readProfileEnv(dir).vars, envFor(dir, process.env, L.platform), L.platform);
+  for (const k of ["CLAUDEP_RUN", "CLAUDEP_RUN_ID"]) deleteEnv(out, k, L.platform);
+  return out;
+}
+
+/** Runs claude in the foreground and exits with its code. With `name`, the
+ *  run carries claudep's StopFailure hook: a clean exit clears the profile's
+ *  marker, and a failure this run recorded in print mode exits 77 or 75. */
+async function execClaude(
+  L: Layout,
+  dir: string | undefined,
+  args: string[],
+  name?: string,
+  userArgs: readonly string[] = args,
+): Promise<never> {
+  const runId = crypto.randomUUID();
+  if (name !== undefined)
+    try {
+      mkdirSync(pathApi(L.platform).dirname(failurePath(L, name)), { recursive: true });
+    } catch {}
+  const proc = await spawnClaude(L, dir, args, "inherit", runMarkers(claudeEnv(L, dir), dir, runId, L.platform));
   // Ctrl+C reaches the child through the terminal; keep the wrapper alive so
   // it can report the child's real exit code.
   const signals = wrapperSignals(L.platform);
   for (const s of signals.ignore) process.on(s, () => {});
   for (const s of signals.forward) process.on(s, () => proc.kill(s));
   await proc.exited;
-  process.exit(proc.exitCode ?? 1);
+  const code = proc.exitCode ?? 1;
+  if (name === undefined) process.exit(code);
+  let failure = readFailure(L, name);
+  // The hook runs as claude exits; give a print-mode failure a moment to land.
+  for (let i = 0; code !== 0 && printMode(userArgs) && failure?.run !== runId && i < 6; i++) {
+    await Bun.sleep(50);
+    failure = readFailure(L, name);
+  }
+  const after = exitAfterRun(failure, runId, code, userArgs);
+  if (after.clear) clearFailure(L, name);
+  if (after.failure)
+    console.error(`claudep: ${failureNote(name, after.failure, loginCommand(name, dir ? readLoginFlags(dir) : []))}`);
+  process.exit(after.code);
 }
 
+/** Seconds a child `claude` gets in list, status, usage and doctor. */
+export const DEFAULT_TIMEOUT_S = 30;
+/** The longest delay setTimeout honours. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+/** How long a child has between SIGTERM and SIGKILL. */
+export const KILL_GRACE_MS = 3_000;
+
+/** The deadline from CLAUDEP_TIMEOUT, in ms: seconds, where 0 means none.
+ *  Anything that is not a number of seconds keeps the default and is named in `bad`. */
+export function claudeTimeoutMs(env: Env = process.env): { ms: number | undefined; bad?: string } {
+  const raw = env.CLAUDEP_TIMEOUT;
+  if (raw === undefined || raw.trim() === "") return { ms: DEFAULT_TIMEOUT_S * 1000 };
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return { ms: DEFAULT_TIMEOUT_S * 1000, bad: raw };
+  // setTimeout fires at once past 2^31-1 ms, so anything that long means no deadline.
+  return { ms: n === 0 || n * 1000 > MAX_TIMER_MS ? undefined : n * 1000 };
+}
+
+export type DeadlineDeps = {
+  setTimer: (fn: () => void, ms: number) => unknown;
+  clearTimer: (t: unknown) => void;
+  kill: (signal: NodeJS.Signals) => void;
+};
+
+/** Waits for a child to exit. After `ms` it sends SIGTERM, then SIGKILL
+ *  `graceMs` later. The grace lets a token refresh already in flight finish
+ *  writing, because a hard kill there signs the profile out
+ *  (anthropics/claude-code#95822). No `ms` means no deadline. */
+export async function awaitWithDeadline(
+  exited: Promise<number>,
+  ms: number | undefined,
+  graceMs: number,
+  deps: DeadlineDeps,
+): Promise<{ code: number; timedOut: boolean }> {
+  if (ms === undefined) return { code: await exited, timedOut: false };
+  let timedOut = false;
+  let hard: unknown;
+  const soft = deps.setTimer(() => {
+    timedOut = true;
+    deps.kill("SIGTERM");
+    hard = deps.setTimer(() => deps.kill("SIGKILL"), graceMs);
+  }, ms);
+  try {
+    return { code: await exited, timedOut };
+  } finally {
+    deps.clearTimer(soft);
+    if (hard !== undefined) deps.clearTimer(hard);
+  }
+}
+
+let timeoutWarned = false;
+
+/** CLAUDEP_TIMEOUT for this process, warning once about a value it cannot use. */
+function childTimeoutMs(): number | undefined {
+  const { ms, bad } = claudeTimeoutMs();
+  if (bad !== undefined && !timeoutWarned) {
+    timeoutWarned = true;
+    console.error(`claudep: CLAUDEP_TIMEOUT="${bad}" is not a number of seconds; using ${DEFAULT_TIMEOUT_S}`);
+  }
+  return ms;
+}
+
+/** Runs a short `claude` command and returns its stdout. stderr is read and
+ *  dropped, so a chatty child never blocks on a full pipe. Past the
+ *  CLAUDEP_TIMEOUT deadline the child is stopped and `out` is empty. */
 async function captureClaude(
   L: Layout,
   dir: string | undefined,
   args: string[],
-): Promise<{ code: number; out: string }> {
-  const proc = await spawnClaude(L, dir, args, "pipe");
-  const out = await new Response(proc.stdout).text();
-  const code = await proc.exited;
-  return { code, out };
+): Promise<{ code: number; out: string; timedOut: boolean }> {
+  return boundedOutput((await spawnClaude(L, dir, args, "pipe")) as unknown as PipedChild, L.platform);
+}
+
+type PipedChild = {
+  pid: number;
+  exited: Promise<number>;
+  stdout: ReadableStream<Uint8Array>;
+  stderr: ReadableStream<Uint8Array>;
+  kill: (signal?: NodeJS.Signals) => void;
+  unref: () => void;
+};
+
+/** Reads a stream to the end; `cancel` lets go of it early. */
+function drain(stream: ReadableStream<Uint8Array>): { text: Promise<string>; cancel: () => void } {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  const text = (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value) chunks.push(value);
+      }
+    } catch {}
+    return Buffer.concat(chunks).toString("utf8");
+  })();
+  return { text, cancel: () => void reader.cancel().catch(() => {}) };
+}
+
+/** stdout of a piped child under the CLAUDEP_TIMEOUT deadline, with stderr
+ *  read and dropped. Past the deadline both pipes are let go, so a grandchild
+ *  that holds them (a wrapper that does not exec) cannot keep claudep waiting.
+ *  On Windows a .cmd launch is cmd.exe with claude below it and TerminateProcess
+ *  has no grace, so the whole tree is killed at the deadline. */
+async function boundedOutput(
+  proc: PipedChild,
+  platform: NodeJS.Platform,
+): Promise<{ code: number; out: string; timedOut: boolean }> {
+  const out = drain(proc.stdout);
+  const err = drain(proc.stderr);
+  const kill = (signal: NodeJS.Signals) => {
+    if (platform !== "win32") return proc.kill(signal);
+    Bun.spawnSync(["taskkill", "/PID", String(proc.pid), "/T", "/F"], { stdout: "ignore", stderr: "ignore" });
+  };
+  const { code, timedOut } = await awaitWithDeadline(proc.exited, childTimeoutMs(), KILL_GRACE_MS, {
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+    kill,
+  });
+  if (!timedOut) return { code, out: await out.text, timedOut };
+  out.cancel();
+  err.cancel();
+  proc.unref();
+  return { code, out: "", timedOut };
 }
 
 export type AuthStatus = {
@@ -1609,6 +1812,8 @@ export type AuthStatus = {
   configDirectory?: string;
   /** Read from the profile's .claude.json instead of asking Claude Code. */
   cached?: boolean;
+  /** Claude Code did not answer before the CLAUDEP_TIMEOUT deadline, so this is the .claude.json record. */
+  timedOut?: boolean;
 };
 
 /** Before this Claude Code, a short command such as `claude auth status`
@@ -1656,19 +1861,19 @@ export function parseAuthStatus(text: string): AuthStatus {
   }
 }
 
-async function authStatus(L: Layout, dir: string | undefined): Promise<AuthStatus> {
-  const { out } = await captureClaude(L, dir, ["auth", "status", "--json"]);
-  return parseAuthStatus(out);
-}
-
 async function claudeVersion(L: Layout): Promise<Version | undefined> {
   return parseVersion((await captureClaude(L, undefined, ["--version"])).out);
 }
 
-/** `claude auth status` when it is safe or `live` asks for it, otherwise the .claude.json record. */
+/** `claude auth status` when it is safe or `live` asks for it, otherwise
+ *  the .claude.json record. A live call past the deadline falls back to the record. */
 async function loginOf(L: Layout, dir: string | undefined, live: boolean): Promise<AuthStatus> {
-  if (live) return authStatus(L, dir);
-  return cachedAuthStatus(await readJson(dir === undefined ? L.baseGlobalJson : join(dir, ".claude.json")));
+  const cached = async () =>
+    cachedAuthStatus(await readJson(dir === undefined ? L.baseGlobalJson : join(dir, ".claude.json")));
+  if (!live) return cached();
+  const { out, timedOut } = await captureClaude(L, dir, ["auth", "status", "--json"]);
+  if (timedOut) return { ...(await cached()), timedOut: true };
+  return parseAuthStatus(out);
 }
 
 /** The login flags a profile was created with: `--sso --email you@company.com`
@@ -1848,7 +2053,7 @@ async function cmdInit(L: Layout, args: string[]): Promise<void> {
   // An address the saved file refuses still goes to this login as it was typed.
   const loginArgs = ["auth", "login", ...(given.length ? given : flags)];
   console.log(`\n${c.bold("Logging in")} to profile ${name} …`);
-  await execClaude(L, dir, loginArgs);
+  await execClaude(L, dir, loginArgs, name);
 }
 
 function scriptDir(): string {
@@ -2143,16 +2348,20 @@ function warnSkippedEnv(dir: string): void {
 
 async function cmdRun(L: Layout, args: string[]): Promise<never> {
   const name = args[0];
-  if (!name) die("usage: claudep run <name> [claude args…]");
+  if (!name) die("usage: claudep run <name> [claude args…]", EXIT.usage);
   const rest = args.slice(1);
   if (rest[0] === "--") rest.shift();
   if (name === "default" || name === "base") {
-    if (L.emptyConfigDir) die(EMPTY_CONFIG_DIR_MESSAGE);
+    if (L.emptyConfigDir) die(EMPTY_CONFIG_DIR_MESSAGE, EXIT.config);
     warnSecureStorage(L, L.base, name);
-    return execClaude(L, undefined, rest);
+    if (passesSettings(rest)) return execClaude(L, undefined, rest);
+    const userArgs = [...rest];
+    const settings = runSettings(undefined, {}, stopFailureHooks(failurePath(L, "default"), L.platform));
+    if (settings) rest.unshift("--settings", JSON.stringify(settings));
+    return execClaude(L, undefined, rest, "default", userArgs);
   }
   const dir = profileDir(L, name);
-  if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
+  if (!existsSync(dir)) die(`profile "${name}" does not exist. Run: claudep init ${name}`, EXIT.noProfile);
   for (const v of authEnvOverrides(process.env, L.platform))
     console.error(`claudep: ${v} is set; Claude Code will use it instead of the "${name}" login`);
   warnSecureStorage(L, dir, name);
@@ -2163,15 +2372,28 @@ async function cmdRun(L: Layout, args: string[]): Promise<never> {
     for (const item of healLinks(L.base, dir, readAccepted(dir))) console.error(`claudep: linked ${item} into ${name}`);
   const overlay = readProfileSettings(dir);
   if (overlay.error)
-    die(`${join(dir, SETTINGS_FILE)}: ${overlay.error}. Fix it, or: claudep settings ${name} --unset <key>`);
-  if (rest.some((a) => a === "--settings" || a.startsWith("--settings="))) {
+    die(
+      `${join(dir, SETTINGS_FILE)}: ${overlay.error}. Fix it, or: claudep settings ${name} --unset <key>`,
+      EXIT.config,
+    );
+  if (passesSettings(rest)) {
     if (Object.keys(overlay.settings).length)
       console.error(`claudep: you passed --settings, so ${join(dir, SETTINGS_FILE)} is not applied`);
     return execClaude(L, dir, rest);
   }
-  const settings = runSettings(memoryDirOverride(dir, process.cwd(), rest, process.env, L.platform), overlay.settings);
+  const userArgs = [...rest];
+  const settings = runSettings(
+    memoryDirOverride(dir, process.cwd(), rest, process.env, L.platform),
+    overlay.settings,
+    stopFailureHooks(failurePath(L, name), L.platform),
+  );
   if (settings) rest.unshift("--settings", JSON.stringify(settings));
-  return execClaude(L, dir, rest);
+  return execClaude(L, dir, rest, name, userArgs);
+}
+
+/** The caller passed its own --settings, which replaces claudep's overlay and hook. */
+function passesSettings(args: readonly string[]): boolean {
+  return args.some((a) => a === "--settings" || a.startsWith("--settings="));
 }
 
 export const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -2210,16 +2432,17 @@ export function latestSession(
 async function cmdHandoff(L: Layout, args: string[]): Promise<never> {
   const usage = "usage: claudep handoff <name> [session-id] [-- claude args…]";
   const name = args[0];
-  if (!name || name.startsWith("-")) die(usage);
+  if (!name || name.startsWith("-")) die(usage, EXIT.usage);
   let rest = args.slice(1);
   let id: string | undefined;
   if (rest[0] !== undefined && rest[0] !== "--") {
     id = rest.shift();
-    if (!id || !SESSION_ID_RE.test(id)) die(`"${id}" is not a session id. ${usage}`);
+    if (!id || !SESSION_ID_RE.test(id)) die(`"${id}" is not a session id. ${usage}`, EXIT.usage);
   }
   if (rest[0] === "--") rest = rest.slice(1);
   const target = name === "default" || name === "base" ? L.base : profileDir(L, name);
-  if (target !== L.base && !existsSync(target)) die(`profile "${name}" does not exist. Run: claudep init ${name}`);
+  if (target !== L.base && !existsSync(target))
+    die(`profile "${name}" does not exist. Run: claudep init ${name}`, EXIT.noProfile);
   const projects = sharedItems(L.base).find((s) => s.name === "projects");
   if (!projects || (target !== L.base && linkState(L.base, target, projects) !== "ok"))
     die(`projects/ is not shared with "${name}", so it cannot read this session. Run: claudep init ${name}`);
@@ -2233,7 +2456,7 @@ async function cmdHandoff(L: Layout, args: string[]): Promise<never> {
   return cmdRun(L, [name, "--", "--resume", id, "--fork-session", ...rest]);
 }
 
-export type Row = { name: string; dir: string; status: AuthStatus };
+export type Row = { name: string; dir: string; status: AuthStatus; failure?: Failure };
 
 async function collectRows(L: Layout, names: string[], live: boolean): Promise<{ rows: Row[]; v?: Version }> {
   const v = await claudeVersion(L);
@@ -2241,7 +2464,13 @@ async function collectRows(L: Layout, names: string[], live: boolean): Promise<{
   const rows = await Promise.all(
     names.map(async (name) => {
       const dir = name === "default" ? L.base : profileDir(L, name);
-      return { name, dir, status: await loginOf(L, name === "default" ? undefined : dir, ask) };
+      const failure = readFailure(L, name);
+      return {
+        name,
+        dir,
+        status: await loginOf(L, name === "default" ? undefined : dir, ask),
+        ...(failure ? { failure } : {}),
+      };
     }),
   );
   return { rows, v };
@@ -2256,7 +2485,11 @@ export function formatTable(rows: Row[], home: string, platform: NodeJS.Platform
   const cols = ["PROFILE", "LOGIN", "EMAIL", "ORG", "PLAN", "DIR"];
   const data = rows.map((r) => [
     r.name,
-    `${r.status.loggedIn ? "yes" : "no"}${r.status.cached ? "*" : ""}`,
+    failureKind(r.failure?.error ?? "") === "login"
+      ? "needs login"
+      : r.status.timedOut
+        ? "timeout"
+        : `${r.status.loggedIn ? "yes" : "no"}${r.status.cached ? "*" : ""}`,
     r.status.email ?? "-",
     r.status.orgName ?? "-",
     r.status.subscriptionType ?? "-",
@@ -2273,12 +2506,30 @@ function printTable(rows: Row[], home: string, platform: NodeJS.Platform, v: Ver
   lines.forEach((line, i) => {
     console.log(rows[i]?.status.loggedIn ? line : c.dim(line));
   });
-  if (rows.some((r) => r.status.cached)) console.log(c.dim(`\n${cachedNote(v)}`));
+  if (rows.some((r) => r.status.cached && !r.status.timedOut)) console.log(c.dim(`\n${cachedNote(v)}`));
+  if (rows.some((r) => r.status.timedOut)) console.log(c.dim(`\n${timeoutNote()}`));
+  const failed = rows.filter((r) => r.failure);
+  if (failed.length) console.log("");
+  for (const r of failed)
+    if (r.failure)
+      console.log(
+        c.yellow(
+          failureNote(r.name, r.failure, loginCommand(r.name, r.name === "default" ? [] : readLoginFlags(r.dir))),
+        ),
+      );
+}
+
+/** The footnote under a row whose `claude` ran past the deadline. */
+function timeoutNote(): string {
+  const ms = claudeTimeoutMs().ms;
+  const secs = ms === undefined ? "" : ` within ${ms / 1000} s`;
+  return `timeout: claude did not answer${secs}, so the row shows the account in .claude.json. Raise the limit with CLAUDEP_TIMEOUT=<seconds>`;
 }
 
 /** The flat object `status --json` prints for one row; `list --json` prints an array of them. */
 function rowJson(row: Row): JsonObject {
-  return { name: row.name, dir: row.dir, ...row.status };
+  const failure = row.failure ? { failure: { error: row.failure.error, at: row.failure.at } } : {};
+  return { name: row.name, dir: row.dir, ...row.status, ...failure };
 }
 
 async function cmdList(L: Layout, args: string[]): Promise<void> {
@@ -2310,7 +2561,7 @@ async function cmdStatus(L: Layout, args: string[]): Promise<void> {
     return;
   }
   printTable([row], L.home, L.platform, v);
-  if (!row.status.loggedIn && name !== "default")
+  if (!row.status.loggedIn && failureKind(row.failure?.error ?? "") !== "login" && name !== "default")
     console.log(c.dim(`\nLog in: ${loginCommand(name, readLoginFlags(row.dir))}`));
 }
 
@@ -2479,10 +2730,150 @@ export function readProfileSettings(dir: string): { settings: JsonObject; error?
   }
 }
 
-/** The --settings value `run` passes: the auto-memory path, then the profile's overlay, which wins. */
-export function runSettings(memoryDir: string | undefined, overlay: JsonObject): JsonObject | undefined {
+/** The --settings value `run` passes: the auto-memory path, then the profile's
+ *  overlay, which wins, then claudep's StopFailure hooks added to any the
+ *  overlay has. Flag-settings hooks run alongside the user's own (checked on 2.1.322). */
+export function runSettings(
+  memoryDir: string | undefined,
+  overlay: JsonObject,
+  stopFailureHooks?: readonly JsonObject[],
+): JsonObject | undefined {
   const out: JsonObject = { ...(memoryDir === undefined ? {} : { autoMemoryDirectory: memoryDir }), ...overlay };
+  const own = overlay.hooks;
+  const ownIsObject = own !== undefined && own !== null && typeof own === "object" && !Array.isArray(own);
+  if (stopFailureHooks?.length && (own === undefined || ownIsObject)) {
+    const hooks: JsonObject = ownIsObject ? { ...(own as JsonObject) } : {};
+    const prior = Array.isArray(hooks.StopFailure) ? (hooks.StopFailure as unknown[]) : [];
+    hooks.StopFailure = [...prior, ...stopFailureHooks];
+    out.hooks = hooks;
+  }
   return Object.keys(out).length ? out : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// StopFailure markers. Claude Code runs StopFailure hooks when a turn ends on
+// an API error, matched on the error's name. It does not wait for them: on
+// 2.1.323 a hook that takes 50 ms is killed when claude exits. So each hook is
+// one shell builtin, `printf` into a redirect, one entry per error name, and
+// writes "<error> <run id>" to <profiles root>/.health/<name>, a path fixed at
+// launch. No stdin, no subprocess, no token. list, status and doctor read it;
+// run maps it to exit 77 or 75.
+// ---------------------------------------------------------------------------
+
+/** StopFailure errors that mean the login or the account needs a person (exit 77). */
+export const LOGIN_FAILURES = [
+  "authentication_failed",
+  "oauth_org_not_allowed",
+  "account_on_hold",
+  "verification_required",
+  "cloud_credential_error",
+] as const;
+/** StopFailure errors that mean a usage or spend limit (exit 75). */
+export const LIMIT_FAILURES = ["rate_limit", "billing_error"] as const;
+export const STOP_FAILURES: readonly string[] = [...LOGIN_FAILURES, ...LIMIT_FAILURES];
+
+/** `at` is epoch seconds, from the marker's mtime. */
+export type Failure = { error: string; at: number; run?: string };
+
+export function failureKind(error: string): "login" | "limit" | undefined {
+  if ((LOGIN_FAILURES as readonly string[]).includes(error)) return "login";
+  if ((LIMIT_FAILURES as readonly string[]).includes(error)) return "limit";
+  return undefined;
+}
+
+/** A path as a single-quoted sh word. Claude Code runs command hooks in a
+ *  POSIX shell (Git Bash on Windows, hence forward slashes there). */
+export function shQuote(p: string, platform: NodeJS.Platform = process.platform): string {
+  const v = platform === "win32" ? p.replace(/\\/g, "/") : p;
+  return `'${v.replace(/'/g, "'\\''")}'`;
+}
+
+/** One StopFailure entry per error name, each writing that name and the run
+ *  id to `file`. The run id comes from the session's own environment. */
+export function stopFailureHooks(file: string, platform: NodeJS.Platform = process.platform): JsonObject[] {
+  return STOP_FAILURES.map((error) => ({
+    matcher: error,
+    hooks: [{ type: "command", command: `printf '%s %s\\n' ${error} "$CLAUDEP_RUN_ID" > ${shQuote(file, platform)}` }],
+  }));
+}
+
+export function failurePath(L: Layout, name: string): string {
+  return pathApi(L.platform).join(L.profilesRoot, ".health", name);
+}
+
+/** "<error> <run id>": the error must be one claudep hooks, the id is optional. */
+export function parseFailure(text: string, mtimeMs: number): Failure | undefined {
+  const [error, run] = text.trim().split(/\s+/);
+  if (error === undefined || failureKind(error) === undefined) return undefined;
+  const at = Math.floor(mtimeMs / 1000);
+  return run && /^[0-9a-f-]{36}$/.test(run) ? { error, at, run } : { error, at };
+}
+
+export function readFailure(L: Layout, name: string): Failure | undefined {
+  const file = failurePath(L, name);
+  try {
+    const st = statSync(file);
+    if (!st.isFile() || st.size > 256) return undefined;
+    return parseFailure(readFileSync(file, "utf8"), st.mtimeMs);
+  } catch {
+    return undefined;
+  }
+}
+
+export function clearFailure(L: Layout, name: string): void {
+  try {
+    rmSync(failurePath(L, name), { force: true });
+  } catch {}
+}
+
+/** True when the args log in: `claudep <name> auth login …`. */
+export function loginArgs(args: readonly string[]): boolean {
+  const i = args.findIndex((a) => !a.startsWith("-"));
+  return args[i] === "auth" && args[i + 1] === "login";
+}
+
+/** What `run` exits with once claude has. A print-mode run that recorded a
+ *  failure exits 77 or 75. The marker clears only on proof the login works: a
+ *  print-mode run or an `auth login` that exits 0, and never for a marker this
+ *  same run wrote (an interactive session can end cleanly after one). */
+export function exitAfterRun(
+  failure: Failure | undefined,
+  runId: string,
+  code: number,
+  args: readonly string[],
+): { code: number; clear: boolean; failure?: Failure } {
+  const print = printMode(args);
+  const mine = failure !== undefined && failure.run === runId;
+  if (code === 0) return { code, clear: failure !== undefined && !mine && (print || loginArgs(args)) };
+  if (!print || !mine || failure === undefined) return { code, clear: false };
+  const kind = failureKind(failure.error);
+  if (kind === undefined) return { code, clear: false };
+  return { code: kind === "login" ? EXIT.login : EXIT.limit, clear: false, failure };
+}
+
+/** True when the claude args ask for print mode, which is how scripts run it. */
+export function printMode(args: readonly string[]): boolean {
+  for (const a of args) {
+    if (a === "--") return false;
+    if (a === "-p" || a === "--print") return true;
+  }
+  return false;
+}
+
+/** "Nov 12, 9:14 PM" in local time. */
+function seenText(at: number): string {
+  return new Date(at * 1000).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+export function failureNote(name: string, f: Failure, login: string): string {
+  const kind = failureKind(f.error);
+  if (kind === "login") return `${name} needs a login: ${f.error}, seen ${seenText(f.at)}. Log in: ${login}`;
+  return `${name} hit a limit: ${f.error}, seen ${seenText(f.at)}`;
 }
 
 function cmdSettings(L: Layout, args: string[]): void {
@@ -2512,7 +2903,14 @@ function cmdSettings(L: Layout, args: string[]): void {
 
 function describeCurrent(cur: Current): string {
   const label = currentLabel(cur);
-  const how = cur.setBy === "hook" ? "shell hook" : cur.setBy === "manual" ? "manual pin" : "nothing pinned";
+  const how =
+    cur.setBy === "hook"
+      ? "shell hook"
+      : cur.setBy === "run"
+        ? "claudep run"
+        : cur.setBy === "manual"
+          ? "manual pin"
+          : "nothing pinned";
   return `${label} (${how})`;
 }
 
@@ -2658,7 +3056,7 @@ export function ageText(at: number, now: number): string {
   return `${Math.floor(s / 86_400)} d ago`;
 }
 
-export type UsageRow = { name: string; usage?: Usage; live: boolean };
+export type UsageRow = { name: string; usage?: Usage; live: boolean; timedOut?: boolean };
 
 export function formatUsageTable(rows: UsageRow[], now: number): string[] {
   const cols = ["PROFILE", "5H", "RESETS", "7D", "RESETS", "SEEN"];
@@ -2669,7 +3067,8 @@ export function formatUsageTable(rows: UsageRow[], now: number): string[] {
     resetsText(r.usage?.fiveHour),
     pct(r.usage?.sevenDay),
     resetsText(r.usage?.sevenDay),
-    r.usage ? (r.live ? "now" : `${ageText(r.usage.at, now)} (${r.usage.source})`) : "never",
+    (r.timedOut ? "timeout, " : "") +
+      (r.usage ? (r.live ? "now" : `${ageText(r.usage.at, now)} (${r.usage.source})`) : "never"),
   ]);
   const widths = cols.map((h, i) => Math.max(h.length, ...data.map((d) => (d[i] as string).length)));
   const fmt = (cells: string[]) =>
@@ -2696,13 +3095,15 @@ async function cmdUsage(L: Layout, args: string[]): Promise<void> {
       if (live) {
         const dir = name === "default" ? undefined : profileDir(L, name);
         const args = ["-p", "/usage", "--output-format", "json", "--no-session-persistence"];
-        const fresh = parseUsageOutput((await captureClaude(L, dir, args)).out, now);
+        const { out, timedOut } = await captureClaude(L, dir, args);
+        const fresh = parseUsageOutput(out, now);
         if (fresh) {
           try {
             writeUsageCache(L, name, fresh, old);
           } catch {}
           return { name, usage: fresh, live: true };
         }
+        if (timedOut) return { name, usage: old, live: false, timedOut: true };
       }
       return { name, usage: old, live: false };
     }),
@@ -2710,7 +3111,7 @@ async function cmdUsage(L: Layout, args: string[]): Promise<void> {
   if (f.bools.has("--json")) {
     console.log(
       JSON.stringify(
-        rows.map((r) => ({ name: r.name, live: r.live, ...r.usage })),
+        rows.map((r) => ({ name: r.name, live: r.live, ...(r.timedOut ? { timedOut: true } : {}), ...r.usage })),
         null,
         2,
       ),
@@ -2726,6 +3127,8 @@ async function cmdUsage(L: Layout, args: string[]): Promise<void> {
         `\nLast seen numbers: Claude Code ${v?.join(".") ?? "of unknown version"} can sign a profile out on a short command (${AUTH_STATUS_ISSUE}, fixed in ${SAFE_AUTH_STATUS_FROM}). Update Claude Code, or pass --live`,
       ),
     );
+  if (rows.some((r) => r.timedOut))
+    console.log(c.dim(`\n${timeoutNote().replace("the account in .claude.json", "the last numbers seen")}`));
   if (rows.some((r) => !r.usage))
     console.log(
       c.dim(
@@ -2777,6 +3180,7 @@ function cmdCurrent(L: Layout, args: string[]): void {
   console.log(`${c.bold(label)}  ${c.dim(shortHome(cur.dir, L.home, L.platform))}`);
   if (cur.setBy === "hook")
     console.log(`set by: shell hook${pin ? ` (${PIN_FILE} in ${shortHome(pin.dir, L.home, L.platform)})` : ""}`);
+  else if (cur.setBy === "run") console.log("set by: claudep run (this session was started by claudep)");
   else if (cur.setBy === "manual") console.log("set by: manual pin (claudep env or export CLAUDE_CONFIG_DIR)");
   else console.log("set by: nothing pinned; this is ~/.claude");
   if (cur.kind === "custom") console.log(c.dim("CLAUDE_CONFIG_DIR points outside the claudep profiles root"));
@@ -2821,7 +3225,7 @@ function cmdLocal(L: Layout, args: string[]): void {
     console.log(`${pin.name}  ${c.dim(shortHome(pin.file, L.home, L.platform))}`);
     return;
   }
-  if (!NAME_RE.test(name)) die(`invalid profile name "${name}"`);
+  if (!NAME_RE.test(name)) die(`invalid profile name "${name}"`, EXIT.usage);
   if (!f.bools.has("--force") && !profileExists(L, name))
     die(`profile "${name}" does not exist. Run: claudep init ${name}   (or pass --force to pin it anyway)`);
   writeFileSync(file, `${name}\n`);
@@ -3836,6 +4240,21 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       );
     const s = await loginOf(L, dir, ask);
     const login = loginCommand(name, readLoginFlags(dir));
+    const failure = readFailure(L, name);
+    if (failure && failureKind(failure.error) === "login")
+      report.add("stop-failure", failure.error, "fail", failureNote(name, failure, login), {
+        problem: true,
+        fix: login,
+      });
+    else if (failure) report.add("stop-failure", failure.error, "info", failureNote(name, failure, login));
+    const authNames = objectKeys(await readJson(join(dir, MCP_AUTH_CACHE)));
+    if (authNames.length)
+      report.add(
+        "mcp",
+        "needs-auth",
+        "info",
+        `MCP servers waiting for auth: ${authNames.join(", ")}. Connect them with /mcp in claudep ${name}`,
+      );
     if (L.platform === "darwin") {
       const svc = keychainService(dir);
       if (await keychainHas(svc)) report.add("keychain", "present", "ok", `keychain item "${svc}" present`);
@@ -3855,7 +4274,14 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
       report.add("credentials", "absent", "warn", `no .credentials.json in the profile. Not logged in yet (${login})`, {
         fix: login,
       });
-    if (s.cached && s.loggedIn)
+    if (s.timedOut)
+      report.add(
+        "login",
+        "timeout",
+        "warn",
+        `claude auth status did not answer in time; last known account: ${s.email ?? "none"}, from .claude.json. CLAUDEP_TIMEOUT=<seconds> waits longer`,
+      );
+    else if (s.cached && s.loggedIn)
       report.add(
         "login",
         "cached",
@@ -4004,7 +4430,7 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
 async function cmdRm(L: Layout, args: string[]): Promise<void> {
   const f = parseFlags(args, ...flagSpec("rm"));
   const name = f.rest[0];
-  if (!name) die("usage: claudep rm <name> [--keep-login] [--yes]");
+  if (!name) die("usage: claudep rm <name> [--keep-login] [--yes] [--force]");
   const dir = profileDir(L, name);
   if (!existsSync(dir)) die(`profile "${name}" does not exist`);
   const real = realpathSync(dir);
@@ -4018,13 +4444,23 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
   if (cur.kind === "profile" && cur.name === name) {
     const unset = envUnsetHint(shellSyntax(process.env, L.platform, parentProcessName(L.platform)));
     warn(
-      `this shell is on ${name} (${cur.setBy === "hook" ? "shell hook" : "manual pin"}). After removal run: ${unset}`,
+      `this shell is on ${name} (${cur.setBy === "hook" ? "shell hook" : cur.setBy === "run" ? "claudep run" : "manual pin"}). After removal run: ${unset}`,
     );
   }
   const pin = resolvePin(process.cwd());
   if (pin && pin.name === name)
     warn(
       `${shortHome(pin.file, L.home, L.platform)} pins this directory tree to ${name}. Remove it with: claudep local --remove`,
+    );
+  const foreign: number[] = [];
+  const live = liveSessions(L, [name], foreign);
+  if (live.length && !f.bools.has("--force"))
+    die(
+      `"${name}" has ${live.length} live session(s), pid ${live.map((r) => r.pid).join(", ")}. Logging out would revoke the token under them. Stop them first, or pass --force`,
+    );
+  if (foreign.length)
+    warn(
+      `${foreign.length} session record(s) in "${name}" come from another host or pid namespace (pid ${foreign.join(", ")}); claudep cannot tell whether they still run`,
     );
   if (!f.bools.has("--yes")) {
     const yes = confirm(`Remove profile "${name}" (${dir})? Shared items are only unlinked; ${L.base} is untouched.`);
@@ -4045,9 +4481,420 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
     if (lstatSync(p).isSymbolicLink()) removeLink(p);
   }
   rmSync(dir, { recursive: true, force: true });
+  // A profile made again under this name starts with no marker and no usage numbers.
+  clearFailure(L, name);
+  rmSync(usageCachePath(L, name), { force: true });
   ok(`removed ${dir}`);
   for (const shim of findShims(shimDirs(L), L.platform))
     if (shim.profile === name) warn(`alias shim ${shim.path} still points at this profile. Remove it if unused`);
+}
+
+// ---------------------------------------------------------------------------
+// MCP servers. Cached mode reads only key names: the servers in mcpServers of a
+// .claude.json and the entries of mcp-needs-auth-cache.json. Values, env and
+// headers are never read. Live mode runs `claude mcp list` and keeps the name
+// and a state word from each line, because the rest can hold stdio args and URLs.
+// ---------------------------------------------------------------------------
+
+export type McpState = "connected" | "needs-auth" | "failed" | "off" | "unknown";
+export const MCP_AUTH_CACHE = "mcp-needs-auth-cache.json";
+
+function objectKeys(v: unknown): string[] {
+  return v && typeof v === "object" && !Array.isArray(v) ? Object.keys(v) : [];
+}
+
+/** Server names and what the files alone say about them. */
+export function cachedMcp(
+  globalJson: JsonObject | undefined,
+  authCache: JsonObject | undefined,
+): Map<string, McpState> {
+  const out = new Map<string, McpState>();
+  for (const n of objectKeys(globalJson?.mcpServers)) out.set(n, "unknown");
+  for (const n of objectKeys(authCache)) out.set(n, "needs-auth");
+  return out;
+}
+
+/** Server names as Claude Code writes them: config keys, `claude.ai <name>`,
+ *  `plugin:<plugin>:<server>`. Anything else on a line is not trusted as a name. */
+const MCP_NAME_RE = /^[A-Za-z0-9][\w.@:/ -]{0,99}$/;
+
+/** One `claude mcp list` line as name and state, from the status after the
+ *  first " - " that a status mark follows ("- Not configured" only as itself,
+ *  so a lone "-" argument is not taken for one). A line it cannot read is dropped. */
+export function parseMcpLine(line: string): { name: string; state: McpState } | undefined {
+  const colon = line.indexOf(": ");
+  if (colon <= 0) return undefined;
+  const name = line.slice(0, colon);
+  if (!MCP_NAME_RE.test(name)) return undefined;
+  const m = /\s-\s(?:([\u2713\u2714!\u2718\u2717\u23F8\u2298])\s(.*)|(-)\s(Not configured.*))$/u.exec(
+    line.slice(colon + 2),
+  );
+  if (!m) return undefined;
+  const mark = (m[1] ?? m[3]) as string;
+  const text = ((m[2] ?? m[4]) as string).split(" \u2014 ")[0] as string;
+  let state: McpState = "unknown";
+  if (mark === "\u2713" || mark === "\u2714") state = text.startsWith("Connected") ? "connected" : "unknown";
+  else if (mark === "!") state = text.startsWith("Needs authentication") ? "needs-auth" : "failed";
+  else if (mark === "\u2718" || mark === "\u2717") state = text.startsWith("Rejected") ? "off" : "failed";
+  else state = "off";
+  return { name, state };
+}
+
+export function parseMcpList(out: string): { servers: Map<string, McpState>; unread: number } {
+  const servers = new Map<string, McpState>();
+  let unread = 0;
+  for (const raw of out.split("\n")) {
+    const line = raw.trimEnd();
+    if (line === "" || line.startsWith("Checking MCP server health") || line.startsWith("No MCP servers configured"))
+      continue;
+    const p = parseMcpLine(line);
+    if (p) servers.set(p.name, p.state);
+    else unread++;
+  }
+  return { servers, unread };
+}
+
+export type McpRow = {
+  profile: string;
+  mode: "cached" | "live";
+  servers: Map<string, McpState>;
+  timedOut?: boolean;
+  unread?: number;
+};
+
+export function formatMcpTable(rows: readonly McpRow[], only: readonly string[]): string[] {
+  const names = only.length ? [...only] : [...new Set(rows.flatMap((r) => [...r.servers.keys()]))].sort();
+  const cols = ["SERVER", ...rows.map((r) => r.profile)];
+  const data = names.map((n) => [n, ...rows.map((r) => r.servers.get(n) ?? "-")]);
+  const widths = cols.map((h, i) => Math.max(h.length, ...data.map((d) => (d[i] as string).length)));
+  const fmt = (cells: string[]) =>
+    cells
+      .map((v, i) => v.padEnd(widths[i] as number))
+      .join("  ")
+      .trimEnd();
+  return [fmt(cols), ...data.map((d) => fmt(d))];
+}
+
+async function mcpRow(L: Layout, name: string, live: boolean): Promise<McpRow> {
+  const dir = name === "default" ? L.base : profileDir(L, name);
+  if (live && existsSync(dir)) {
+    // From an empty scratch folder: no project's .mcp.json is read, and a stdio
+    // server that writes relative files leaves nothing in a config dir.
+    const scratch = mkdtempSync(pathApi(L.platform).join(tmpdir(), "claudep-mcp-"));
+    try {
+      const { cmd, verbatim } = claudeSpawn(await claudeLaunch(L), ["mcp", "list"]);
+      const proc = Bun.spawn(cmd, {
+        cwd: scratch,
+        env: claudeEnv(L, name === "default" ? undefined : dir),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        windowsVerbatimArguments: verbatim,
+      });
+      const { out, timedOut } = await boundedOutput(proc, L.platform);
+      if (!timedOut) {
+        const { servers, unread } = parseMcpList(out);
+        return { profile: name, mode: "live", servers, ...(unread ? { unread } : {}) };
+      }
+    } catch {
+      // A launch that fails shows the cached names, like a timeout.
+    } finally {
+      try {
+        rmSync(scratch, { recursive: true, force: true });
+      } catch {}
+    }
+    return { ...(await mcpRow(L, name, false)), timedOut: true };
+  }
+  const P = pathApi(L.platform);
+  const globalJson = await readJson(name === "default" ? L.baseGlobalJson : P.join(dir, ".claude.json"));
+  const authCache = await readJson(P.join(dir, MCP_AUTH_CACHE));
+  return { profile: name, mode: "cached", servers: cachedMcp(globalJson, authCache) };
+}
+
+/** `claudep mcp [names…] [--live|--cached] [--json] [--server <s>]…`. Exits 77
+ *  when a named server, or with none named any server, needs auth. */
+async function cmdMcp(L: Layout, args: string[]): Promise<void> {
+  const f = parseFlags(args, ...flagSpec("mcp"));
+  const names = f.rest.length ? f.rest.map((n) => (n === "base" ? "default" : n)) : ["default", ...listProfileNames(L)];
+  for (const n of names) if (n !== "default" && !profileExists(L, n)) die(`profile "${n}" does not exist`);
+  if (f.bools.has("--live") && f.bools.has("--cached")) die("pass --live or --cached, not both", EXIT.usage);
+  let live = f.bools.has("--live");
+  if (live) {
+    const v = await claudeVersion(L);
+    if (!authStatusSafe(v)) {
+      console.error(
+        `claudep: Claude Code ${v?.join(".") ?? "of unknown version"} can sign a profile out on a short command (${AUTH_STATUS_ISSUE}, fixed in ${SAFE_AUTH_STATUS_FROM}); showing cached names`,
+      );
+      live = false;
+    }
+  }
+  const only = f.lists.get("--server") ?? [];
+  const rows = await Promise.all(names.map((n) => mcpRow(L, n, live)));
+  const needsAuth = rows.some((r) =>
+    [...r.servers].some(([n, st]) => st === "needs-auth" && (only.length === 0 || only.includes(n))),
+  );
+  if (f.bools.has("--json")) {
+    const pick = (m: Map<string, McpState>) =>
+      Object.fromEntries([...m].filter(([n]) => only.length === 0 || only.includes(n)));
+    console.log(
+      JSON.stringify(
+        rows.map((r) => ({
+          profile: r.profile,
+          mode: r.mode,
+          ...(r.timedOut ? { timedOut: true } : {}),
+          ...(r.unread ? { unread: r.unread } : {}),
+          servers: pick(r.servers),
+        })),
+        null,
+        2,
+      ),
+    );
+  } else {
+    const [header, ...lines] = formatMcpTable(rows, only);
+    console.log(c.bold(header as string));
+    for (const line of lines) console.log(line);
+    if (!lines.length) console.log(c.dim("No MCP servers found."));
+    if (!live)
+      console.log(
+        c.dim(
+          "\nFrom file names only: unknown = configured in .claude.json, needs-auth = in mcp-needs-auth-cache.json. claude.ai connectors show only once they need auth. --live asks claude mcp list",
+        ),
+      );
+    for (const r of rows) {
+      if (r.timedOut)
+        console.log(c.dim(`${r.profile}: claude mcp list did not run or did not answer in time; showing cached names`));
+      if (r.unread)
+        console.log(
+          c.dim(`${r.profile}: ${r.unread} line(s) of claude mcp list were not understood and are not shown`),
+        );
+    }
+  }
+  if (needsAuth) process.exit(EXIT.login);
+}
+
+// ---------------------------------------------------------------------------
+// Live sessions. Claude Code writes sessions/<pid>.json in its config dir for
+// every running session. claudep reads only those files, keeps a fixed set of
+// fields and checks the pid is still the process that wrote the record. The
+// sessions dir also holds <pid>.<hash>.key files with a peer token; they are
+// never opened (Never 3).
+// ---------------------------------------------------------------------------
+
+export const SESSION_FILE_RE = /^[0-9]+\.json$/;
+const SESSION_MAX_BYTES = 262_144;
+
+export type Session = {
+  profile: string;
+  pid: number;
+  name?: string;
+  status?: string;
+  kind?: string;
+  entrypoint?: string;
+  cwd?: string;
+  version?: string;
+  startedAt?: number;
+  /** ms since epoch when the status last changed, or the record was last written. */
+  statusSince?: number;
+};
+
+export type SessionDeps = {
+  list: (dir: string) => string[];
+  read: (file: string) => string | undefined;
+  /** True while a process with this pid exists. */
+  alive: (pid: number) => boolean;
+  /** The process's start time as Claude Code records it (field 22 of /proc/<pid>/stat), when known. */
+  procStart: (pid: number) => string | undefined;
+  /** This host's pid domain as Claude Code writes it, when known. */
+  domain: string | undefined;
+};
+
+/** Field 22 of a /proc/<pid>/stat line: start time in clock ticks. The command
+ *  name in field 2 can hold spaces and parentheses, so count from the last ")". */
+export function procStartOf(stat: string): string | undefined {
+  const tail = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  return tail[19];
+}
+
+const str = (o: JsonObject, k: string) => (typeof o[k] === "string" ? (o[k] as string) : undefined);
+const num = (o: JsonObject, k: string) =>
+  typeof o[k] === "number" && Number.isFinite(o[k]) ? (o[k] as number) : undefined;
+
+/** The live sessions in one config dir. A record whose pid is gone, was reused
+ *  by another process, or belongs to another host or pid namespace is skipped. */
+export function readSessions(
+  profile: string,
+  configDir: string,
+  deps: SessionDeps,
+  platform: NodeJS.Platform = process.platform,
+  onForeign: (pid: number) => void = () => {},
+): Session[] {
+  const P = pathApi(platform);
+  const dir = P.join(configDir, "sessions");
+  const out: Session[] = [];
+  let names: string[];
+  try {
+    names = deps.list(dir);
+  } catch {
+    return out;
+  }
+  for (const f of names) {
+    if (!SESSION_FILE_RE.test(f)) continue;
+    const pid = Number(f.slice(0, -5));
+    if (!Number.isSafeInteger(pid) || pid <= 1) continue;
+    const text = deps.read(P.join(dir, f));
+    if (text === undefined) continue;
+    let o: JsonObject;
+    try {
+      const j: unknown = JSON.parse(text);
+      if (!j || typeof j !== "object" || Array.isArray(j)) continue;
+      o = j as JsonObject;
+    } catch {
+      continue;
+    }
+    const domain = str(o, "pidDomain");
+    if (domain !== undefined && deps.domain !== undefined && domain !== deps.domain) {
+      onForeign(pid);
+      continue;
+    }
+    if (!deps.alive(pid)) continue;
+    const recorded = str(o, "procStart");
+    const actual = recorded === undefined ? undefined : deps.procStart(pid);
+    if (recorded !== undefined && actual !== undefined && recorded !== actual) continue;
+    out.push({
+      profile,
+      pid,
+      name: str(o, "name"),
+      status: str(o, "status"),
+      kind: str(o, "kind"),
+      entrypoint: str(o, "entrypoint"),
+      cwd: str(o, "cwd"),
+      version: str(o, "version"),
+      startedAt: num(o, "startedAt"),
+      statusSince: num(o, "statusUpdatedAt") ?? num(o, "updatedAt"),
+    });
+  }
+  return out.sort((a, b) => a.pid - b.pid);
+}
+
+function hostSessionDeps(platform: NodeJS.Platform): SessionDeps {
+  const linux = platform === "linux";
+  let domain: string | undefined;
+  if (linux) {
+    try {
+      const id = readFileSync("/etc/machine-id", "utf8").trim();
+      let ns = "";
+      try {
+        ns = readlinkSync("/proc/self/ns/pid");
+      } catch {}
+      domain = `linux:${id}:${ns}`;
+    } catch {}
+  }
+  return {
+    list: (dir) => readdirSync(dir),
+    read: (file) => {
+      try {
+        if (statSync(file).size > SESSION_MAX_BYTES) return undefined;
+        return readFileSync(file, "utf8");
+      } catch {
+        return undefined;
+      }
+    },
+    alive: (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (e) {
+        return (e as NodeJS.ErrnoException).code === "EPERM";
+      }
+    },
+    procStart: (pid) => {
+      if (!linux) return undefined;
+      try {
+        return procStartOf(readFileSync(`/proc/${pid}/stat`, "utf8"));
+      } catch {
+        return undefined;
+      }
+    },
+    domain,
+  };
+}
+
+/** Live sessions for each named profile (`default` is the base). `foreign`
+ *  collects pids of records from another host or pid namespace, which this
+ *  process cannot check. */
+function liveSessions(L: Layout, names: readonly string[], foreign: number[] = []): Session[] {
+  const deps = hostSessionDeps(L.platform);
+  return names.flatMap((n) =>
+    readSessions(n, n === "default" ? L.base : profileDir(L, n), deps, L.platform, (pid) => foreign.push(pid)),
+  );
+}
+
+export function formatSessions(
+  rows: readonly Session[],
+  installed: Version | undefined,
+  now: number,
+  home: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const cols = ["PROFILE", "PID", "NAME", "STATUS", "KIND", "VERSION", "CWD"];
+  const data = rows.map((r) => [
+    r.profile,
+    String(r.pid),
+    r.name ?? "-",
+    r.status
+      ? `${r.status}${r.statusSince ? ` ${ageText(Math.floor(r.statusSince / 1000), now).replace(/ ago$/, "")}` : ""}`
+      : "-",
+    r.kind ?? "-",
+    r.version ? `${r.version}${sessionStale(r, installed) ? " (old)" : ""}` : "-",
+    r.cwd ? shortHome(r.cwd, home, platform) : "-",
+  ]);
+  const widths = cols.map((h, i) => Math.max(h.length, ...data.map((d) => (d[i] as string).length)));
+  const fmt = (cells: string[]) =>
+    cells
+      .map((v, i) => v.padEnd(widths[i] as number))
+      .join("  ")
+      .trimEnd();
+  return [fmt(cols), ...data.map((d) => fmt(d))];
+}
+
+/** True when the session runs a Claude Code older than the one installed now. */
+export function sessionStale(r: Session, installed: Version | undefined): boolean {
+  const v = r.version === undefined ? undefined : parseVersion(r.version);
+  return v !== undefined && installed !== undefined && versionBelow(v, installed);
+}
+
+/** `claudep ps [name…] [--json] [--stale]`: live sessions in the base and every profile. */
+async function cmdPs(L: Layout, args: string[]): Promise<void> {
+  const f = parseFlags(args, ...flagSpec("ps"));
+  const names = f.rest.length ? f.rest.map((n) => (n === "base" ? "default" : n)) : ["default", ...listProfileNames(L)];
+  for (const n of names) if (n !== "default" && !profileExists(L, n)) die(`profile "${n}" does not exist`);
+  const installed = findClaude() ? await claudeVersion(L) : undefined;
+  let rows = liveSessions(L, names);
+  if (f.bools.has("--stale")) rows = rows.filter((r) => sessionStale(r, installed));
+  const now = Math.floor(Date.now() / 1000);
+  if (f.bools.has("--json")) {
+    console.log(
+      JSON.stringify(
+        rows.map((r) => ({ ...r, stale: sessionStale(r, installed) })),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  if (!rows.length) {
+    console.log(f.bools.has("--stale") ? "No session runs an older Claude Code." : "No live Claude Code sessions.");
+    return;
+  }
+  const [header, ...lines] = formatSessions(rows, installed, now, L.home, L.platform);
+  console.log(c.bold(header as string));
+  for (const line of lines) console.log(line);
+  if (rows.some((r) => sessionStale(r, installed)))
+    console.log(
+      c.dim(
+        `\n(old): started before Claude Code ${installed?.join(".")} was installed; it picks up the update when restarted`,
+      ),
+    );
 }
 
 function help(L: Layout): void {
@@ -4083,7 +4930,12 @@ ${c.bold("USAGE")}
                                        remembers the numbers for claudep usage
   claudep doctor [name] [--json]       verify symlinks, keychain entry, unclassified files, shims, Claude Code version
   claudep doctor --accept <name> <item>   stop counting one shared item as a problem; --unaccept undoes it
-  claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched)
+  claudep mcp [name…] [--live|--cached] [--json] [--server <s>]…
+                                       MCP servers per profile: names from the files (--cached, the default), or
+                                       claude mcp list with --live; exits 77 when one needs auth
+  claudep ps [name…] [--json] [--stale]   live Claude Code sessions in every profile; --stale only older versions
+  claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched); refuses
+                                       one with live sessions unless --force
   claudep help                         show this text
   claudep --version                    print the version
 
@@ -4153,7 +5005,9 @@ ${c.bold("PROFILE VARIABLES")}
 ${c.bold("ENVIRONMENT")}
   CLAUDE_PROFILES_DIR   where profiles live (default ~/.claudep; keep it out of iCloud/Dropbox)
   CLAUDEP_AUTO          set by the hook next to CLAUDE_CONFIG_DIR; marks the pin as hook-managed
+  CLAUDEP_RUN           set by claudep <name>, run, handoff and alias commands in claude's environment: the profile dir
   CLAUDEP_MANAGED_DIR   where doctor reads managed settings (default ${managedSettingsDir(L.platform)})
+  CLAUDEP_TIMEOUT       seconds list, status, usage and doctor wait for each claude (default ${DEFAULT_TIMEOUT_S}; 0 waits forever)
   ${ENV_KEYS_VAR}      the variables a ${ENV_FILE} put in this shell, cleared again on leaving
 
 ${c.dim("claudep is an independent, unofficial tool. It is not affiliated with, endorsed by or supported by Anthropic.")}
@@ -4206,6 +5060,10 @@ export async function main(argv: string[]): Promise<void> {
       return cmdAlias(L, args);
     case "handoff":
       return cmdHandoff(L, args);
+    case "ps":
+      return cmdPs(L, args);
+    case "mcp":
+      return cmdMcp(L, args);
     case "statusline":
       return cmdStatusline(L);
     case "usage":
@@ -4219,8 +5077,8 @@ export async function main(argv: string[]): Promise<void> {
       return cmdRm(L, args);
     default:
       if (cmd === "default" || cmd === "base" || profileExists(L, cmd)) return cmdRun(L, [cmd, ...args]);
-      if (NAME_RE.test(cmd)) die(`no profile "${cmd}". Create it with: claudep init ${cmd}`);
-      die(`unknown command "${cmd}". Try: claudep help`);
+      if (NAME_RE.test(cmd)) die(`no profile "${cmd}". Create it with: claudep init ${cmd}`, EXIT.noProfile);
+      die(`unknown command "${cmd}". Try: claudep help`, EXIT.usage);
   }
 }
 

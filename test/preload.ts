@@ -9,6 +9,11 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// claudep's own variables (CLAUDEP_TIMEOUT, CLAUDEP_RUN, …) from the developer's shell too.
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith("ANTHROPIC_") || key.startsWith("CLAUDE_") || key.startsWith("CLAUDEP_")) delete process.env[key];
+}
+
 const root = mkdtempSync(join(realpathSync.native(tmpdir()), "claudep-test-"));
 
 process.env.HOME = root;
@@ -21,10 +26,6 @@ process.env.NO_COLOR = "1";
 process.env.CLAUDEP_TEST_ROOT = root;
 // The host's real managed settings must never decide a test.
 process.env.CLAUDEP_MANAGED_DIR = join(root, "no-managed-settings");
-
-for (const key of Object.keys(process.env)) {
-  if (key.startsWith("ANTHROPIC_") || key.startsWith("CLAUDE_")) delete process.env[key];
-}
 
 // Imported here, after NO_COLOR is set, because claudep.ts reads it on load.
 const { CREDENTIAL_ENV } = await import("../claudep.ts");
