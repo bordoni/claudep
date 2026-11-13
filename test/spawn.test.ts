@@ -57,9 +57,42 @@ describe("cmd.exe quoting", () => {
     ['a"b', '^"a\\^"b^"'],
     ["x&y", '^"x^&y^"'],
     ["end\\", '^"end\\\\^"'],
+    ['a\\"b', '^"a\\\\\\^"b^"'],
     ["%PATH%", '^"^%PATH^%^"'],
   ])("argument %p, single escape -> %p", (arg, quoted) => {
     expect(cmdExeQuote(arg, false)).toBe(quoted);
+  });
+
+  /** How the MSVCRT reads one argument once cmd.exe has removed a level of carets. */
+  function msvcrtArg(s: string): string {
+    const line = s.replace(/\^(.)/g, "$1");
+    let out = "";
+    let quoted = false;
+    for (let i = 0; i < line.length; i++) {
+      let n = 0;
+      while (line[i] === "\\") {
+        n++;
+        i++;
+      }
+      if (line[i] === '"') {
+        out += "\\".repeat(Math.floor(n / 2));
+        if (n % 2) out += '"';
+        else quoted = !quoted;
+      } else {
+        out += "\\".repeat(n);
+        if (i < line.length) out += line[i];
+      }
+    }
+    return out;
+  }
+
+  test("JSON with escaped quotes and backslashes reaches the program unchanged", () => {
+    for (const arg of [
+      JSON.stringify({ hooks: { StopFailure: [{ command: "printf \"%s\" x > 'C:/a b/f'" }] } }),
+      JSON.stringify({ p: "C:\\Users\\me\\" }),
+      "tail\\\\",
+    ])
+      expect(msvcrtArg(cmdExeQuote(arg, false))).toBe(arg);
   });
 
   test("double escape for a .cmd target carets the carets again", () => {

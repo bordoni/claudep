@@ -343,7 +343,9 @@ Verified on the npm-global Linux build with a throwaway, logged-out config dir: 
   "last_assistant_message": "Not logged in · Please run /login" }
 ```
 
-No `error_details` was present for this error. The matcher is tested against `error`. The error names in the 2.1.322 binary are `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `billing_error`, `rate_limit`, `overloaded`, `invalid_request`, `model_not_found`, `server_error`, `unknown`, `max_output_tokens` and `cloud_credential_error`. `verification_required` ("organization verification required") and `cloud_credential_error` are newer than 2.1.311. Not verified: a login whose refresh token is dead rather than absent. It is expected to end the same way, as `authentication_failed`.
+No `error_details` was present for this error.
+
+**Claude Code does not wait for StopFailure hooks** (2026-11-13, 2.1.323). With `sleep 0; echo x > file` the file was written; with `sleep 0.05` or longer it never was, and a bun script that slept 300 ms wrote nothing even seconds later, so the hook is killed when claude exits about a second after the error. That is why claudep's hooks are one `printf` builtin into a redirect, one entry per error name, and `run` polls for 300 ms after a failed print-mode exit. Five runs of `claudep t -p "reply ok"` on a logged-out throwaway profile all exited 77 with the marker written. The matcher is tested against `error`. The error names in the 2.1.322 binary are `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `billing_error`, `rate_limit`, `overloaded`, `invalid_request`, `model_not_found`, `server_error`, `unknown`, `max_output_tokens` and `cloud_credential_error`. `verification_required` ("organization verification required") and `cloud_credential_error` are newer than 2.1.311. Not verified: a login whose refresh token is dead rather than absent. It is expected to end the same way, as `authentication_failed`.
 
 ## 19. Session records (2026-11-12, 2.1.322)
 

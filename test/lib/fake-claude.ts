@@ -18,6 +18,7 @@
  * (a full pipe blocks a child nobody reads) and FAKE_CLAUDE_SLEEP=<ms> waits.
  * FAKE_CLAUDE_STOP_FAILURE=<error> runs the matching StopFailure hooks from --settings with
  * that error before exiting, as Claude Code does when a turn ends on an API error.
+ * FAKE_CLAUDE_HOOK_DELAY=<ms> runs them that long after the fake exits instead.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -128,11 +129,19 @@ if (stopFailure && at !== -1) {
     process.platform === "win32"
       ? join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "bash.exe")
       : "/bin/sh";
+  const delay = Number(process.env.FAKE_CLAUDE_HOOK_DELAY ?? "0");
   for (const entry of settings.hooks?.StopFailure ?? []) {
     if (entry.matcher && !new RegExp(`^(?:${entry.matcher})$`).test(stopFailure)) continue;
     for (const h of entry.hooks ?? [])
       if (h.type === "command" && h.command)
-        Bun.spawnSync([sh, "-c", h.command], { stdin: new Blob([payload]), stdout: "ignore", stderr: "inherit" });
+        if (delay > 0)
+          // Claude Code does not wait for the hook; this one lands after the fake has exited.
+          Bun.spawn([sh, "-c", `sleep ${delay / 1000}; ${h.command}`], {
+            stdin: new Blob([payload]),
+            stdout: "ignore",
+            stderr: "inherit",
+          }).unref();
+        else Bun.spawnSync([sh, "-c", h.command], { stdin: new Blob([payload]), stdout: "ignore", stderr: "inherit" });
   }
 }
 out(`fake claude ran with: ${argv.join(" ")}`);

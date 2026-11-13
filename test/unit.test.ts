@@ -42,7 +42,6 @@ import {
   helpText,
   homeDir,
   hookHint,
-  hookProfile,
   isInside,
   isKnownPrivate,
   isMsysPath,
@@ -60,6 +59,7 @@ import {
   parentProcessName,
   parseAuthStatus,
   parseEnvFile,
+  parseFailure,
   parseFlags,
   parseLoginFlags,
   parseMcpLine,
@@ -84,7 +84,7 @@ import {
   type Shell,
   type Shim,
   type ShimDeps,
-  STOP_FAILURE_MATCHER,
+  STOP_FAILURES,
   samePath,
   secureStorageOverride,
   settingsEnvConfigDir,
@@ -96,7 +96,7 @@ import {
   shimState,
   shortHome,
   splitPathVar,
-  stopFailureCommand,
+  stopFailureHooks,
   toNativePath,
   validateEnvEntry,
   version,
@@ -1355,7 +1355,9 @@ describe("settingsKeyDiff", () => {
 });
 
 describe("child deadlines", () => {
-  test("CLAUDEP_TIMEOUT is seconds, 0 turns it off, junk keeps the default", () => {
+  test("CLAUDEP_TIMEOUT is seconds, 0 or more than setTimeout can hold turns it off, junk keeps the default", () => {
+    expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "3000000" })).toEqual({ ms: undefined });
+    expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "2147483" })).toEqual({ ms: 2_147_483_000 });
     expect(claudeTimeoutMs({})).toEqual({ ms: DEFAULT_TIMEOUT_S * 1000 });
     expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "2.5" })).toEqual({ ms: 2500 });
     expect(claudeTimeoutMs({ CLAUDEP_TIMEOUT: "0" })).toEqual({ ms: undefined });
@@ -1475,19 +1477,27 @@ describe("runMarkers", () => {
 });
 
 describe("StopFailure markers", () => {
+  const f = { error: "authentication_failed", at: 1, run: "n1" };
+
   test("login errors map to 77 and limits to 75, only for this run in print mode", () => {
-    const f = { error: "authentication_failed", at: 1, run: "n1" };
-    expect(exitAfterRun(f, "n1", 1, true)).toEqual({ code: 77, clear: false, failure: f });
-    expect(exitAfterRun({ ...f, error: "rate_limit" }, "n1", 1, true).code).toBe(75);
-    expect(exitAfterRun({ ...f, error: "billing_error" }, "n1", 1, true).code).toBe(75);
-    expect(exitAfterRun(f, "n2", 1, true)).toEqual({ code: 1, clear: false });
-    expect(exitAfterRun(f, "n1", 1, false)).toEqual({ code: 1, clear: false });
-    expect(exitAfterRun(f, "n1", 0, true)).toEqual({ code: 0, clear: true });
-    expect(exitAfterRun(undefined, "n1", 0, true)).toEqual({ code: 0, clear: false });
+    expect(exitAfterRun(f, "n1", 1, ["-p", "x"])).toEqual({ code: 77, clear: false, failure: f });
+    expect(exitAfterRun({ ...f, error: "rate_limit" }, "n1", 1, ["-p"]).code).toBe(75);
+    expect(exitAfterRun({ ...f, error: "billing_error" }, "n1", 1, ["-p"]).code).toBe(75);
+    expect(exitAfterRun(f, "n2", 1, ["-p"])).toEqual({ code: 1, clear: false });
+    expect(exitAfterRun(f, "n1", 1, ["x"])).toEqual({ code: 1, clear: false });
   });
 
-  test("every error name in the matcher has a kind", () => {
-    for (const e of STOP_FAILURE_MATCHER.split("|")) expect(failureKind(e)).toBeDefined();
+  test("a clean exit clears an older marker only from print mode or a login, never its own", () => {
+    expect(exitAfterRun(f, "n2", 0, ["-p", "x"]).clear).toBe(true);
+    expect(exitAfterRun(f, "n2", 0, ["auth", "login", "--sso"]).clear).toBe(true);
+    expect(exitAfterRun(f, "n2", 0, ["auth", "status"]).clear).toBe(false);
+    expect(exitAfterRun(f, "n2", 0, ["--version"]).clear).toBe(false);
+    expect(exitAfterRun(f, "n1", 0, ["-p", "x"]).clear).toBe(false);
+    expect(exitAfterRun(undefined, "n1", 0, ["-p"]).clear).toBe(false);
+  });
+
+  test("every hooked error has a kind", () => {
+    for (const e of STOP_FAILURES) expect(failureKind(e)).toBeDefined();
     expect(failureKind("server_error")).toBeUndefined();
   });
 
@@ -1498,37 +1508,39 @@ describe("StopFailure markers", () => {
     expect(printMode(["--resume", "id"])).toBe(false);
   });
 
-  test("the hook command quotes for sh and uses slashes on win32", () => {
-    expect(stopFailureCommand("/b/bun", '/a b/$x"y`.ts', "linux")).toBe(
-      '"/b/bun" "/a b/\\$x\\"y\\`.ts" hook stop-failure',
-    );
-    expect(stopFailureCommand("C:\\b\\bun.exe", "C:\\c\\claudep.ts", "win32")).toBe(
-      '"C:/b/bun.exe" "C:/c/claudep.ts" hook stop-failure',
-    );
-  });
-
-  test("runSettings adds the hook after the overlay's own StopFailure hooks and leaves a broken hooks value alone", () => {
-    const own = { matcher: "x", hooks: [{ type: "command", command: "mine" }] };
-    const out = runSettings(undefined, { hooks: { StopFailure: [own], Stop: [] } }, "cmd");
-    expect(out).toEqual({
-      hooks: {
-        Stop: [],
-        StopFailure: [own, { matcher: STOP_FAILURE_MATCHER, hooks: [{ type: "command", command: "cmd" }] }],
-      },
+  test("each hook is one printf into a single-quoted path, with slashes on win32", () => {
+    const [first] = stopFailureHooks("/r/.health/it's", "linux");
+    expect(first).toEqual({
+      matcher: "authentication_failed",
+      hooks: [
+        {
+          type: "command",
+          command: `printf '%s %s\\n' authentication_failed "$CLAUDEP_RUN_ID" > '/r/.health/it'\\''s'`,
+        },
+      ],
     });
-    expect(runSettings(undefined, { hooks: "nope" }, "cmd")).toEqual({ hooks: "nope" });
-    expect(runSettings(undefined, {})).toBeUndefined();
+    expect(stopFailureHooks("C:\\r\\.health\\w", "win32")[0]?.hooks).toEqual([
+      { type: "command", command: `printf '%s %s\\n' authentication_failed "$CLAUDEP_RUN_ID" > 'C:/r/.health/w'` },
+    ]);
+    expect(stopFailureHooks("/x").map((e) => e.matcher)).toEqual([...STOP_FAILURES]);
   });
 
-  test("the hook's profile comes from CLAUDEP_RUN, then the active profile, then default", () => {
-    const env = { HOME: "/h" };
-    const L = layout(env, "linux");
-    expect(hookProfile(L, { CLAUDEP_RUN: "/h/.claudep/work" })).toBe("work");
-    expect(hookProfile(L, { CLAUDEP_RUN: "/elsewhere/work" })).toBeUndefined();
-    expect(hookProfile(L, { CLAUDEP_RUN: "/h/.claudep/run" })).toBeUndefined();
-    expect(hookProfile(layout({ ...env, CLAUDE_CONFIG_DIR: "/h/.claudep/c2" }, "linux"), {})).toBe("c2");
-    expect(hookProfile(L, {})).toBe("default");
-    expect(hookProfile(layout({ ...env, CLAUDE_CONFIG_DIR: "/custom" }, "linux"), {})).toBeUndefined();
+  test("the marker text is an error claudep hooks and an optional run id", () => {
+    const id = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    expect(parseFailure(`rate_limit ${id}\n`, 5000)).toEqual({ error: "rate_limit", at: 5, run: id });
+    expect(parseFailure("rate_limit \n", 5000)).toEqual({ error: "rate_limit", at: 5 });
+    expect(parseFailure("rate_limit; rm -rf /", 0)).toBeUndefined();
+    expect(parseFailure("server_error x", 0)).toBeUndefined();
+  });
+
+  test("runSettings adds the hooks after the overlay's own StopFailure hooks and leaves a broken hooks value alone", () => {
+    const own = { matcher: "x", hooks: [{ type: "command", command: "mine" }] };
+    const ours = stopFailureHooks("/f", "linux");
+    expect(runSettings(undefined, { hooks: { StopFailure: [own], Stop: [] } }, ours)).toEqual({
+      hooks: { Stop: [], StopFailure: [own, ...ours] },
+    });
+    expect(runSettings(undefined, { hooks: "nope" }, ours)).toEqual({ hooks: "nope" });
+    expect(runSettings(undefined, {})).toBeUndefined();
   });
 });
 
@@ -1623,6 +1635,9 @@ describe("mcp list parsing", () => {
       ["a: cmd - \u2298 Disabled for this project (re-enable via /mcp)", "off"],
     ];
     for (const [line, state] of cases) expect(parseMcpLine(line)).toEqual({ name: "a", state: state as McpState });
+    expect(parseMcpLine("a: cat - - \u2713 Connected")).toEqual({ name: "a", state: "connected" });
+    expect(parseMcpLine("<p>x: y - \u2713 Connected")).toBeUndefined();
+    expect(parseMcpLine("plugin:p:srv: cmd - \u2713 Connected")).toEqual({ name: "plugin:p:srv", state: "connected" });
     expect(parseMcpLine("no colon here")).toBeUndefined();
     expect(parseMcpLine("a: b c")).toBeUndefined();
   });
