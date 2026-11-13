@@ -356,6 +356,12 @@ Each live session writes `<config dir>/sessions/<pid>.json`, and Claude Code its
 
 The binary's record reader (search `procStartFt`) keeps `cwd`, `startedAt`, `procStart`, `kind`, `sessionId`, `status`, `entrypoint` and `pidDomain`.
 
+## 20. `claude mcp list` (2026-11-12, 2.1.322)
+
+`claude mcp list` prints "Checking MCP server health…", a blank line, then one line per server: `<name>: <url> (<TYPE>) - <status>` for http and sse, `<name>: <url> - <status>` for claude.ai connectors, `<name>: <command> <args> - <status>` for stdio. An issue follows the status after " — ". The statuses, from `tr()` and the constants beside it: `✓ Connected`, `! Connected · tools fetch failed`, `! Needs authentication`, `- Not configured`, `✘ Failed to connect`, `✘ <error>`, `⏸ Pending approval (run \`claude\` to approve)`, `✘ Rejected (see disabledMcpjsonServers in settings)` and `⊘ Disabled for this project (re-enable via /mcp)`. It exits 0 even when every server failed. Each check connects to the server (`connectToServer`), so stdio servers start and an MCP login can refresh. A run against a throwaway config dir echoed a stdio argument and 600 bytes of a server's HTML error page, which is why `claudep mcp --live` keeps only the name and state.
+
+`mcp-needs-auth-cache.json` maps a server name to `{timestamp, id}`; on the author's machine only the base had one. Claude Code lists it as runtime state.
+
 ## How to re-verify
 
 The fastest way needs no script: byte offsets from a fixed-string grep, then a bounded slice around each one. `/usr/bin/grep` because the shell's `grep` is ugrep and rejects wide context regexes; `tr` because the slice is binary.

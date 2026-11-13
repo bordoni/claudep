@@ -13,6 +13,7 @@ import {
   COMPLETION_SHELLS,
   CREDENTIAL_ENV,
   cachedAuthStatus,
+  cachedMcp,
   canon,
   claudeTimeoutMs,
   commandWords,
@@ -48,6 +49,7 @@ import {
   keychainService,
   layout,
   loginCommand,
+  type McpState,
   MEMORY_SYMLINK_PROMPT_FROM,
   MIN_CLAUDE_VERSION,
   managedSettingsDir,
@@ -60,6 +62,7 @@ import {
   parseEnvFile,
   parseFlags,
   parseLoginFlags,
+  parseMcpLine,
   parseSettingEntry,
   parseShim,
   parseVersion,
@@ -1604,5 +1607,32 @@ describe("readSessions", () => {
   test("procStartOf counts from the last parenthesis", () => {
     const fields = Array.from({ length: 30 }, (_, i) => String(i + 3)).join(" ");
     expect(procStartOf(`123 (a) b) ${fields}`)).toBe("22");
+  });
+});
+
+describe("mcp list parsing", () => {
+  test("each 2.1.322 status maps to a state", () => {
+    const cases: [string, string][] = [
+      ["a: https://x/mcp (HTTP) - \u2713 Connected", "connected"],
+      ["a: https://x/mcp (HTTP) - ! Connected \u00b7 tools fetch failed \u2014 boom", "failed"],
+      ["a: https://x/mcp - ! Needs authentication", "needs-auth"],
+      ["a: cmd --x - - Not configured", "off"],
+      ["a: cmd - \u2718 Failed to connect \u2014 HTTP 405: <html> - \u2713 Connected", "failed"],
+      ["a: cmd - \u23F8 Pending approval (run `claude` to approve)", "off"],
+      ["a: cmd - \u2718 Rejected (see disabledMcpjsonServers in settings)", "off"],
+      ["a: cmd - \u2298 Disabled for this project (re-enable via /mcp)", "off"],
+    ];
+    for (const [line, state] of cases) expect(parseMcpLine(line)).toEqual({ name: "a", state: state as McpState });
+    expect(parseMcpLine("no colon here")).toBeUndefined();
+    expect(parseMcpLine("a: b c")).toBeUndefined();
+  });
+
+  test("cached names come from key names only", () => {
+    const m = cachedMcp({ mcpServers: { x: { env: { T: "s" } } } }, { "claude.ai Y": { timestamp: 1 }, x: {} });
+    expect([...m]).toEqual([
+      ["x", "needs-auth"],
+      ["claude.ai Y", "needs-auth"],
+    ]);
+    expect([...cachedMcp(undefined, undefined)]).toEqual([]);
   });
 });

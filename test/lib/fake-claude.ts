@@ -8,6 +8,7 @@
  *   auth login           writes that file (email from --email or FAKE_CLAUDE_EMAIL)
  *   auth logout          deletes it
  *   --version            prints a fake version
+ *   mcp list             prints FAKE_CLAUDE_MCP, or three servers in 2.1.322's format
  *   -p /usage            prints a result document like 2.1.286's, its text from FAKE_CLAUDE_USAGE
  *                        when set, after logging like anything else
  *   anything else        appends {argv, configDir} to $FAKE_CLAUDE_LOG and exits $FAKE_CLAUDE_EXIT;
@@ -84,6 +85,22 @@ if (argv[0] === "auth" && argv[1] === "logout") {
   rmSync(loginFile, { force: true });
   out(was ? "Logged out" : "Not logged in");
   process.exit(was ? 0 : 1);
+}
+
+if (argv[0] === "mcp" && argv[1] === "list") {
+  if (process.env.FAKE_CLAUDE_LOG)
+    appendFileSync(process.env.FAKE_CLAUDE_LOG, `${JSON.stringify({ argv, cwd: process.cwd() })}\n`);
+  out(
+    process.env.FAKE_CLAUDE_MCP ??
+      [
+        "Checking MCP server health\u2026",
+        "",
+        "nx1: https://mcp.example.com/mcp (HTTP) - \u2713 Connected",
+        "claude.ai Drive: https://claude.ai/x - ! Needs authentication",
+        "local: /usr/bin/thing --token-file /secret/path - \u2718 Failed to connect \u2014 ENOENT",
+      ].join("\n"),
+  );
+  process.exit(0);
 }
 
 const log = process.env.FAKE_CLAUDE_LOG;

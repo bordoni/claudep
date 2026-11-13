@@ -463,6 +463,13 @@ export const COMMANDS: readonly Command[] = [
     arg: "profile",
     flags: ["--json"],
   },
+  {
+    name: "mcp",
+    desc: "MCP server state per profile, from cached names or claude mcp list",
+    arg: "profile",
+    flags: ["--json", "--live", "--cached"],
+    valueFlags: [{ name: "--server" }],
+  },
   { name: "ps", desc: "live Claude Code sessions in every profile", arg: "profile", flags: ["--json", "--stale"] },
   { name: "handoff", desc: "resume this directory's latest session under another profile", arg: "profile" },
   { name: "statusline", desc: "print the profile and its usage from the statusline JSON on stdin" },
@@ -4185,6 +4192,14 @@ async function cmdDoctor(L: Layout, args: string[]): Promise<void> {
         fix: login,
       });
     else if (failure) report.add("stop-failure", failure.error, "info", failureNote(name, failure, login));
+    const authNames = objectKeys(await readJson(join(dir, MCP_AUTH_CACHE)));
+    if (authNames.length)
+      report.add(
+        "mcp",
+        "needs-auth",
+        "info",
+        `MCP servers waiting for auth: ${authNames.join(", ")}. Connect them with /mcp in claudep ${name}`,
+      );
     if (L.platform === "darwin") {
       const svc = keychainService(dir);
       if (await keychainHas(svc)) report.add("keychain", "present", "ok", `keychain item "${svc}" present`);
@@ -4409,6 +4424,176 @@ async function cmdRm(L: Layout, args: string[]): Promise<void> {
   ok(`removed ${dir}`);
   for (const shim of findShims(shimDirs(L), L.platform))
     if (shim.profile === name) warn(`alias shim ${shim.path} still points at this profile. Remove it if unused`);
+}
+
+// ---------------------------------------------------------------------------
+// MCP servers. Cached mode reads only key names: the servers in mcpServers of a
+// .claude.json and the entries of mcp-needs-auth-cache.json. Values, env and
+// headers are never read. Live mode runs `claude mcp list` and keeps the name
+// and a state word from each line, because the rest can hold stdio args and URLs.
+// ---------------------------------------------------------------------------
+
+export type McpState = "connected" | "needs-auth" | "failed" | "off" | "unknown";
+export const MCP_AUTH_CACHE = "mcp-needs-auth-cache.json";
+
+function objectKeys(v: unknown): string[] {
+  return v && typeof v === "object" && !Array.isArray(v) ? Object.keys(v) : [];
+}
+
+/** Server names and what the files alone say about them. */
+export function cachedMcp(
+  globalJson: JsonObject | undefined,
+  authCache: JsonObject | undefined,
+): Map<string, McpState> {
+  const out = new Map<string, McpState>();
+  for (const n of objectKeys(globalJson?.mcpServers)) out.set(n, "unknown");
+  for (const n of objectKeys(authCache)) out.set(n, "needs-auth");
+  return out;
+}
+
+/** One `claude mcp list` line as name and state, from the status after the
+ *  first " - " that a status mark follows. A line it cannot read is dropped. */
+export function parseMcpLine(line: string): { name: string; state: McpState } | undefined {
+  const colon = line.indexOf(": ");
+  if (colon <= 0) return undefined;
+  const name = line.slice(0, colon);
+  const m = /\s-\s([\u2713\u2714!\u2718\u2717\u23F8\u2298-])\s(.*)$/u.exec(line.slice(colon + 2));
+  if (!m) return undefined;
+  const mark = m[1] as string;
+  const text = (m[2] as string).split(" \u2014 ")[0] as string;
+  let state: McpState = "unknown";
+  if (mark === "\u2713" || mark === "\u2714") state = text.startsWith("Connected") ? "connected" : "unknown";
+  else if (mark === "!") state = text.startsWith("Needs authentication") ? "needs-auth" : "failed";
+  else if (mark === "\u2718" || mark === "\u2717") state = text.startsWith("Rejected") ? "off" : "failed";
+  else state = "off";
+  return { name, state };
+}
+
+export function parseMcpList(out: string): { servers: Map<string, McpState>; unread: number } {
+  const servers = new Map<string, McpState>();
+  let unread = 0;
+  for (const raw of out.split("\n")) {
+    const line = raw.trimEnd();
+    if (line === "" || line.startsWith("Checking MCP server health") || line.startsWith("No MCP servers configured"))
+      continue;
+    const p = parseMcpLine(line);
+    if (p) servers.set(p.name, p.state);
+    else unread++;
+  }
+  return { servers, unread };
+}
+
+export type McpRow = {
+  profile: string;
+  mode: "cached" | "live";
+  servers: Map<string, McpState>;
+  timedOut?: boolean;
+  unread?: number;
+};
+
+export function formatMcpTable(rows: readonly McpRow[], only: readonly string[]): string[] {
+  const names = only.length ? [...only] : [...new Set(rows.flatMap((r) => [...r.servers.keys()]))].sort();
+  const cols = ["SERVER", ...rows.map((r) => r.profile)];
+  const data = names.map((n) => [n, ...rows.map((r) => r.servers.get(n) ?? "-")]);
+  const widths = cols.map((h, i) => Math.max(h.length, ...data.map((d) => (d[i] as string).length)));
+  const fmt = (cells: string[]) =>
+    cells
+      .map((v, i) => v.padEnd(widths[i] as number))
+      .join("  ")
+      .trimEnd();
+  return [fmt(cols), ...data.map((d) => fmt(d))];
+}
+
+async function mcpRow(L: Layout, name: string, live: boolean): Promise<McpRow> {
+  const dir = name === "default" ? L.base : profileDir(L, name);
+  if (live) {
+    // From the profile dir, so no project's .mcp.json is read.
+    const { cmd, verbatim } = claudeSpawn(await claudeLaunch(L), ["mcp", "list"]);
+    const proc = Bun.spawn(cmd, {
+      cwd: dir,
+      env: claudeEnv(L, name === "default" ? undefined : dir),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      windowsVerbatimArguments: verbatim,
+    });
+    const out = new Response(proc.stdout).text().catch(() => "");
+    void new Response(proc.stderr).text().catch(() => "");
+    const { timedOut } = await awaitWithDeadline(proc.exited, childTimeoutMs(), KILL_GRACE_MS, {
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+      kill: (signal) => proc.kill(signal),
+    });
+    if (!timedOut) {
+      const { servers, unread } = parseMcpList(await out);
+      return { profile: name, mode: "live", servers, ...(unread ? { unread } : {}) };
+    }
+    const cached = await mcpRow(L, name, false);
+    return { ...cached, timedOut: true };
+  }
+  const globalJson = await readJson(name === "default" ? L.baseGlobalJson : join(dir, ".claude.json"));
+  const authCache = await readJson(join(dir, MCP_AUTH_CACHE));
+  return { profile: name, mode: "cached", servers: cachedMcp(globalJson, authCache) };
+}
+
+/** `claudep mcp [names…] [--live|--cached] [--json] [--server <s>]…`. Exits 77
+ *  when a named server, or with none named any server, needs auth. */
+async function cmdMcp(L: Layout, args: string[]): Promise<void> {
+  const f = parseFlags(args, ...flagSpec("mcp"));
+  const names = f.rest.length ? f.rest : ["default", ...listProfileNames(L)];
+  for (const n of names) if (n !== "default" && !profileExists(L, n)) die(`profile "${n}" does not exist`);
+  if (f.bools.has("--live") && f.bools.has("--cached")) die("pass --live or --cached, not both", EXIT.usage);
+  let live = f.bools.has("--live");
+  if (live) {
+    const v = await claudeVersion(L);
+    if (!authStatusSafe(v)) {
+      console.error(
+        `claudep: Claude Code ${v?.join(".") ?? "of unknown version"} can sign a profile out on a short command (${AUTH_STATUS_ISSUE}, fixed in ${SAFE_AUTH_STATUS_FROM}); showing cached names`,
+      );
+      live = false;
+    }
+  }
+  const only = f.lists.get("--server") ?? [];
+  const rows = await Promise.all(names.map((n) => mcpRow(L, n, live)));
+  const needsAuth = rows.some((r) =>
+    [...r.servers].some(([n, st]) => st === "needs-auth" && (only.length === 0 || only.includes(n))),
+  );
+  if (f.bools.has("--json")) {
+    const pick = (m: Map<string, McpState>) =>
+      Object.fromEntries([...m].filter(([n]) => only.length === 0 || only.includes(n)));
+    console.log(
+      JSON.stringify(
+        rows.map((r) => ({
+          profile: r.profile,
+          mode: r.mode,
+          ...(r.timedOut ? { timedOut: true } : {}),
+          ...(r.unread ? { unread: r.unread } : {}),
+          servers: pick(r.servers),
+        })),
+        null,
+        2,
+      ),
+    );
+  } else {
+    const [header, ...lines] = formatMcpTable(rows, only);
+    console.log(c.bold(header as string));
+    for (const line of lines) console.log(line);
+    if (!lines.length) console.log(c.dim("No MCP servers found."));
+    if (!live)
+      console.log(
+        c.dim(
+          "\nFrom file names only: unknown = configured in .claude.json, needs-auth = in mcp-needs-auth-cache.json. claude.ai connectors show only once they need auth. --live asks claude mcp list",
+        ),
+      );
+    for (const r of rows) {
+      if (r.timedOut) console.log(c.dim(`${r.profile}: claude mcp list did not answer in time; showing cached names`));
+      if (r.unread)
+        console.log(
+          c.dim(`${r.profile}: ${r.unread} line(s) of claude mcp list were not understood and are not shown`),
+        );
+    }
+  }
+  if (needsAuth) process.exit(EXIT.login);
 }
 
 // ---------------------------------------------------------------------------
@@ -4663,6 +4848,8 @@ ${c.bold("USAGE")}
                                        remembers the numbers for claudep usage
   claudep doctor [name] [--json]       verify symlinks, keychain entry, unclassified files, shims, Claude Code version
   claudep doctor --accept <name> <item>   stop counting one shared item as a problem; --unaccept undoes it
+  claudep mcp [name…] [--live] [--server <s>]…   MCP servers per profile: names from the files, or claude mcp list
+                                       with --live; exits 77 when one needs auth
   claudep ps [name…] [--json] [--stale]   live Claude Code sessions in every profile; --stale only older versions
   claudep rm <name> [--keep-login]     log out and delete a profile (base is never touched); refuses
                                        one with live sessions unless --force
@@ -4792,6 +4979,8 @@ export async function main(argv: string[]): Promise<void> {
       return cmdHandoff(L, args);
     case "ps":
       return cmdPs(L, args);
+    case "mcp":
+      return cmdMcp(L, args);
     case "hook":
       return cmdHook(L, args);
     case "statusline":

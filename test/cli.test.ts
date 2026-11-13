@@ -2183,3 +2183,79 @@ describe("ps", () => {
     expect((await runCli(["init", "ps", "--no-login"], { home: h.home })).stderr).toContain("reserved");
   });
 });
+
+describe("mcp", () => {
+  test("cached mode reads server names from .claude.json and the needs-auth cache, and exits 77 for one", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const dir = join(h.profilesRoot, "work");
+    writeFileSync(
+      join(dir, ".claude.json"),
+      JSON.stringify({
+        mcpServers: { nx1: { type: "http", url: "https://secret.example/mcp", headers: { A: "tok" } } },
+      }),
+    );
+    writeFileSync(join(dir, "mcp-needs-auth-cache.json"), JSON.stringify({ "claude.ai Drive": { timestamp: 1 } }));
+    const r = await runCli(["mcp", "work"], { home: h.home });
+    expect(r.exitCode).toBe(77);
+    expect(r.stdout).toMatch(/^SERVER\s+work$/m);
+    expect(r.stdout).toMatch(/^claude\.ai Drive\s+needs-auth$/m);
+    expect(r.stdout).toMatch(/^nx1\s+unknown$/m);
+    expect(r.stdout).not.toContain("secret.example");
+    expect(r.stdout).not.toContain("tok");
+    const one = await runCli(["mcp", "work", "--server", "nx1", "--json"], { home: h.home });
+    expect(one.exitCode).toBe(0);
+    expect(JSON.parse(one.stdout)).toEqual([{ profile: "work", mode: "cached", servers: { nx1: "unknown" } }]);
+    const doctor = await runCli(["doctor", "work"], { home: h.home });
+    expect(doctor.stdout).toContain("MCP servers waiting for auth: claude.ai Drive");
+  });
+
+  test("--live runs claude mcp list from the profile dir and keeps only names and states", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const log = join(h.home, "claude.log");
+    const r = await runCli(["mcp", "work", "--live", "--json"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_VERSION: "2.1.322 (Claude Code)", FAKE_CLAUDE_LOG: log },
+    });
+    expect(r.exitCode).toBe(77);
+    expect(JSON.parse(r.stdout)).toEqual([
+      {
+        profile: "work",
+        mode: "live",
+        servers: { nx1: "connected", "claude.ai Drive": "needs-auth", local: "failed" },
+      },
+    ]);
+    expect(r.stdout).not.toContain("/secret/path");
+    const call = JSON.parse(readFileSync(log, "utf8").trim().split("\n").at(-1) as string);
+    expect(realpathSync(call.cwd)).toBe(realpathSync(join(h.profilesRoot, "work")));
+    const odd = await runCli(["mcp", "work", "--live"], {
+      home: h.home,
+      env: {
+        FAKE_CLAUDE_VERSION: "2.1.322 (Claude Code)",
+        FAKE_CLAUDE_MCP: "weird https://leak.example/x?k=v\nok: x - \u2713 Connected",
+      },
+    });
+    expect(odd.exitCode).toBe(0);
+    expect(odd.stdout).not.toContain("leak.example");
+    expect(odd.stdout).toContain("1 line(s) of claude mcp list were not understood");
+  });
+
+  test("--live below 2.1.301 falls back to cached names", async () => {
+    using h = fakeHome();
+    await runCli(["init", "work", "--no-login"], { home: h.home });
+    const log = join(h.home, "claude.log");
+    const r = await runCli(["mcp", "work", "--live", "--json"], {
+      home: h.home,
+      env: { FAKE_CLAUDE_VERSION: "2.1.300 (Claude Code)", FAKE_CLAUDE_LOG: log },
+    });
+    expect(JSON.parse(r.stdout)[0].mode).toBe("cached");
+    expect(r.stderr).toContain("95822");
+    expect(existsSync(log)).toBe(false);
+  });
+
+  test("mcp is a reserved profile name", async () => {
+    using h = fakeHome();
+    expect((await runCli(["init", "mcp", "--no-login"], { home: h.home })).stderr).toContain("reserved");
+  });
+});

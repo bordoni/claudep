@@ -239,6 +239,16 @@ claudep ps --stale      # only sessions on a Claude Code older than the one inst
 
 Each running Claude Code session writes `sessions/<pid>.json` in its config dir. `claudep ps` reads those files and nothing else in the folder, so the `.key` files next to them, which hold a peer token, are never opened. It shows the profile, pid, name, status and how long it has held it, kind, version and working directory, and skips a record whose process is gone. On Linux it also skips one whose pid now belongs to another process or another pid namespace. `claudep rm` refuses a profile with live sessions, because its logout revokes the token under them; `--force` removes it anyway.
 
+## MCP servers per profile
+
+```sh
+claudep mcp                      # server × profile table from the files, no subprocess
+claudep mcp work --live          # ask claude mcp list in that profile
+claudep mcp --server nx1 --json  # one server everywhere; exit 77 if it needs auth
+```
+
+By default `claudep mcp` reads only names: the servers in each `.claude.json` `mcpServers` (shown as `unknown`) and the entries of `mcp-needs-auth-cache.json` (`needs-auth`). It never reads a value, so URLs, env and headers stay where they are. claude.ai connectors show up only once Claude Code has cached them as needing auth. `--live` runs `claude mcp list` in each profile, from the profile's own folder so no project `.mcp.json` is read, and keeps the name and one word per server: `connected`, `needs-auth`, `failed`, `off` or `unknown`. A line it cannot read is counted, never printed, because those lines carry stdio arguments and URLs. `--live` connects to every server, which starts stdio servers and can refresh MCP logins, so it is never the default; below Claude Code 2.1.301 it falls back to the names. It exits 77 when a server named with `--server` needs auth, or with none named, any server. `claudep doctor` lists the servers waiting for auth.
+
 ## Hand a session to another profile
 
 When one account hits its limit, carry on in another:
